@@ -3,11 +3,16 @@
 Business modules are registered here as they are implemented. Each module lives
 in its own package (`app.api.v1.<module>`) and exposes a router that is included
 below, so `v1` stays a single, obvious entry point.
+
+Company-owned modules are mounted under `/companies/{company_id}/...` so the
+owning company is part of every address, not something each handler has to
+remember.
 """
 
 from fastapi import APIRouter
 
 from app.api.v1.companies.router import router as companies_router
+from app.api.v1.vendors.router import router as vendors_router
 from app.core.config import get_settings
 from app.schemas import HealthResponse
 
@@ -30,18 +35,24 @@ def health() -> HealthResponse:
 # Implemented modules
 # ---------------------------------------------------------------------------
 api_router.include_router(companies_router, prefix="/companies", tags=["companies"])
+api_router.include_router(
+    vendors_router, prefix="/companies/{company_id}/vendors", tags=["vendors"]
+)
 
 
 # ---------------------------------------------------------------------------
-# Future modules - registered as each feature is implemented.
+# Future modules - all company-scoped, all mounted under /companies/{company_id}.
 #
-#   api_router.include_router(documents.router,       prefix="/documents",       tags=["documents"])
-#   api_router.include_router(invoices.router,        prefix="/invoices",        tags=["invoices"])
-#   api_router.include_router(bank_statements.router, prefix="/bank-statements", tags=["bank-statements"])
-#   api_router.include_router(vendors.router,         prefix="/vendors",         tags=["vendors"])
-#   api_router.include_router(tally.router,           prefix="/tally",           tags=["tally"])
-#   api_router.include_router(zoho.router,            prefix="/zoho",            tags=["zoho"])
-#   api_router.include_router(gst.router,             prefix="/gst",             tags=["gst"])
-#   api_router.include_router(tds.router,             prefix="/tds",             tags=["tds"])
-#   api_router.include_router(reconciliation.router,  prefix="/reconciliation",  tags=["reconciliation"])
+#   api_router.include_router(documents.router,       prefix="/companies/{company_id}/documents",       tags=["documents"])
+#   api_router.include_router(invoices.router,        prefix="/companies/{company_id}/invoices",        tags=["invoices"])
+#   api_router.include_router(bank_statements.router, prefix="/companies/{company_id}/bank-statements", tags=["bank-statements"])
+#   api_router.include_router(gst.router,             prefix="/companies/{company_id}/gst",             tags=["gst"])
+#   api_router.include_router(tds.router,             prefix="/companies/{company_id}/tds",             tags=["tds"])
+#   api_router.include_router(reconciliation.router,  prefix="/companies/{company_id}/reconciliation",  tags=["reconciliation"])
+#
+# Integration modules are company-wide rather than company-owned, so they stay
+# at the top level:
+#
+#   api_router.include_router(tally.router,           prefix="/companies/{company_id}/tally",           tags=["tally"])
+#   api_router.include_router(zoho.router,            prefix="/companies/{company_id}/zoho",            tags=["zoho"])
 # ---------------------------------------------------------------------------

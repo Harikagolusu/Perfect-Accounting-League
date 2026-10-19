@@ -60,9 +60,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [role, setRole] = useState<Store["role"]>("Partner");
 
   // The mock list stays only as a fallback, so pages still showing module mock
-  // data (vendors, invoices, GST, ...) keep working before the backend returns
-  // companies or while it is unreachable. Those modules get real data in their
-  // own steps, after which the fallback can go.
+  // data (invoices, GST, ...) keep working before the backend returns companies
+  // or while it is unreachable. Those modules get real data in their own steps,
+  // after which the fallback can go.
   const { data: apiCompanies } = useCompanies(true);
   const companies = apiCompanies?.length ? apiCompanies : mock.companies;
 
@@ -89,6 +89,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     localStorage.setItem(PREFS_KEY, JSON.stringify({ companyId, financialYear, period }));
   }, [companyId, financialYear, period]);
+
+  // The selected company must be a real backend UUID, because company-scoped
+  // requests address /companies/{company_id}/... and an id like "c1" does not
+  // exist there. Real companies have no "c1", so the first real one is picked.
+  // While the API is unreachable the list is the mock one, which still has
+  // "c1", so the existing demo behaviour is preserved.
+  useEffect(() => {
+    if (!companies.length) return;
+    if (companyId && companies.some((c) => c.id === companyId)) return;
+    setCompanyId(companies.find((c) => c.id === "c1")?.id ?? companies[0].id);
+  }, [companies, companyId]);
 
   const value = useMemo<Store>(() => {
     const now = () => new Date().toISOString().slice(0, 16).replace("T", " ");

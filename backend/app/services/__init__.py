@@ -1,8 +1,9 @@
 """Business logic layer.
 
-Routers stay thin and delegate here. Intentionally empty until features land.
+Routers stay thin and delegate here.
 """
 
 from app.services.company import CompanyNotFoundError
+from app.services.vendor import VendorNotFoundError
 
-__all__ = ["CompanyNotFoundError"]
+__all__ = ["CompanyNotFoundError", "VendorNotFoundError"]

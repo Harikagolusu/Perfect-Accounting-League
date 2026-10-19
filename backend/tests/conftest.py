@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-# Importing the models registers them on Base.metadata, which is what
-# create_all() builds from.
+# Registers every ORM model on Base.metadata, which is what create_all() builds
+# from. Imported explicitly rather than relying on app.main pulling it in.
+import app.models  # noqa: F401  (imported for its registration side effect)
 from app.core.database import Base, get_db
 from app.main import app
 

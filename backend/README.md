@@ -104,8 +104,8 @@ would also have left two columns able to disagree about the same fact, so
 `status` is now the single source of truth and **soft delete is
 `status = 'INACTIVE'`** rather than a separate flag.
 
-`ACTIVATE` and `ONBOARDING` are both live states. Only `INACTIVE` is filtered
-out of default listings.
+`ACTIVE` and `ONBOARDING` are both live states. Only `INACTIVE` is filtered out
+of default listings.
 
 Validation is format-only: `gstin`, `pan` and `email` are checked against the
 same patterns the frontend uses in `src/lib/format.ts`, so both sides accept
@@ -170,7 +170,7 @@ cp .env.example .env        # macOS / Linux
 | `DEBUG` | `true` | Debug mode and SQLAlchemy statement echo |
 | `DATABASE_URL` | `postgresql+psycopg://postgres:postgres@localhost:5432/pal_db` | SQLAlchemy 2.x URL (psycopg driver) |
 | `API_V1_PREFIX` | `/api/v1` | Prefix for versioned routes |
-| `CORS_ORIGINS` | `http://localhost:5173` | Comma-separated allowed origins |
+| `CORS_ORIGINS` | `http://localhost:8080,http://localhost:5173` | Comma-separated allowed origins |
 
 Tests read `TEST_DATABASE_URL` (default `.../pal_test_db`) and never touch the
 dev database.
@@ -266,15 +266,34 @@ Swagger UI: <http://127.0.0.1:8000/docs> · ReDoc: <http://127.0.0.1:8000/redoc>
   `updated_at`, and returns the updated company so the record stays available
   for audit.
 
-## Frontend integration
+## Running it together with the frontend
 
-The frontend reads this API through `src/lib/api/` and `src/lib/queries/`
-(see the root `README.md`). Point it at the backend with:
+The frontend reads this API through `src/lib/api/` and `src/lib/queries/`.
+
+Two things have to line up, and both are configuration rather than code:
+
+1. **Frontend port.** `bun run dev` serves the app on
+   <http://localhost:8080>. That origin must be in `CORS_ORIGINS`.
+2. **Backend port.** Tell the frontend where the API is, in `.env.local` at the
+   repository root:
+
+   ```sh
+   VITE_API_BASE_URL=http://localhost:8000
+   ```
+
+Then start both:
 
 ```sh
-# .env.local in the repository root
-VITE_API_BASE_URL=http://localhost:8000
+# terminal 1
+cd backend && uvicorn app.main:app --reload
+
+# terminal 2
+bun run dev
 ```
+
+If you move either port, update `CORS_ORIGINS` and `VITE_API_BASE_URL` to
+match — a mismatch shows up as the Companies page rendering "Could not load
+companies" rather than a visible network error.
 
 ## Planned modules
 
