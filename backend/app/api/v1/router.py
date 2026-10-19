@@ -12,6 +12,7 @@ remember.
 from fastapi import APIRouter
 
 from app.api.v1.companies.router import router as companies_router
+from app.api.v1.documents.router import router as documents_router
 from app.api.v1.vendors.router import router as vendors_router
 from app.core.config import get_settings
 from app.schemas import HealthResponse
@@ -38,12 +39,14 @@ api_router.include_router(companies_router, prefix="/companies", tags=["companie
 api_router.include_router(
     vendors_router, prefix="/companies/{company_id}/vendors", tags=["vendors"]
 )
+api_router.include_router(
+    documents_router, prefix="/companies/{company_id}/documents", tags=["documents"]
+)
 
 
 # ---------------------------------------------------------------------------
 # Future modules - all company-scoped, all mounted under /companies/{company_id}.
 #
-#   api_router.include_router(documents.router,       prefix="/companies/{company_id}/documents",       tags=["documents"])
 #   api_router.include_router(invoices.router,        prefix="/companies/{company_id}/invoices",        tags=["invoices"])
 #   api_router.include_router(bank_statements.router, prefix="/companies/{company_id}/bank-statements", tags=["bank-statements"])
 #   api_router.include_router(gst.router,             prefix="/companies/{company_id}/gst",             tags=["gst"])

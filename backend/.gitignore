@@ -18,6 +18,9 @@ dist/
 .coverage
 htmlcov/
 
+# Local document storage: uploaded client files are never committed.
+storage/
+
 # Local environment / secrets
 .env
 .env.*

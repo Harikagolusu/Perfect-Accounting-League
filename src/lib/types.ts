@@ -35,6 +35,7 @@ export interface Vendor {
 }
 
 export type DocStatus =
+  | "Uploaded"
   | "Received"
   | "Queued"
   | "Processing"
@@ -51,6 +52,8 @@ export interface InboxDocument {
   source: "Email" | "Manual Upload";
   receivedAt: string;
   fileType: string;
+  /** Backend classification. "Unknown" until a processing step identifies it. */
+  documentType?: "Unknown" | "Invoice" | "Bank Statement" | "Other";
   status: DocStatus;
   reviewer: string;
   size: number;
@@ -66,7 +69,8 @@ export interface InvoiceLineItem {
   taxRate: number;
 }
 
-export type MappingCategory = "Exact GSTIN/PAN Match" | "Description/Keyword Match" | "Manual Review Required";
+export type MappingCategory =
+  "Exact GSTIN/PAN Match" | "Description/Keyword Match" | "Manual Review Required";
 
 export interface LedgerMapping {
   id: string;

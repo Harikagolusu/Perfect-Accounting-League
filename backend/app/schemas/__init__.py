@@ -3,6 +3,7 @@
 from pydantic import BaseModel
 
 from app.schemas.company import CompanyCreate, CompanyResponse, CompanyUpdate
+from app.schemas.document import DocumentResponse
 from app.schemas.vendor import VendorCreate, VendorResponse, VendorUpdate
 
 
@@ -17,6 +18,7 @@ __all__ = [
     "CompanyCreate",
     "CompanyResponse",
     "CompanyUpdate",
+    "DocumentResponse",
     "HealthResponse",
     "VendorCreate",
     "VendorResponse",

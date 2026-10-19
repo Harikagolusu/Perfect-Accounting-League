@@ -52,9 +52,12 @@ export async function apiFetch<T>(
   init: RequestInit = {},
   params?: QueryParams,
 ): Promise<T> {
+  // FormData keeps its own Content-Type so the browser can add the multipart
+  // boundary; setting one by hand produces an unparseable body.
+  const isFormData = typeof FormData !== "undefined" && init.body instanceof FormData;
   const headers: Record<string, string> = {
     Accept: "application/json",
-    ...(init.body ? { "Content-Type": "application/json" } : {}),
+    ...(init.body && !isFormData ? { "Content-Type": "application/json" } : {}),
     ...(init.headers as Record<string, string> | undefined),
   };
 
@@ -67,6 +70,9 @@ export async function apiFetch<T>(
       detailToMessage(response.status, (payload as { detail?: unknown } | null)?.detail),
     );
   }
+
+  // 204 No Content, used by deletes.
+  if (response.status === 204) return undefined as T;
 
   return payload as T;
 }

@@ -6,6 +6,7 @@ local `.env` file (see `.env.example`).
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -35,6 +36,20 @@ class Settings(BaseSettings):
     # --- CORS ----------------------------------------------------------
     # Comma-separated list of allowed origins, e.g. "http://localhost:5173".
     cors_origins: str = "http://localhost:5173"
+
+    # --- Document storage ----------------------------------------------
+    # PAL runs inside the client's own environment, so uploaded documents are
+    # kept on local disk. A relative path resolves against the process working
+    # directory (the backend/ folder). Never point this at a shared or
+    # unencrypted location on a multi-user machine.
+    document_storage_path: str = "./storage/documents"
+    # Uploads above this size are rejected before anything touches disk.
+    document_max_upload_bytes: int = 20 * 1024 * 1024  # 20 MB
+
+    @property
+    def document_storage_dir(self) -> Path:
+        """Absolute, expanded storage root for uploaded documents."""
+        return Path(self.document_storage_path).expanduser().resolve()
 
     @property
     def cors_origins_list(self) -> list[str]:

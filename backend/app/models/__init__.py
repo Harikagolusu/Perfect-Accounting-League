@@ -6,6 +6,15 @@ environments is what makes new models visible to autogenerate.
 """
 
 from app.models.company import Company, CompanyStatus
+from app.models.document import Document, DocumentStatus, DocumentType
 from app.models.vendor import Vendor, VendorStatus
 
-__all__ = ["Company", "CompanyStatus", "Vendor", "VendorStatus"]
+__all__ = [
+    "Company",
+    "CompanyStatus",
+    "Document",
+    "DocumentStatus",
+    "DocumentType",
+    "Vendor",
+    "VendorStatus",
+]

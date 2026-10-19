@@ -1,0 +1,1 @@
+"""Document Inbox API module."""

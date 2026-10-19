@@ -5,6 +5,8 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 python-dotenv>=1.0.0
+# Required by FastAPI to parse multipart/form-data file uploads.
+python-multipart>=0.0.9
 
 # Database
 # --------------------------------------------------------------------------
