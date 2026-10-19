@@ -1,0 +1,159 @@
+"""Invoice ORM model — structured accounting data for one invoice.
+
+Domain separation
+-----------------
+A `Document` is the uploaded physical file. An `Invoice` is the structured
+data read from or entered against it. A `Vendor` is the supplier master. These
+stay separate:
+
+* an invoice references its source document by `document_id`;
+* it may reference a vendor master record by `vendor_id`, which stays optional;
+* the supplier name/GSTIN/PAN *printed on the invoice* are stored as text on
+  the invoice itself. They are what the document says, and must stay readable
+  even when no vendor master record is (or ever will be) linked.
+
+There are deliberately no line-item, ledger-mapping or export columns: those
+belong to later, separate entities.
+
+Money is `NUMERIC`, never float. Python-side values are `Decimal` all the way
+through, so no binary-floating-point error can enter an accounting total.
+"""
+
+from __future__ import annotations
+
+import enum
+import uuid
+from datetime import date, datetime
+from decimal import Decimal
+
+from sqlalchemy import Date, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, func
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.core.database import Base
+
+# 15 total digits, 2 decimal places. Comfortably above any realistic invoice
+# value while staying well inside PostgreSQL's NUMERIC range.
+MONEY = Numeric(15, 2)
+
+
+class InvoiceStatus(str, enum.Enum):
+    """Where an invoice sits in the review pipeline.
+
+    An invoice is only `PROCESSED` once extraction and validation completed;
+    merely having a row means nothing.
+    """
+
+    DRAFT = "DRAFT"
+    PROCESSING = "PROCESSING"
+    PROCESSED = "PROCESSED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    FAILED = "FAILED"
+
+
+class InvoiceSource(str, enum.Enum):
+    """Where the invoice data came from.
+
+    Only `MANUAL` exists today: a person typed these values in. OCR and AI
+    values are added when an extraction engine is actually configured, so the
+    enum never claims work that did not happen.
+    """
+
+    MANUAL = "MANUAL"
+
+
+INVOICE_STATUS_ENUM = SAEnum(
+    InvoiceStatus,
+    name="invoice_status",
+    values_callable=lambda enum_cls: [member.value for member in enum_cls],
+)
+
+INVOICE_SOURCE_ENUM = SAEnum(
+    InvoiceSource,
+    name="invoice_source",
+    values_callable=lambda enum_cls: [member.value for member in enum_cls],
+)
+
+
+class Invoice(Base):
+    """Structured data for one invoice, belonging to exactly one company."""
+
+    __tablename__ = "invoices"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    # Scoping: every read filters on company_id, exactly as Vendor and Document do.
+    company_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("companies.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # The source artifact. Deleting an invoice never deletes the document.
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # Optional link to the supplier master. Not auto-created, never guessed.
+    vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vendors.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    invoice_number: Mapped[str | None] = mapped_column(String(128))
+    invoice_date: Mapped[date | None] = mapped_column(Date)
+    due_date: Mapped[date | None] = mapped_column(Date)
+
+    # As printed on the invoice. Not the vendor master.
+    vendor_name: Mapped[str | None] = mapped_column(String(255))
+    vendor_gstin: Mapped[str | None] = mapped_column(String(15))
+    vendor_pan: Mapped[str | None] = mapped_column(String(10))
+    buyer_gstin: Mapped[str | None] = mapped_column(String(15))
+    po_number: Mapped[str | None] = mapped_column(String(128))
+
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="INR", server_default="INR"
+    )
+
+    taxable_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    cgst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    sgst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    igst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    cess_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    round_off: Mapped[Decimal | None] = mapped_column(MONEY)
+    total_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+
+    status: Mapped[InvoiceStatus] = mapped_column(
+        INVOICE_STATUS_ENUM,
+        nullable=False,
+        default=InvoiceStatus.DRAFT,
+        server_default=InvoiceStatus.DRAFT.value,
+    )
+    source: Mapped[InvoiceSource] = mapped_column(
+        INVOICE_SOURCE_ENUM,
+        nullable=False,
+        default=InvoiceSource.MANUAL,
+        server_default=InvoiceSource.MANUAL.value,
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<Invoice id={self.id} company_id={self.company_id} "
+            f"document_id={self.document_id} number={self.invoice_number!r} "
+            f"status={self.status.value}>"
+        )

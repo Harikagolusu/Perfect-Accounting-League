@@ -4,6 +4,12 @@ from pydantic import BaseModel
 
 from app.schemas.company import CompanyCreate, CompanyResponse, CompanyUpdate
 from app.schemas.document import DocumentResponse
+from app.schemas.invoice import (
+    InvoiceCreate,
+    InvoiceResponse,
+    InvoiceUpdate,
+    ProcessInvoiceResponse,
+)
 from app.schemas.vendor import VendorCreate, VendorResponse, VendorUpdate
 
 
@@ -20,6 +26,10 @@ __all__ = [
     "CompanyUpdate",
     "DocumentResponse",
     "HealthResponse",
+    "InvoiceCreate",
+    "InvoiceResponse",
+    "InvoiceUpdate",
+    "ProcessInvoiceResponse",
     "VendorCreate",
     "VendorResponse",
     "VendorUpdate",

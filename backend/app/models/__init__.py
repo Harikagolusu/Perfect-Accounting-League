@@ -7,6 +7,7 @@ environments is what makes new models visible to autogenerate.
 
 from app.models.company import Company, CompanyStatus
 from app.models.document import Document, DocumentStatus, DocumentType
+from app.models.invoice import Invoice, InvoiceSource, InvoiceStatus
 from app.models.vendor import Vendor, VendorStatus
 
 __all__ = [
@@ -15,6 +16,9 @@ __all__ = [
     "Document",
     "DocumentStatus",
     "DocumentType",
+    "Invoice",
+    "InvoiceSource",
+    "InvoiceStatus",
     "Vendor",
     "VendorStatus",
 ]
