@@ -1,0 +1,1 @@
+"""PAL Accounting Automation API - application package."""
