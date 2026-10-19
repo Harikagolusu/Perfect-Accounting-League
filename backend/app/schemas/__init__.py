@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel
 
+from app.schemas.company import CompanyCreate, CompanyResponse, CompanyUpdate
+
 
 class HealthResponse(BaseModel):
     """Payload returned by the liveness probe."""
@@ -10,4 +12,9 @@ class HealthResponse(BaseModel):
     service: str
 
 
-__all__ = ["HealthResponse"]
+__all__ = [
+    "CompanyCreate",
+    "CompanyResponse",
+    "CompanyUpdate",
+    "HealthResponse",
+]

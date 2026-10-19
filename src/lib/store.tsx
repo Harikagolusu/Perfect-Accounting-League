@@ -2,9 +2,18 @@
 // replace the initial mock arrays with fetched data and the setters with mutations.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import * as mock from "./mock-data";
+import { useCompanies } from "./queries/companies";
 import type {
-  AuditEvent, BankTransaction, Company, ExportJob, InboxDocument, LedgerMapping,
-  ReconciliationRecord, ReviewTask, TDSWorking, Vendor,
+  AuditEvent,
+  BankTransaction,
+  Company,
+  ExportJob,
+  InboxDocument,
+  LedgerMapping,
+  ReconciliationRecord,
+  ReviewTask,
+  TDSWorking,
+  Vendor,
 } from "./types";
 
 type Setter<T> = React.Dispatch<React.SetStateAction<T[]>>;
@@ -18,14 +27,23 @@ interface Store {
   setPeriod: (p: string) => void;
   role: "Partner" | "Accountant" | "Viewer";
   setRole: (r: Store["role"]) => void;
-  companies: Company[]; setCompanies: Setter<Company>;
-  vendors: Vendor[]; setVendors: Setter<Vendor>;
-  mappings: LedgerMapping[]; setMappings: Setter<LedgerMapping>;
-  documents: InboxDocument[]; setDocuments: Setter<InboxDocument>;
-  bankTx: BankTransaction[]; setBankTx: Setter<BankTransaction>;
-  tds: TDSWorking[]; setTds: Setter<TDSWorking>;
-  reco: ReconciliationRecord[]; setReco: Setter<ReconciliationRecord>;
-  reviews: ReviewTask[]; setReviews: Setter<ReviewTask>;
+  // Companies are the first API-backed module, so they are read-only here:
+  // writes go through the companies API and React Query invalidation refills.
+  companies: Company[];
+  vendors: Vendor[];
+  setVendors: Setter<Vendor>;
+  mappings: LedgerMapping[];
+  setMappings: Setter<LedgerMapping>;
+  documents: InboxDocument[];
+  setDocuments: Setter<InboxDocument>;
+  bankTx: BankTransaction[];
+  setBankTx: Setter<BankTransaction>;
+  tds: TDSWorking[];
+  setTds: Setter<TDSWorking>;
+  reco: ReconciliationRecord[];
+  setReco: Setter<ReconciliationRecord>;
+  reviews: ReviewTask[];
+  setReviews: Setter<ReviewTask>;
   audit: AuditEvent[];
   exports: ExportJob[];
   log: (e: Omit<AuditEvent, "id" | "timestamp" | "user" | "companyId" | "status">) => void;
@@ -40,7 +58,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [financialYear, setFinancialYear] = useState(mock.FINANCIAL_YEARS[0]);
   const [period, setPeriod] = useState("October");
   const [role, setRole] = useState<Store["role"]>("Partner");
-  const [companies, setCompanies] = useState(mock.companies);
+
+  // The mock list stays only as a fallback, so pages still showing module mock
+  // data (vendors, invoices, GST, ...) keep working before the backend returns
+  // companies or while it is unreachable. Those modules get real data in their
+  // own steps, after which the fallback can go.
+  const { data: apiCompanies } = useCompanies(true);
+  const companies = apiCompanies?.length ? apiCompanies : mock.companies;
+
   const [vendors, setVendors] = useState(mock.vendors);
   const [mappings, setMappings] = useState(mock.ledgerMappings);
   const [documents, setDocuments] = useState(mock.documents);
@@ -57,7 +82,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (p.companyId) setCompanyId(p.companyId);
       if (p.financialYear) setFinancialYear(p.financialYear);
       if (p.period) setPeriod(p.period);
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, []);
   useEffect(() => {
     localStorage.setItem(PREFS_KEY, JSON.stringify({ companyId, financialYear, period }));
@@ -66,21 +93,71 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const value = useMemo<Store>(() => {
     const now = () => new Date().toISOString().slice(0, 16).replace("T", " ");
     return {
-      companyId, setCompanyId, financialYear, setFinancialYear, period, setPeriod, role, setRole,
-      companies, setCompanies, vendors, setVendors, mappings, setMappings, documents, setDocuments,
-      bankTx, setBankTx, tds, setTds, reco, setReco, reviews, setReviews, audit, exports,
+      companyId,
+      setCompanyId,
+      financialYear,
+      setFinancialYear,
+      period,
+      setPeriod,
+      role,
+      setRole,
+      companies,
+      vendors,
+      setVendors,
+      mappings,
+      setMappings,
+      documents,
+      setDocuments,
+      bankTx,
+      setBankTx,
+      tds,
+      setTds,
+      reco,
+      setReco,
+      reviews,
+      setReviews,
+      audit,
+      exports,
       log: (e) =>
         setAudit((a) => [
-          { ...e, id: `AE-${Date.now()}`, timestamp: now(), user: "Ananya Rao", companyId, status: "Success" },
+          {
+            ...e,
+            id: `AE-${Date.now()}`,
+            timestamp: now(),
+            user: "Ananya Rao",
+            companyId,
+            status: "Success",
+          },
           ...a,
         ]),
       addExport: (e) =>
         setExports((x) => [
-          { ...e, id: `EX-${Date.now().toString().slice(-5)}`, companyId, generatedAt: now().slice(0, 10) },
+          {
+            ...e,
+            id: `EX-${Date.now().toString().slice(-5)}`,
+            companyId,
+            generatedAt: now().slice(0, 10),
+          },
           ...x,
         ]),
     };
-  }, [companyId, financialYear, period, role, companies, vendors, mappings, documents, bankTx, tds, reco, reviews, audit, exports]);
+  }, [
+    companyId,
+    setCompanyId,
+    financialYear,
+    period,
+    role,
+    companies,
+    vendors,
+    mappings,
+    documents,
+    bankTx,
+    tds,
+    reco,
+    reviews,
+    audit,
+    exports,
+  ]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

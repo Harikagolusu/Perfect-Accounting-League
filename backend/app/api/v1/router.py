@@ -7,6 +7,7 @@ below, so `v1` stays a single, obvious entry point.
 
 from fastapi import APIRouter
 
+from app.api.v1.companies.router import router as companies_router
 from app.core.config import get_settings
 from app.schemas import HealthResponse
 
@@ -26,9 +27,14 @@ def health() -> HealthResponse:
 
 
 # ---------------------------------------------------------------------------
+# Implemented modules
+# ---------------------------------------------------------------------------
+api_router.include_router(companies_router, prefix="/companies", tags=["companies"])
+
+
+# ---------------------------------------------------------------------------
 # Future modules - registered as each feature is implemented.
 #
-#   api_router.include_router(companies.router,       prefix="/companies",       tags=["companies"])
 #   api_router.include_router(documents.router,       prefix="/documents",       tags=["documents"])
 #   api_router.include_router(invoices.router,        prefix="/invoices",        tags=["invoices"])
 #   api_router.include_router(bank_statements.router, prefix="/bank-statements", tags=["bank-statements"])

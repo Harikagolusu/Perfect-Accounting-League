@@ -2,12 +2,8 @@
 
 from fastapi.testclient import TestClient
 
-from app.main import app
 
-client = TestClient(app)
-
-
-def test_health_returns_ok() -> None:
+def test_health_returns_ok(client: TestClient) -> None:
     """GET /health responds 200 with the expected payload."""
     response = client.get("/health")
 
@@ -16,3 +12,11 @@ def test_health_returns_ok() -> None:
         "status": "ok",
         "service": "PAL Accounting Automation API",
     }
+
+
+def test_health_is_exposed_under_the_api_prefix(client: TestClient) -> None:
+    """The same probe is reachable at the versioned prefix."""
+    response = client.get("/api/v1/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
