@@ -11,6 +11,13 @@ export interface Column<T> {
   header: string;
   cell?: (row: T) => ReactNode;
   sortValue?: (row: T) => string | number;
+  /**
+   * Exact ordering for columns whose `sortValue` is a decimal string.
+   *
+   * Sorting money by string would rank "100.00" below "9.00", and sorting it by
+   * number would put the value through a float. This compares exactly instead.
+   */
+  sortCompare?: (a: T, b: T) => number;
   align?: "left" | "right";
   className?: string;
 }
@@ -46,6 +53,7 @@ export function DataTable<T>({
       const col = columns.find((c) => c.key === sort.key);
       const get = col?.sortValue ?? ((row: T) => String((row as Record<string, unknown>)[sort.key] ?? ""));
       r = [...r].sort((a, b) => {
+        if (col?.sortCompare) return col.sortCompare(a, b) * sort.dir;
         const av = get(a), bv = get(b);
         return (av > bv ? 1 : av < bv ? -1 : 0) * sort.dir;
       });

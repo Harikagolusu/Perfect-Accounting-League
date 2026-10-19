@@ -11,6 +11,7 @@ remember.
 
 from fastapi import APIRouter
 
+from app.api.v1.bank.router import router as bank_router
 from app.api.v1.companies.router import router as companies_router
 from app.api.v1.documents.router import router as documents_router
 from app.api.v1.invoices.router import router as invoices_router
@@ -46,12 +47,15 @@ api_router.include_router(
 api_router.include_router(
     invoices_router, prefix="/companies/{company_id}/invoices", tags=["invoices"]
 )
+# Bank accounts, statements and transactions all hang off the company.
+api_router.include_router(
+    bank_router, prefix="/companies/{company_id}", tags=["bank"]
+)
 
 
 # ---------------------------------------------------------------------------
 # Future modules - all company-scoped, all mounted under /companies/{company_id}.
 #
-#   api_router.include_router(bank_statements.router, prefix="/companies/{company_id}/bank-statements", tags=["bank-statements"])
 #   api_router.include_router(gst.router,             prefix="/companies/{company_id}/gst",             tags=["gst"])
 #   api_router.include_router(tds.router,             prefix="/companies/{company_id}/tds",             tags=["tds"])
 #   api_router.include_router(reconciliation.router,  prefix="/companies/{company_id}/reconciliation",  tags=["reconciliation"])
