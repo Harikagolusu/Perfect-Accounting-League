@@ -62,7 +62,8 @@ function InvoicePage() {
   useEffect(() => {
     setForm(invoice ? invoiceToForm(invoice) : null);
     setDirty(false);
-  }, [invoice?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Re-sync when extraction writes values or the selected invoice changes.
+  }, [invoice?.id, invoice?.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const documentName = useMemo(() => {
     const match = documents?.find((d) => d.id === invoice?.documentId);
@@ -129,8 +130,8 @@ function InvoicePage() {
       <>
         <PageHeader title="Invoice Processing" description="Review and enter invoice data." />
         <DemoNotice>
-          Automatic extraction is not configured, so invoices are created from a document and the
-          fields are entered by hand. Nothing on this page is machine-read.
+          Automatic extraction uses the configured AI provider. Only values the model actually read
+          are filled in; missing fields stay blank and nothing is inferred or corrected.
         </DemoNotice>
         <div className="rounded-md border bg-card p-4">
           <EmptyState
@@ -204,8 +205,18 @@ function InvoicePage() {
   const runExtraction = async () => {
     try {
       const result = await process.mutateAsync(invoice.id);
-      // The backend is honest about having no engine, and the UI says so.
-      toast[result.configured ? "success" : "info"](result.message);
+      if (!result.configured) {
+        toast.info(result.message);
+        return;
+      }
+      if (result.status === "PROCESSED") {
+        toast.success(result.message);
+      } else if (result.status === "NEEDS_REVIEW") {
+        const issues = result.issues.length ? ` ${result.issues.length} issue(s) to review.` : "";
+        toast.info(`${result.message}${issues}`);
+      } else {
+        toast.error(result.message);
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not run extraction");
     }
@@ -241,8 +252,8 @@ function InvoicePage() {
         }
       />
       <DemoNotice>
-        Automatic extraction is not configured. Every value below was entered by hand and is stored
-        exactly as typed — nothing is inferred, corrected or read from the file.
+        Extraction reads the source document through the configured AI provider. Values are stored
+        as read; missing fields remain blank and nothing is recalculated or corrected.
       </DemoNotice>
 
       <div className="mb-3 flex flex-wrap items-center gap-2 text-sm">

@@ -14,10 +14,10 @@ import { API_V1_PREFIX, apiFetch } from "@/lib/api/client";
 export type InvoiceStatus = "DRAFT" | "PROCESSING" | "PROCESSED" | "NEEDS_REVIEW" | "FAILED";
 
 /**
- * Mirrors `InvoiceSource`. MANUAL is the only value that exists today: a
- * person typed these numbers in. No extraction engine is configured.
+ * Mirrors `InvoiceSource`. MANUAL means a person typed the values in; AI means
+ * the configured vision provider read them from the source document.
  */
-export type InvoiceSource = "MANUAL";
+export type InvoiceSource = "MANUAL" | "AI";
 
 export interface InvoiceDto {
   id: string;
@@ -71,11 +71,16 @@ export interface InvoiceWriteDto {
 
 export interface ProcessResult {
   document_id: string;
+  invoice_id: string | null;
   configured: boolean;
+  status: "PROCESSED" | "NEEDS_REVIEW" | "FAILED" | "NOT_CONFIGURED";
   reason: string | null;
   message: string;
   issues: string[];
-  invoice_id: string | null;
+  is_invoice: boolean | null;
+  provider: string | null;
+  model: string | null;
+  usage: Record<string, number> | null;
 }
 
 /** The editable string forms the UI binds to. */
@@ -222,7 +227,7 @@ export const invoicesApi = {
     }),
   remove: (companyId: string, invoiceId: string) =>
     apiFetch<void>(`${base(companyId)}/${invoiceId}`, { method: "DELETE" }),
-  /** Asks the backend to extract automatically. Today it reports it cannot. */
+  /** Asks the backend to extract automatically from the source document. */
   process: (companyId: string, invoiceId: string) =>
     apiFetch<ProcessResult>(`${base(companyId)}/${invoiceId}/process`, { method: "POST" }),
 };

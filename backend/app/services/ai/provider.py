@@ -7,6 +7,7 @@ a specific implementation.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -24,9 +25,21 @@ class AIResponse:
     usage: dict | None = None
 
 
+@dataclass(frozen=True)
+class ImageInput:
+    """One image sent to a vision-capable provider.
+
+    The bytes are prepared in memory by the caller. Providers never read from
+    disk and never see a storage path.
+    """
+
+    data: bytes
+    mime_type: str
+
+
 @runtime_checkable
 class AIProvider(Protocol):
-    """Minimal interface for text generation providers."""
+    """Minimal interface for text and vision providers."""
 
     name: str
     model: str
@@ -53,6 +66,35 @@ class AIProvider(Protocol):
 
         Returns:
             An AIResponse with the generated text and metadata.
+
+        Raises:
+            AIProviderError: If the provider cannot complete the request.
+        """
+        ...
+
+    def generate_from_images(
+        self,
+        prompt: str,
+        images: Sequence[ImageInput],
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        """Generate text from a prompt plus one or more images.
+
+        Args:
+            prompt: The user prompt.
+            images: Prepared images, in reading order.
+            system_prompt: Optional system-level instruction.
+            temperature: Sampling temperature (0 = deterministic).
+            max_tokens: Optional hard cap on output tokens.
+            json_mode: Ask the provider for a JSON object response when the
+                underlying API supports it.
+
+        Returns:
+            An AIResponse whose `text` is the generated content.
 
         Raises:
             AIProviderError: If the provider cannot complete the request.

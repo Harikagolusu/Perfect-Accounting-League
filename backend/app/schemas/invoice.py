@@ -9,7 +9,7 @@ binary-floating-point rounding happens in the browser either.
 import uuid
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
@@ -136,14 +136,23 @@ class InvoiceResponse(TimestampedResponse):
 
 
 class ProcessInvoiceResponse(BaseModel):
-    """Result of asking the system to extract an invoice automatically."""
+    """Result of asking the system to extract an invoice automatically.
+
+    Only normalised, safe fields are exposed. The raw provider response and the
+    stored file location never appear here.
+    """
 
     document_id: uuid.UUID
+    invoice_id: uuid.UUID | None = None
     configured: bool
+    status: Literal["PROCESSED", "NEEDS_REVIEW", "FAILED", "NOT_CONFIGURED"]
     reason: str | None = None
     message: str
     issues: list[str] = Field(default_factory=list)
-    invoice_id: uuid.UUID | None = None
+    is_invoice: bool | None = None
+    provider: str | None = None
+    model: str | None = None
+    usage: dict[str, int] | None = None
 
 
 __all__ = [

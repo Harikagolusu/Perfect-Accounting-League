@@ -138,6 +138,18 @@ describe("Invoice mapper", () => {
     expect(toInvoice(INVOICE).source).toBe("MANUAL");
   });
 
+  it("surfaces AI extraction as a distinct source", () => {
+    const inv = toInvoice({ ...INVOICE, source: "AI", status: "NEEDS_REVIEW" });
+
+    expect(inv.source).toBe("AI");
+    expect(statusToUiLabel(inv.status)).toBe("Needs Review");
+  });
+
+  it("labels the processing and failure states", () => {
+    expect(statusToUiLabel("PROCESSING")).toBe("Processing");
+    expect(statusToUiLabel("FAILED")).toBe("Failed");
+  });
+
   it("builds an editable form with blank strings for missing values", () => {
     const form = invoiceToForm(toInvoice({ ...INVOICE, po_number: null, due_date: null }));
 

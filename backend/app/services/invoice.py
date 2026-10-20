@@ -25,21 +25,26 @@ the original document — the artifact of record — is never touched.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
-from datetime import date
-from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.document import Document
+from app.core.storage import StorageError, resolve_storage_path
+from app.models.document import Document, DocumentStatus
 from app.models.invoice import Invoice, InvoiceSource, InvoiceStatus
 from app.models.vendor import Vendor
 from app.schemas.invoice import InvoiceCreate, InvoiceUpdate
 from app.services.company import get_company
 from app.services.document import get_document
 from app.services.invoice_extraction import (
+    EXTRACTION_INTERNAL_ERROR,
+    EXTRACTION_NOT_CONFIGURED,
+    NOT_CONFIGURED_MESSAGE,
+    ExtractionOutcome,
     ExtractionResult,
+    InvoiceExtractor,
     get_extractor,
 )
 from app.services.invoice_validation import (
@@ -57,6 +62,27 @@ _VALIDATED_FIELDS = (
     "vendor_gstin",
     "vendor_pan",
     "buyer_gstin",
+    "taxable_amount",
+    "cgst_amount",
+    "sgst_amount",
+    "igst_amount",
+    "cess_amount",
+    "round_off",
+    "total_amount",
+)
+
+#: Columns an extraction result may populate. `company_id`, `document_id`,
+#: `vendor_id`, `status` and `source` are workflow fields, never model output.
+_EXTRACTED_FIELDS = (
+    "invoice_number",
+    "invoice_date",
+    "due_date",
+    "vendor_name",
+    "vendor_gstin",
+    "vendor_pan",
+    "buyer_gstin",
+    "po_number",
+    "currency",
     "taxable_amount",
     "cgst_amount",
     "sgst_amount",
@@ -222,39 +248,236 @@ def delete_invoice(db: Session, company_id: uuid.UUID, invoice_id: uuid.UUID) ->
     return invoice
 
 
+def process_invoice(
+    db: Session,
+    invoice: Invoice,
+    *,
+    document: Document | None = None,
+    extractor: InvoiceExtractor | None = None,
+) -> tuple[Invoice, ExtractionResult]:
+    """Run extraction for one existing invoice and apply its lifecycle.
+
+    The invoice is moved to PROCESSING before the AI call so a crash cannot
+    leave it silently stuck in DRAFT with no record of the attempt. Every exit
+    path then lands on PROCESSED, NEEDS_REVIEW or FAILED — never PROCESSING.
+
+    `document` and `extractor` are injectable for tests and for the
+    process-document path, which has already resolved them.
+    """
+    extractor = extractor or get_extractor()
+    if document is None:
+        document = get_document(db, invoice.company_id, invoice.document_id)
+
+    if invoice.status is InvoiceStatus.PROCESSED:
+        return invoice, ExtractionResult(
+            configured=extractor.is_configured(),
+            outcome=ExtractionOutcome.PROCESSED,
+            reason="ALREADY_PROCESSED",
+            message="This invoice is already processed.",
+        )
+
+    if not extractor.is_configured():
+        # Nothing ran, so nothing changes. Marking FAILED would misreport it.
+        return invoice, ExtractionResult(
+            configured=False,
+            outcome=ExtractionOutcome.NOT_CONFIGURED,
+            reason=EXTRACTION_NOT_CONFIGURED,
+            message=NOT_CONFIGURED_MESSAGE,
+        )
+
+    previous_invoice_status = invoice.status
+    previous_document_status = document.status
+    assert_transition_allowed(invoice.status, InvoiceStatus.PROCESSING)
+
+    invoice.status = InvoiceStatus.PROCESSING
+    document.status = DocumentStatus.PROCESSING
+    db.commit()
+
+    started = time.perf_counter()
+    try:
+        raw = resolve_storage_path(document.file_path).read_bytes()
+    except (OSError, StorageError):
+        logger.warning(
+            "Stored file could not be read: company=%s document=%s",
+            invoice.company_id,
+            document.id,
+        )
+        return _finish(
+            db,
+            invoice,
+            document,
+            ExtractionResult(
+                configured=True,
+                outcome=ExtractionOutcome.FAILED,
+                reason="DOCUMENT_UNREADABLE",
+                message="The stored document could not be read.",
+            ),
+        )
+
+    try:
+        result = extractor.extract(document, raw)
+    except Exception:  # defensive: the extractor already maps known errors
+        logger.exception(
+            "Unexpected extraction failure: company=%s document=%s invoice=%s",
+            invoice.company_id,
+            document.id,
+            invoice.id,
+        )
+        result = ExtractionResult(
+            configured=True,
+            outcome=ExtractionOutcome.FAILED,
+            reason=EXTRACTION_INTERNAL_ERROR,
+            message="Automatic extraction failed.",
+        )
+
+    if result.outcome is ExtractionOutcome.NOT_CONFIGURED:
+        # Configuration disappeared after the pre-check. Restore the prior
+        # state instead of inventing a failure.
+        invoice.status = previous_invoice_status
+        document.status = previous_document_status
+        db.commit()
+        db.refresh(invoice)
+        return invoice, result
+
+    if result.outcome is ExtractionOutcome.PROCESSED and result.values:
+        _apply_extracted_values(invoice, result.values)
+        invoice.source = InvoiceSource.AI
+
+    if result.outcome is ExtractionOutcome.NEEDS_REVIEW and result.is_invoice:
+        # Apply whatever was read; the reviewer sees the values and the issues.
+        if result.values:
+            _apply_extracted_values(invoice, result.values)
+        invoice.source = InvoiceSource.AI
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    logger.info(
+        "Invoice extraction finished: company=%s document=%s invoice=%s "
+        "outcome=%s reason=%s provider=%s model=%s elapsed_ms=%d",
+        invoice.company_id,
+        document.id,
+        invoice.id,
+        result.outcome.value,
+        result.reason,
+        result.provider,
+        result.model,
+        elapsed_ms,
+    )
+    return _finish(db, invoice, document, result)
+
+
+def _finish(
+    db: Session,
+    invoice: Invoice,
+    document: Document,
+    result: ExtractionResult,
+) -> tuple[Invoice, ExtractionResult]:
+    """Persist the final statuses for one extraction attempt."""
+    if result.outcome is ExtractionOutcome.PROCESSED:
+        invoice.status = InvoiceStatus.PROCESSED
+        document.status = DocumentStatus.PROCESSED
+    elif result.outcome is ExtractionOutcome.NEEDS_REVIEW:
+        invoice.status = InvoiceStatus.NEEDS_REVIEW
+        # Processing itself completed; a human now judges the result.
+        document.status = DocumentStatus.PROCESSED
+    else:
+        invoice.status = InvoiceStatus.FAILED
+        document.status = DocumentStatus.FAILED
+
+    db.commit()
+    db.refresh(invoice)
+    db.refresh(document)
+    return invoice, result
+
+
+def _apply_extracted_values(invoice: Invoice, values: dict[str, object]) -> None:
+    """Write extracted non-null values onto the invoice.
+
+    A null from the model never clears an existing value: a retry cannot wipe
+    a field a person already filled in, and missing data stays missing.
+    """
+    for field in _EXTRACTED_FIELDS:
+        value = values.get(field)
+        if value is not None:
+            setattr(invoice, field, value)
+
+
+def _find_extraction_invoice(
+    db: Session, company_id: uuid.UUID, document_id: uuid.UUID
+) -> Invoice | None:
+    """The most recent AI-created invoice for this document, if any.
+
+    Reusing it is what keeps repeated process-document calls from creating a
+    second invoice for the same file. A manually entered invoice is never
+    hijacked: it has a different source.
+    """
+    return db.scalar(
+        select(Invoice)
+        .where(
+            Invoice.company_id == company_id,
+            Invoice.document_id == document_id,
+            Invoice.source == InvoiceSource.AI,
+        )
+        .order_by(Invoice.created_at.desc())
+        .limit(1)
+    )
+
+
 def process_document(
     db: Session, company_id: uuid.UUID, document_id: uuid.UUID
-) -> tuple[Document, ExtractionResult]:
+) -> tuple[Document, ExtractionResult, Invoice | None]:
     """Attempt automatic extraction for a document.
 
-    No extraction engine is configured yet, so this says so plainly and
-    changes nothing: the document keeps its status and no invoice value is
-    invented. When a real engine is added, this is the one function that needs
-    to change to drive the lifecycle.
+    Returns the document, the extraction result and the invoice the result was
+    applied to. When no provider is configured nothing is created or changed.
     """
     document = get_document(db, company_id, document_id)
     extractor = get_extractor()
 
     if not extractor.is_configured():
-        # No status change on purpose: nothing was processed, so marking the
-        # document PROCESSING or FAILED would misreport what happened.
         logger.info(
             "Extraction not configured; document %s left as %s",
             document_id,
             document.status.value,
         )
-        return document, extractor.extract(document, b"")
+        return (
+            document,
+            ExtractionResult(
+                configured=False,
+                outcome=ExtractionOutcome.NOT_CONFIGURED,
+                reason=EXTRACTION_NOT_CONFIGURED,
+                message=NOT_CONFIGURED_MESSAGE,
+            ),
+            None,
+        )
 
-    from app.core.storage import resolve_storage_path
+    invoice = _find_extraction_invoice(db, company_id, document_id)
+    if invoice is None:
+        invoice = Invoice(
+            company_id=company_id,
+            document_id=document_id,
+            status=InvoiceStatus.DRAFT,
+            source=InvoiceSource.AI,
+        )
+        db.add(invoice)
+        db.commit()
+        db.refresh(invoice)
 
-    raw = resolve_storage_path(document.file_path).read_bytes()
-    result = extractor.extract(document, raw)
-    logger.info(
-        "Extraction attempted for document %s: configured=%s",
-        document_id,
-        result.configured,
+    if invoice.status is InvoiceStatus.PROCESSED:
+        return (
+            document,
+            ExtractionResult(
+                configured=True,
+                outcome=ExtractionOutcome.PROCESSED,
+                reason="ALREADY_PROCESSED",
+                message="This document already produced a processed invoice.",
+            ),
+            invoice,
+        )
+
+    invoice, result = process_invoice(
+        db, invoice, document=document, extractor=extractor
     )
-    return document, result
+    return document, result, invoice
 
 
 __all__ = [
@@ -265,6 +488,7 @@ __all__ = [
     "get_invoice",
     "list_invoices",
     "process_document",
+    "process_invoice",
     "update_invoice",
     "validate_fields",
 ]

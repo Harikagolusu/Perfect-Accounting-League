@@ -25,11 +25,34 @@ from app.services.invoice import (
     get_invoice,
     list_invoices,
     process_document,
+    process_invoice as run_invoice_extraction,
     update_invoice,
 )
 from app.services.invoice_validation import InvoiceTransitionError
 
 router = APIRouter()
+
+
+def _process_response(
+    result,  # ExtractionResult; kept untyped here to avoid a schema import cycle
+    *,
+    document_id: UUID,
+    invoice_id: UUID | None = None,
+) -> ProcessInvoiceResponse:
+    """Map the service result onto the safe API shape."""
+    return ProcessInvoiceResponse(
+        document_id=document_id,
+        invoice_id=invoice_id,
+        configured=result.configured,
+        status=result.outcome.value,
+        reason=result.reason,
+        message=result.message,
+        issues=list(result.issues),
+        is_invoice=result.is_invoice,
+        provider=result.provider,
+        model=result.model,
+        usage=result.usage,
+    )
 
 
 def invoice_or_404(
@@ -143,20 +166,20 @@ def process_document_route(
 ) -> ProcessInvoiceResponse:
     """Try to read an invoice out of a stored document.
 
-    No extraction engine is configured yet, so this reports that plainly and
-    changes nothing. It never returns invented invoice values.
+    When no AI provider is configured the result says so plainly and nothing
+    changes. When one is configured, the document's invoice is created or
+    reused and moved through the existing invoice lifecycle.
     """
     try:
-        document, result = process_document(db, company_id, document_id)
+        document, result, invoice = process_document(db, company_id, document_id)
     except DocumentNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
         ) from None
-    return ProcessInvoiceResponse(
+    return _process_response(
+        result,
         document_id=document.id,
-        configured=result.configured,
-        reason=result.reason,
-        message=result.message or "",
+        invoice_id=invoice.id if invoice is not None else None,
     )
 
 
@@ -168,12 +191,10 @@ def process_document_route(
 def process_invoice(
     invoice: Invoice = Depends(invoice_or_404), db: Session = Depends(get_db)
 ) -> ProcessInvoiceResponse:
-    """Same honest answer as the document route, for an invoice that exists."""
-    _document, result = process_document(db, invoice.company_id, invoice.document_id)
-    return ProcessInvoiceResponse(
-        document_id=invoice.document_id,
-        configured=result.configured,
-        reason=result.reason,
-        message=result.message or "",
-        invoice_id=invoice.id,
+    """Run extraction for this invoice's source document."""
+    updated, result = run_invoice_extraction(db, invoice)
+    return _process_response(
+        result,
+        document_id=updated.document_id,
+        invoice_id=updated.id,
     )

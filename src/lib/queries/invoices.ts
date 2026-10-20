@@ -88,8 +88,14 @@ export function useDeleteInvoice(companyId: string | undefined) {
 }
 
 export function useProcessInvoice(companyId: string | undefined) {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) =>
       invoicesApi.process(companyId as string, id) as Promise<ProcessResult>,
+    // The backend moves the invoice through PROCESSING to a final state and
+    // may write extracted fields, so the cached list must be refetched.
+    onSuccess: () => {
+      if (companyId) queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+    },
   });
 }

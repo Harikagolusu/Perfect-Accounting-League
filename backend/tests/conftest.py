@@ -63,6 +63,25 @@ def _schema() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def no_real_ai_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Keep the real AI provider out of every test by default.
+
+    A developer's local `.env` may contain a real key. Overriding the variable
+    with an empty string takes precedence over the dotenv file, so no test can
+    accidentally spend money or depend on network access. A test that needs a
+    key sets its own with `monkeypatch.setenv` after this fixture runs.
+    """
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    # Deterministic page-limit behaviour regardless of a developer's .env.
+    monkeypatch.setenv("INVOICE_MAX_PAGES", "10")
+    get_settings.cache_clear()
+    try:
+        yield
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
 def clean_state(temp_storage: Path) -> Iterator[None]:
     """Empty the tables and the temp storage root before every test.
 

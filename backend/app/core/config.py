@@ -52,6 +52,11 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-flash"
 
+    # --- Invoice extraction --------------------------------------------
+    # Hard cap on PDF pages sent to the vision model. A document above this
+    # limit is rejected for review rather than silently truncated.
+    invoice_max_pages: int = 10
+
     @property
     def document_storage_dir(self) -> Path:
         """Absolute, expanded storage root for uploaded documents."""

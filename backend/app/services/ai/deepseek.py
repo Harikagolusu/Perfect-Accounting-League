@@ -3,17 +3,28 @@
 Uses the OpenAI-compatible client since DeepSeek exposes an OpenAI-compatible
 API endpoint. This keeps the dependency minimal — no LangChain, LlamaIndex,
 or other frameworks.
+
+Two capabilities are exposed behind the provider interface:
+
+* `generate_text` — text-only prompts;
+* `generate_from_images` — prompts plus prepared images (vision).
+
+The invoice extraction service depends only on `AIProvider`, so replacing
+DeepSeek with a local vision model later does not touch invoice logic.
 """
 
 from __future__ import annotations
 
+import base64
 import logging
+from collections.abc import Sequence
+from typing import Any
 
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
 from app.core.config import get_settings
-from app.services.ai.provider import AIProvider, AIProviderError, AIResponse
+from app.services.ai.provider import AIProvider, AIProviderError, AIResponse, ImageInput
 
 logger = logging.getLogger(__name__)
 
@@ -65,18 +76,90 @@ class DeepSeekProvider(AIProvider):
                 code=AIProviderError.NOT_CONFIGURED,
             )
 
-        messages: list[dict[str, str]] = []
+        messages: list[dict[str, Any]] = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+        return self._complete(
+            messages, temperature=temperature, max_tokens=max_tokens
+        )
+
+    def generate_from_images(
+        self,
+        prompt: str,
+        images: Sequence[ImageInput],
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        if not self.is_configured():
+            raise AIProviderError(
+                "DeepSeek provider is not configured (missing API key).",
+                provider=self.name,
+                code=AIProviderError.NOT_CONFIGURED,
+            )
+        if not images:
+            raise AIProviderError(
+                "No images were supplied for extraction.",
+                provider=self.name,
+                code=AIProviderError.PROVIDER_ERROR,
+            )
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for image in images:
+            if not image.data:
+                raise AIProviderError(
+                    "An image payload was empty.",
+                    provider=self.name,
+                    code=AIProviderError.PROVIDER_ERROR,
+                )
+            encoded = base64.b64encode(image.data).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{image.mime_type};base64,{encoded}",
+                    },
+                }
+            )
+
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": content})
+
+        return self._complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
+
+    def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        temperature: float,
+        max_tokens: int | None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        """Call the chat-completions endpoint and normalise the result."""
+        request: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        if json_mode:
+            # JSON Output mode. The prompt still pins the exact shape; this
+            # only asks the API to emit a JSON object rather than prose.
+            request["response_format"] = {"type": "json_object"}
 
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
+            response = self._client.chat.completions.create(**request)  # type: ignore[union-attr]
         except APITimeoutError as exc:
             # Log only the error class: provider payloads and request IDs can
             # contain sensitive material and must never reach the log.

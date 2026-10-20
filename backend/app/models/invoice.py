@@ -54,12 +54,12 @@ class InvoiceStatus(str, enum.Enum):
 class InvoiceSource(str, enum.Enum):
     """Where the invoice data came from.
 
-    Only `MANUAL` exists today: a person typed these values in. OCR and AI
-    values are added when an extraction engine is actually configured, so the
-    enum never claims work that did not happen.
+    `MANUAL` means a person typed the values in. `AI` means the configured
+    vision provider read them from the source document in Step 8.
     """
 
     MANUAL = "MANUAL"
+    AI = "AI"
 
 
 INVOICE_STATUS_ENUM = SAEnum(

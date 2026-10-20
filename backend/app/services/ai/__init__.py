@@ -11,7 +11,7 @@ Usage:
         response = provider.generate_text("Hello, world!")
 """
 
-from app.services.ai.provider import AIProvider, AIProviderError, AIResponse
+from app.services.ai.provider import AIProvider, AIProviderError, AIResponse, ImageInput
 from app.services.ai.deepseek import DeepSeekProvider
 
 __all__ = [
@@ -19,6 +19,7 @@ __all__ = [
     "AIProviderError",
     "AIResponse",
     "DeepSeekProvider",
+    "ImageInput",
     "get_ai_provider",
 ]
 
