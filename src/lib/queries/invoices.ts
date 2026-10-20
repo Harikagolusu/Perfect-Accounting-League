@@ -10,16 +10,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   invoicesApi,
   toInvoice,
+  toVendorMatch,
   type InvoiceStatus,
   type InvoiceWriteDto,
   type ProcessResult,
   type UiInvoice,
+  type VendorMatch,
 } from "@/lib/api/invoices";
 
 export const invoiceKeys = {
   all: ["invoices"] as const,
   list: (companyId: string) => ["invoices", companyId] as const,
   detail: (companyId: string, invoiceId: string) => ["invoices", companyId, invoiceId] as const,
+  match: (companyId: string, invoiceId: string) =>
+    ["invoices", companyId, invoiceId, "vendor-match"] as const,
 };
 
 /**
@@ -47,6 +51,24 @@ export function useInvoice(companyId: string | undefined, invoiceId: string | un
     queryKey: invoiceKeys.detail(companyId ?? "unknown", invoiceId ?? "unknown"),
     queryFn: async () => toInvoice(await invoicesApi.get(companyId as string, invoiceId as string)),
     enabled: isBrowser && Boolean(companyId) && Boolean(invoiceId),
+  });
+}
+
+/**
+ * Read-only match preview. It is enabled only when the caller actually needs
+ * candidates (currently the ambiguous state), so the normal invoice list does
+ * not multiply its requests.
+ */
+export function useVendorMatch(
+  companyId: string | undefined,
+  invoiceId: string | undefined,
+  enabled: boolean,
+) {
+  return useQuery<VendorMatch>({
+    queryKey: invoiceKeys.match(companyId ?? "unknown", invoiceId ?? "unknown"),
+    queryFn: async () =>
+      toVendorMatch(await invoicesApi.match(companyId as string, invoiceId as string)),
+    enabled: isBrowser && Boolean(companyId) && Boolean(invoiceId) && enabled,
   });
 }
 
@@ -97,5 +119,16 @@ export function useProcessInvoice(companyId: string | undefined) {
     onSuccess: () => {
       if (companyId) queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
     },
+  });
+}
+
+export function useConfirmVendorMapping(companyId: string | undefined) {
+  const invalidate = useInvalidateCompany(companyId);
+  return useMutation({
+    mutationFn: async (input: { id: string; vendorId: string | null }) =>
+      toInvoice(
+        await invoicesApi.confirmVendorMapping(companyId as string, input.id, input.vendorId),
+      ),
+    onSuccess: invalidate,
   });
 }

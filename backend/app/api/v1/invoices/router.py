@@ -14,12 +14,17 @@ from app.schemas.invoice import (
     InvoiceResponse,
     InvoiceUpdate,
     ProcessInvoiceResponse,
+    VendorMappingRequest,
+    VendorMatchCandidateResponse,
+    VendorMatchResponse,
 )
 from app.services.company import CompanyNotFoundError
 from app.services.document import DocumentNotFoundError
 from app.services.invoice import (
     InvoiceNotFoundError,
+    VendorMappingConflictError,
     VendorOwnershipError,
+    confirm_vendor_mapping,
     create_invoice,
     delete_invoice,
     get_invoice,
@@ -29,6 +34,8 @@ from app.services.invoice import (
     update_invoice,
 )
 from app.services.invoice_validation import InvoiceTransitionError
+from app.services.vendor import VendorNotFoundError
+from app.services.vendor_matching import match_vendor
 
 router = APIRouter()
 
@@ -123,6 +130,48 @@ def get_invoice_by_id(invoice: Invoice = Depends(invoice_or_404)) -> InvoiceResp
     return invoice
 
 
+@router.get(
+    "/{invoice_id}/vendor-match",
+    response_model=VendorMatchResponse,
+    summary="Preview the deterministic vendor match",
+)
+def get_vendor_match(
+    invoice: Invoice = Depends(invoice_or_404),
+    db: Session = Depends(get_db),
+) -> VendorMatchResponse:
+    """Return the current match and its candidates without changing anything.
+
+    Ambiguous invoices use this to show the real candidate vendors. The preview
+    is company-scoped through the invoice and never writes to the database.
+    """
+    result = match_vendor(
+        db,
+        invoice.company_id,
+        invoice.vendor_name,
+        invoice.vendor_gstin,
+        invoice.vendor_pan,
+    )
+    return VendorMatchResponse(
+        status=result.status.value,
+        reason=result.reason,
+        method=result.method,
+        vendor_id=result.vendor.id if result.vendor else None,
+        requires_confirmation=result.requires_confirmation,
+        candidates=[
+            VendorMatchCandidateResponse(
+                id=candidate.id,
+                name=candidate.name,
+                gstin=candidate.gstin,
+                pan=candidate.pan,
+                parent_group=candidate.parent_group,
+                default_expense_ledger=candidate.default_expense_ledger,
+                creditor_ledger=candidate.creditor_ledger,
+            )
+            for candidate in result.candidates
+        ],
+    )
+
+
 @router.patch(
     "/{invoice_id}", response_model=InvoiceResponse, summary="Update an invoice"
 )
@@ -139,6 +188,34 @@ def patch_invoice(
         ) from None
     except InvoiceTransitionError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
+
+
+@router.post(
+    "/{invoice_id}/vendor-mapping",
+    response_model=InvoiceResponse,
+    summary="Confirm, assign or reject an invoice's vendor mapping",
+)
+def post_vendor_mapping(
+    payload: VendorMappingRequest,
+    invoice: Invoice = Depends(invoice_or_404),
+    db: Session = Depends(get_db),
+) -> InvoiceResponse:
+    """Record a human vendor-mapping decision.
+
+    A vendor id is verified against this company before assignment. Sending
+    null rejects the current suggestion and never unassigns an existing vendor.
+    """
+    try:
+        return confirm_vendor_mapping(db, invoice, payload.vendor_id)
+    except VendorNotFoundError:
+        # A vendor of another company is indistinguishable from a missing one.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Vendor not found"
+        ) from None
+    except VendorMappingConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from None
 
 
 @router.delete(

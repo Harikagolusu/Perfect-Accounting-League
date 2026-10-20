@@ -13,7 +13,12 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
-from app.models.invoice import InvoiceSource, InvoiceStatus
+from app.models.invoice import (
+    InvoiceSource,
+    InvoiceStatus,
+    VendorMappingStatus,
+    VendorMatchMethod,
+)
 from app.schemas.common import TimestampedResponse, clean_optional
 
 # 15 total digits with 2 decimal places, mirroring the NUMERIC column.
@@ -134,6 +139,59 @@ class InvoiceResponse(TimestampedResponse):
     status: InvoiceStatus
     source: InvoiceSource
 
+    # Vendor mapping state. `vendor_id` is the only assigned vendor;
+    # `suggested_vendor_id` is a pending name-based suggestion and must never
+    # be treated as an accounting assignment until confirmed.
+    suggested_vendor_id: uuid.UUID | None
+    previous_vendor_id: uuid.UUID | None
+    vendor_mapping_status: VendorMappingStatus
+    vendor_match_method: VendorMatchMethod | None
+
+
+class VendorMappingRequest(BaseModel):
+    """Payload for confirming or rejecting an invoice's vendor mapping.
+
+    `vendor_id` is required in the body (although it may be null): an omitted
+    value is a malformed request, while null explicitly rejects the current
+    suggestion without assigning a vendor.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vendor_id: uuid.UUID | None
+
+
+class VendorMatchCandidateResponse(BaseModel):
+    """Safe vendor information returned as a possible match.
+
+    The identifier and grouping fields are the same ones the Vendor Master
+    already exposes to the company that owns the vendor.
+    """
+
+    id: uuid.UUID
+    name: str
+    gstin: str | None
+    pan: str | None
+    parent_group: str | None
+    default_expense_ledger: str | None
+    creditor_ledger: str | None
+
+
+class VendorMatchResponse(BaseModel):
+    """Deterministic match preview for one invoice's printed identity.
+
+    This is computed from the current Vendor Master and is not persisted. It is
+    what lets an ambiguous invoice show the actual candidates a person must
+    choose between, without storing a speculative list of ids.
+    """
+
+    status: Literal["MATCHED", "NO_MATCH", "AMBIGUOUS"]
+    reason: str
+    method: VendorMatchMethod | None
+    vendor_id: uuid.UUID | None
+    requires_confirmation: bool
+    candidates: list[VendorMatchCandidateResponse]
+
 
 class ProcessInvoiceResponse(BaseModel):
     """Result of asking the system to extract an invoice automatically.
@@ -160,4 +218,7 @@ __all__ = [
     "InvoiceResponse",
     "InvoiceUpdate",
     "ProcessInvoiceResponse",
+    "VendorMappingRequest",
+    "VendorMatchCandidateResponse",
+    "VendorMatchResponse",
 ]

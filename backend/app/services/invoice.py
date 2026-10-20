@@ -33,7 +33,12 @@ from sqlalchemy.orm import Session
 
 from app.core.storage import StorageError, resolve_storage_path
 from app.models.document import Document, DocumentStatus
-from app.models.invoice import Invoice, InvoiceSource, InvoiceStatus
+from app.models.invoice import (
+    Invoice,
+    InvoiceSource,
+    InvoiceStatus,
+    VendorMappingStatus,
+)
 from app.models.vendor import Vendor
 from app.schemas.invoice import InvoiceCreate, InvoiceUpdate
 from app.services.company import get_company
@@ -52,6 +57,8 @@ from app.services.invoice_validation import (
     assert_transition_allowed,
     validate_invoice_fields,
 )
+from app.services.vendor import VendorNotFoundError, get_vendor
+from app.services.vendor_matching import VendorMatchStatus, match_vendor
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +106,10 @@ class InvoiceNotFoundError(Exception):
 
 class VendorOwnershipError(Exception):
     """Raised when a vendor belongs to a different company than the invoice."""
+
+
+class VendorMappingConflictError(Exception):
+    """Raised when a mapping action would silently undo a confirmed assignment."""
 
 
 def list_invoices(
@@ -181,6 +192,12 @@ def create_invoice(db: Session, company_id: uuid.UUID, data: InvoiceCreate) -> I
         company_id=company_id,
         document_id=data.document_id,
         vendor_id=data.vendor_id,
+        # A vendor chosen on a manual invoice is an explicit human decision.
+        vendor_mapping_status=(
+            VendorMappingStatus.CONFIRMED
+            if data.vendor_id is not None
+            else VendorMappingStatus.UNMAPPED
+        ),
         # A new invoice is a draft. Status is reached through the documented
         # lifecycle, never assigned freely at creation.
         status=InvoiceStatus.DRAFT,
@@ -214,11 +231,56 @@ def update_invoice(db: Session, invoice: Invoice, data: InvoiceUpdate) -> Invoic
     """Apply only the fields the client actually sent.
 
     A status change is accepted only when the lifecycle allows it.
+
+    Vendor-mapping rules:
+    * sending `vendor_id` is a human decision, so it becomes CONFIRMED;
+    * changing the printed supplier identity invalidates an automatic match or
+      pending suggestion, because it no longer describes the linked vendor;
+    * a CONFIRMED vendor is never discarded by an identity edit. The person who
+      confirmed it knows more than the matcher does.
     """
     payload = data.model_dump(exclude_unset=True)
+    old_vendor_id = invoice.vendor_id
 
     if "vendor_id" in payload:
         _assert_vendor_belongs_to_company(db, invoice.company_id, payload["vendor_id"])
+
+    identity_fields = ("vendor_name", "vendor_gstin", "vendor_pan")
+    identity_changed = any(
+        field in payload and payload[field] != getattr(invoice, field)
+        for field in identity_fields
+    )
+
+    if "vendor_id" in payload:
+        new_vendor_id = payload["vendor_id"]
+        if old_vendor_id is not None and new_vendor_id != old_vendor_id:
+            # Keep exactly one step of history for an explicit correction.
+            invoice.previous_vendor_id = old_vendor_id
+        invoice.suggested_vendor_id = None
+        if new_vendor_id is None:
+            # An explicit unlink is not a rejection: the invoice is simply
+            # unmapped again and may be matched later.
+            invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+            invoice.vendor_match_method = None
+        else:
+            invoice.vendor_mapping_status = VendorMappingStatus.CONFIRMED
+            invoice.vendor_match_method = None
+    elif identity_changed:
+        if invoice.vendor_mapping_status is VendorMappingStatus.MATCHED:
+            # The automatic link described the old printed identity.
+            invoice.vendor_id = None
+            invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+            invoice.vendor_match_method = None
+            invoice.suggested_vendor_id = None
+        elif invoice.vendor_mapping_status in {
+            VendorMappingStatus.SUGGESTED,
+            VendorMappingStatus.AMBIGUOUS,
+            VendorMappingStatus.REJECTED,
+        }:
+            invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+            invoice.vendor_match_method = None
+            invoice.suggested_vendor_id = None
+        # CONFIRMED mappings survive identity edits by design.
 
     target_status = payload.pop("status", None)
     if target_status is not None and target_status is not invoice.status:
@@ -244,6 +306,130 @@ def delete_invoice(db: Session, company_id: uuid.UUID, invoice_id: uuid.UUID) ->
         company_id,
         invoice_id,
         document_id,
+    )
+    return invoice
+
+
+def _apply_vendor_mapping(db: Session, invoice: Invoice) -> bool:
+    """Match the invoice's printed supplier identity to a vendor master record.
+
+    Returns whether the result requires a human review. The invoice is mutated
+    but not committed; the extraction lifecycle commits it with the final
+    status, so an extraction and its mapping cannot land half-applied.
+
+    Existing assignments are never overwritten. A REJECTED invoice is never
+    silently re-matched on a retry.
+    """
+    if invoice.vendor_id is not None:
+        # A vendor is already assigned. Only a person may change it.
+        if invoice.vendor_mapping_status in {
+            VendorMappingStatus.UNMAPPED,
+            VendorMappingStatus.SUGGESTED,
+            VendorMappingStatus.AMBIGUOUS,
+        }:
+            invoice.vendor_mapping_status = VendorMappingStatus.CONFIRMED
+        invoice.suggested_vendor_id = None
+        return False
+
+    if invoice.vendor_mapping_status is VendorMappingStatus.REJECTED:
+        # The user said no. Reprocessing must not quietly say yes.
+        invoice.suggested_vendor_id = None
+        invoice.vendor_match_method = None
+        return False
+
+    if invoice.vendor_mapping_status is VendorMappingStatus.CONFIRMED:
+        # The linked vendor was removed (ON DELETE SET NULL). There is no
+        # confirmed identity left, so fall through and evaluate afresh.
+        invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+        invoice.vendor_match_method = None
+
+    result = match_vendor(
+        db,
+        invoice.company_id,
+        invoice.vendor_name,
+        invoice.vendor_gstin,
+        invoice.vendor_pan,
+    )
+
+    if result.status is VendorMatchStatus.MATCHED:
+        assert result.vendor is not None
+        if result.requires_confirmation:
+            invoice.vendor_id = None
+            invoice.suggested_vendor_id = result.vendor.id
+            invoice.vendor_mapping_status = VendorMappingStatus.SUGGESTED
+            invoice.vendor_match_method = result.method
+            requires_review = True
+        else:
+            invoice.vendor_id = result.vendor.id
+            invoice.suggested_vendor_id = None
+            invoice.vendor_mapping_status = VendorMappingStatus.MATCHED
+            invoice.vendor_match_method = result.method
+            requires_review = False
+    elif result.status is VendorMatchStatus.AMBIGUOUS:
+        invoice.vendor_id = None
+        invoice.suggested_vendor_id = None
+        invoice.vendor_mapping_status = VendorMappingStatus.AMBIGUOUS
+        invoice.vendor_match_method = None
+        requires_review = True
+    else:
+        invoice.vendor_id = None
+        invoice.suggested_vendor_id = None
+        invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+        invoice.vendor_match_method = None
+        requires_review = False
+
+    logger.info(
+        "Vendor mapping finished: company=%s invoice=%s status=%s method=%s reason=%s",
+        invoice.company_id,
+        invoice.id,
+        invoice.vendor_mapping_status.value,
+        invoice.vendor_match_method.value if invoice.vendor_match_method else None,
+        result.reason,
+    )
+    return requires_review
+
+
+def confirm_vendor_mapping(
+    db: Session, invoice: Invoice, vendor_id: uuid.UUID | None
+) -> Invoice:
+    """Confirm a suggested vendor, assign one manually, or reject a suggestion.
+
+    `vendor_id=None` rejects the current suggestion. It refuses to unassign an
+    existing vendor: that would be a destructive edit disguised as a review
+    action. An explicit `PATCH vendor_id: null` remains the way to unlink.
+
+    The vendor is resolved through the company-scoped Vendor service, so an id
+    from another company is indistinguishable from a missing one (404).
+    """
+    if vendor_id is None:
+        if invoice.vendor_id is not None:
+            raise VendorMappingConflictError(
+                "A vendor is already assigned to this invoice. "
+                "Choose a vendor to change the mapping."
+            )
+        invoice.vendor_mapping_status = VendorMappingStatus.REJECTED
+        invoice.vendor_match_method = None
+        invoice.suggested_vendor_id = None
+    else:
+        vendor = get_vendor(db, invoice.company_id, vendor_id)
+        was_suggestion = invoice.suggested_vendor_id == vendor.id
+        if invoice.vendor_id is not None and invoice.vendor_id != vendor.id:
+            # A re-mapping is an explicit correction; keep the prior assignment.
+            invoice.previous_vendor_id = invoice.vendor_id
+        invoice.vendor_id = vendor.id
+        invoice.suggested_vendor_id = None
+        invoice.vendor_mapping_status = VendorMappingStatus.CONFIRMED
+        if not was_suggestion:
+            invoice.vendor_match_method = None
+
+    db.commit()
+    db.refresh(invoice)
+    logger.info(
+        "Vendor mapping confirmed: company=%s invoice=%s status=%s vendor=%s",
+        invoice.company_id,
+        invoice.id,
+        invoice.vendor_mapping_status.value,
+        invoice.vendor_id,
     )
     return invoice
 
@@ -339,15 +525,19 @@ def process_invoice(
         db.refresh(invoice)
         return invoice, result
 
-    if result.outcome is ExtractionOutcome.PROCESSED and result.values:
-        _apply_extracted_values(invoice, result.values)
+    mapping_review_required = False
+    if result.outcome is ExtractionOutcome.PROCESSED:
+        if result.values:
+            _apply_extracted_values(invoice, result.values)
         invoice.source = InvoiceSource.AI
+        mapping_review_required = _apply_vendor_mapping(db, invoice)
 
     if result.outcome is ExtractionOutcome.NEEDS_REVIEW and result.is_invoice:
         # Apply whatever was read; the reviewer sees the values and the issues.
         if result.values:
             _apply_extracted_values(invoice, result.values)
         invoice.source = InvoiceSource.AI
+        mapping_review_required = _apply_vendor_mapping(db, invoice)
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
@@ -362,7 +552,13 @@ def process_invoice(
         result.model,
         elapsed_ms,
     )
-    return _finish(db, invoice, document, result)
+    return _finish(
+        db,
+        invoice,
+        document,
+        result,
+        force_review=mapping_review_required,
+    )
 
 
 def _finish(
@@ -370,10 +566,19 @@ def _finish(
     invoice: Invoice,
     document: Document,
     result: ExtractionResult,
+    *,
+    force_review: bool = False,
 ) -> tuple[Invoice, ExtractionResult]:
-    """Persist the final statuses for one extraction attempt."""
+    """Persist the final statuses for one extraction attempt.
+
+    `force_review` lets vendor mapping escalate a clean extraction: a pending
+    name suggestion or an ambiguous match is not a safe accounting assignment,
+    so a person must look at it even though the document was read correctly.
+    """
     if result.outcome is ExtractionOutcome.PROCESSED:
-        invoice.status = InvoiceStatus.PROCESSED
+        invoice.status = (
+            InvoiceStatus.NEEDS_REVIEW if force_review else InvoiceStatus.PROCESSED
+        )
         document.status = DocumentStatus.PROCESSED
     elif result.outcome is ExtractionOutcome.NEEDS_REVIEW:
         invoice.status = InvoiceStatus.NEEDS_REVIEW
@@ -482,7 +687,9 @@ def process_document(
 
 __all__ = [
     "InvoiceNotFoundError",
+    "VendorMappingConflictError",
     "VendorOwnershipError",
+    "confirm_vendor_mapping",
     "create_invoice",
     "delete_invoice",
     "get_invoice",

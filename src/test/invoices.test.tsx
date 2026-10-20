@@ -5,16 +5,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   invoiceToForm,
+  mappingStatusLabel,
+  mappingSummaryLabel,
+  matchMethodLabel,
   statusToUiLabel,
   toInvoice,
   toInvoicePayload,
+  toVendorMatch,
   type InvoiceDto,
 } from "@/lib/api/invoices";
 import {
+  useConfirmVendorMapping,
   useCreateInvoice,
   useDeleteInvoice,
   useInvoices,
   useUpdateInvoice,
+  useVendorMatch,
 } from "@/lib/queries/invoices";
 
 const COMPANY_A = "11111111-1111-1111-1111-111111111111";
@@ -26,6 +32,10 @@ const INVOICE: InvoiceDto = {
   company_id: COMPANY_A,
   document_id: DOC_A,
   vendor_id: null,
+  suggested_vendor_id: null,
+  previous_vendor_id: null,
+  vendor_mapping_status: "UNMAPPED",
+  vendor_match_method: null,
   invoice_number: "INV-2026-001",
   invoice_date: "2026-03-15",
   due_date: "2026-04-14",
@@ -95,6 +105,40 @@ function MutationHarness({ companyId }: { companyId: string }) {
   );
 }
 
+function MappingHarness({
+  companyId,
+  vendorId,
+}: {
+  companyId: string | undefined;
+  vendorId: string | null;
+}) {
+  const confirm = useConfirmVendorMapping(companyId);
+  return (
+    <div>
+      <button onClick={() => confirm.mutate({ id: INVOICE.id, vendorId })}>map vendor</button>
+      {confirm.isError ? <p>mapping failed</p> : null}
+    </div>
+  );
+}
+
+function MatchHarness({
+  companyId,
+  invoiceId,
+}: {
+  companyId: string | undefined;
+  invoiceId: string;
+}) {
+  const match = useVendorMatch(companyId, invoiceId, true);
+  return (
+    <div>
+      {match.data?.candidates.map((candidate) => (
+        <p key={candidate.id}>{candidate.name}</p>
+      ))}
+      {match.isError ? <p>match failed</p> : null}
+    </div>
+  );
+}
+
 function renderWith(queryClient: QueryClient, node: ReactNode) {
   return render(<QueryClientProvider client={queryClient}>{node}</QueryClientProvider>);
 }
@@ -116,6 +160,7 @@ describe("Invoice mapper", () => {
     expect(inv.documentId).toBe(DOC_A);
     expect(inv.invoiceNumber).toBe("INV-2026-001");
     expect(inv.invoiceDate).toBe("2026-03-15");
+    expect(inv.previousVendorId).toBeNull();
     expect(inv.taxableAmount).toBe("1000.00");
     expect(inv.createdAt).toBe(INVOICE.created_at);
   });
@@ -148,6 +193,68 @@ describe("Invoice mapper", () => {
   it("labels the processing and failure states", () => {
     expect(statusToUiLabel("PROCESSING")).toBe("Processing");
     expect(statusToUiLabel("FAILED")).toBe("Failed");
+  });
+
+  it("carries the vendor mapping state through the mapper", () => {
+    const inv = toInvoice({
+      ...INVOICE,
+      suggested_vendor_id: "aaaaaaaa-0000-0000-0000-000000000009",
+      vendor_mapping_status: "SUGGESTED",
+      vendor_match_method: "NORMALIZED_NAME",
+    });
+
+    expect(inv.suggestedVendorId).toBe("aaaaaaaa-0000-0000-0000-000000000009");
+    expect(inv.vendorMappingStatus).toBe("SUGGESTED");
+    expect(inv.vendorMatchMethod).toBe("NORMALIZED_NAME");
+  });
+
+  it("maps ambiguous match candidates without losing grouping fields", () => {
+    const match = toVendorMatch({
+      status: "AMBIGUOUS",
+      reason: "MULTIPLE_NAME_MATCHES",
+      method: null,
+      vendor_id: null,
+      requires_confirmation: false,
+      candidates: [
+        {
+          id: "vendor-a",
+          name: "ABC Traders",
+          gstin: "27AABCT1234F1Z5",
+          pan: "AABCT1234F",
+          parent_group: "Raw Material",
+          default_expense_ledger: "Purchase - Raw Material",
+          creditor_ledger: "ABC Traders",
+        },
+      ],
+    });
+
+    expect(match.status).toBe("AMBIGUOUS");
+    expect(match.requiresConfirmation).toBe(false);
+    expect(match.candidates[0]).toEqual({
+      id: "vendor-a",
+      name: "ABC Traders",
+      gstin: "27AABCT1234F1Z5",
+      pan: "AABCT1234F",
+      parentGroup: "Raw Material",
+      defaultExpenseLedger: "Purchase - Raw Material",
+      creditorLedger: "ABC Traders",
+    });
+  });
+
+  it("explains deterministic mapping evidence without inventing confidence", () => {
+    expect(matchMethodLabel("EXACT_GSTIN")).toBe("Matched by GSTIN");
+    expect(matchMethodLabel("EXACT_PAN")).toBe("Matched by PAN");
+    expect(matchMethodLabel("NORMALIZED_NAME")).toBe("Matched by normalized name");
+    expect(matchMethodLabel(null)).toBe("Confirmed manually");
+    expect(mappingStatusLabel("AMBIGUOUS")).toBe("Needs review");
+    expect(mappingSummaryLabel("MATCHED", "EXACT_GSTIN")).toBe("Matched by GSTIN");
+    expect(mappingSummaryLabel("MATCHED", "NORMALIZED_NAME")).toBe(
+      "Matched from confirmed history",
+    );
+    expect(mappingSummaryLabel("SUGGESTED", "NORMALIZED_NAME")).toBe(
+      "Suggested by normalized name",
+    );
+    expect(mappingSummaryLabel("UNMAPPED", null)).toBe("No vendor match");
   });
 
   it("builds an editable form with blank strings for missing values", () => {
@@ -328,5 +435,88 @@ describe("Invoice mutations", () => {
     fireEvent.click(screen.getByText("update"));
 
     await waitFor(() => expect(screen.getByText("mutation failed")).toBeTruthy());
+  });
+
+  it("POSTs a vendor confirmation to the company-scoped invoice path", async () => {
+    renderWith(makeClient(), <MappingHarness companyId={COMPANY_A} vendorId="vendor-a" />);
+    fireEvent.click(screen.getByText("map vendor"));
+
+    await waitFor(() => {
+      const post = calls().find(
+        ([url, init]) => init?.method === "POST" && String(url).includes("/vendor-mapping"),
+      );
+      expect(post).toBeTruthy();
+      expect(post![0]).toContain(
+        `/api/v1/companies/${COMPANY_A}/invoices/${INVOICE.id}/vendor-mapping`,
+      );
+      expect(JSON.parse(String(post![1].body))).toEqual({ vendor_id: "vendor-a" });
+    });
+  });
+
+  it("sends null to reject a suggestion without assigning a vendor", async () => {
+    renderWith(makeClient(), <MappingHarness companyId={COMPANY_A} vendorId={null} />);
+    fireEvent.click(screen.getByText("map vendor"));
+
+    await waitFor(() => {
+      const post = calls().find(
+        ([url, init]) => init?.method === "POST" && String(url).includes("/vendor-mapping"),
+      );
+      expect(JSON.parse(String(post![1].body))).toEqual({ vendor_id: null });
+    });
+  });
+
+  it("surfaces a vendor-mapping failure instead of pretending it succeeded", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "Vendor not found" }, 404)),
+    );
+    renderWith(makeClient(), <MappingHarness companyId={COMPANY_A} vendorId="vendor-b" />);
+    fireEvent.click(screen.getByText("map vendor"));
+
+    await waitFor(() => expect(screen.getByText("mapping failed")).toBeTruthy());
+  });
+
+  it("fetches the company-scoped match preview candidates", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) =>
+        String(url).includes("/vendor-match")
+          ? jsonResponse({
+              status: "AMBIGUOUS",
+              reason: "MULTIPLE_NAME_MATCHES",
+              method: null,
+              vendor_id: null,
+              requires_confirmation: false,
+              candidates: [
+                {
+                  id: "vendor-a",
+                  name: "ABC Traders",
+                  gstin: "27AABCT1234F1Z5",
+                  pan: "AABCT1234F",
+                  parent_group: "Raw Material",
+                  default_expense_ledger: "Purchase - Raw Material",
+                  creditor_ledger: "ABC Traders",
+                },
+              ],
+            })
+          : jsonResponse([INVOICE]),
+      ),
+    );
+
+    renderWith(makeClient(), <MatchHarness companyId={COMPANY_A} invoiceId={INVOICE.id} />);
+
+    await waitFor(() => expect(screen.getByText("ABC Traders")).toBeTruthy());
+    const get = calls().find(([url]) => String(url).includes("/vendor-match"));
+    expect(get![0]).toContain(`/api/v1/companies/${COMPANY_A}/invoices/${INVOICE.id}/vendor-match`);
+  });
+
+  it("surfaces a match-preview failure", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => jsonResponse({ detail: "Invoice not found" }, 404)),
+    );
+    renderWith(makeClient(), <MatchHarness companyId={COMPANY_A} invoiceId={INVOICE.id} />);
+
+    await waitFor(() => expect(screen.getByText("match failed")).toBeTruthy());
   });
 });

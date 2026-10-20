@@ -19,11 +19,63 @@ export type InvoiceStatus = "DRAFT" | "PROCESSING" | "PROCESSED" | "NEEDS_REVIEW
  */
 export type InvoiceSource = "MANUAL" | "AI";
 
+/** Mirrors `VendorMappingStatus` in backend/app/models/invoice.py. */
+export type VendorMappingStatus =
+  "UNMAPPED" | "SUGGESTED" | "MATCHED" | "CONFIRMED" | "REJECTED" | "AMBIGUOUS";
+
+/** Mirrors `VendorMatchMethod` in backend/app/models/invoice.py. */
+export type VendorMatchMethod = "EXACT_GSTIN" | "EXACT_PAN" | "NORMALIZED_NAME";
+
+/** Mirrors the read-only match preview in backend/app/schemas/invoice.py. */
+export type VendorMatchStatus = "MATCHED" | "NO_MATCH" | "AMBIGUOUS";
+
+export interface VendorMatchCandidateDto {
+  id: string;
+  name: string;
+  gstin: string | null;
+  pan: string | null;
+  parent_group: string | null;
+  default_expense_ledger: string | null;
+  creditor_ledger: string | null;
+}
+
+export interface VendorMatchDto {
+  status: VendorMatchStatus;
+  reason: string;
+  method: VendorMatchMethod | null;
+  vendor_id: string | null;
+  requires_confirmation: boolean;
+  candidates: VendorMatchCandidateDto[];
+}
+
+export interface VendorMatchCandidate {
+  id: string;
+  name: string;
+  gstin: string;
+  pan: string;
+  parentGroup: string;
+  defaultExpenseLedger: string;
+  creditorLedger: string;
+}
+
+export interface VendorMatch {
+  status: VendorMatchStatus;
+  reason: string;
+  method: VendorMatchMethod | null;
+  vendorId: string | null;
+  requiresConfirmation: boolean;
+  candidates: VendorMatchCandidate[];
+}
+
 export interface InvoiceDto {
   id: string;
   company_id: string;
   document_id: string;
   vendor_id: string | null;
+  suggested_vendor_id: string | null;
+  previous_vendor_id: string | null;
+  vendor_mapping_status: VendorMappingStatus;
+  vendor_match_method: VendorMatchMethod | null;
   invoice_number: string | null;
   invoice_date: string | null;
   due_date: string | null;
@@ -111,6 +163,10 @@ export const toInvoice = (dto: InvoiceDto) => ({
   companyId: dto.company_id,
   documentId: dto.document_id,
   vendorId: dto.vendor_id,
+  suggestedVendorId: dto.suggested_vendor_id,
+  previousVendorId: dto.previous_vendor_id,
+  vendorMappingStatus: dto.vendor_mapping_status,
+  vendorMatchMethod: dto.vendor_match_method,
   invoiceNumber: dto.invoice_number,
   invoiceDate: dto.invoice_date,
   dueDate: dto.due_date,
@@ -134,6 +190,26 @@ export const toInvoice = (dto: InvoiceDto) => ({
 });
 
 export type UiInvoice = ReturnType<typeof toInvoice>;
+
+const candidateFromDto = (dto: VendorMatchCandidateDto): VendorMatchCandidate => ({
+  id: dto.id,
+  name: dto.name,
+  gstin: blank(dto.gstin),
+  pan: blank(dto.pan),
+  parentGroup: blank(dto.parent_group),
+  defaultExpenseLedger: blank(dto.default_expense_ledger),
+  creditorLedger: blank(dto.creditor_ledger),
+});
+
+/** Read-only deterministic match preview -> UI model. */
+export const toVendorMatch = (dto: VendorMatchDto): VendorMatch => ({
+  status: dto.status,
+  reason: dto.reason,
+  method: dto.method,
+  vendorId: dto.vendor_id,
+  requiresConfirmation: dto.requires_confirmation,
+  candidates: dto.candidates.map(candidateFromDto),
+});
 
 /** UI edit form -> API payload. Empty strings become null. */
 export const toInvoicePayload = (form: Partial<InvoiceFormValues>): InvoiceWriteDto => {
@@ -192,6 +268,47 @@ const UI_STATUS_LABEL: Record<InvoiceStatus, string> = {
 
 export const statusToUiLabel = (status: InvoiceStatus): string => UI_STATUS_LABEL[status] ?? status;
 
+const MAPPING_STATUS_LABEL: Record<VendorMappingStatus, string> = {
+  UNMAPPED: "No match",
+  SUGGESTED: "Suggestion",
+  MATCHED: "Matched",
+  CONFIRMED: "Confirmed",
+  REJECTED: "Rejected",
+  AMBIGUOUS: "Needs review",
+};
+
+export const mappingStatusLabel = (status: VendorMappingStatus): string =>
+  MAPPING_STATUS_LABEL[status] ?? status;
+
+export const matchMethodLabel = (method: VendorMatchMethod | null): string => {
+  if (method === "EXACT_GSTIN") return "Matched by GSTIN";
+  if (method === "EXACT_PAN") return "Matched by PAN";
+  if (method === "NORMALIZED_NAME") return "Matched by normalized name";
+  return "Confirmed manually";
+};
+
+/**
+ * Explains how the current mapping came about. No confidence percentage is
+ * invented: the backend only records deterministic evidence.
+ */
+export const mappingSummaryLabel = (
+  status: VendorMappingStatus,
+  method: VendorMatchMethod | null,
+): string => {
+  if (status === "SUGGESTED") return "Suggested by normalized name";
+  if (status === "MATCHED") {
+    if (method === "NORMALIZED_NAME") return "Matched from confirmed history";
+    return matchMethodLabel(method);
+  }
+  if (status === "CONFIRMED") {
+    if (method === "NORMALIZED_NAME") return "Confirmed from name suggestion";
+    return "Confirmed manually";
+  }
+  if (status === "REJECTED") return "Suggestion rejected";
+  if (status === "AMBIGUOUS") return "Manual review required";
+  return "No vendor match";
+};
+
 export const STATUS_OPTIONS: readonly InvoiceStatus[] = [
   "DRAFT",
   "PROCESSING",
@@ -230,4 +347,16 @@ export const invoicesApi = {
   /** Asks the backend to extract automatically from the source document. */
   process: (companyId: string, invoiceId: string) =>
     apiFetch<ProcessResult>(`${base(companyId)}/${invoiceId}/process`, { method: "POST" }),
+  /** Preview the current deterministic match and its candidates. */
+  match: (companyId: string, invoiceId: string) =>
+    apiFetch<VendorMatchDto>(`${base(companyId)}/${invoiceId}/vendor-match`),
+  /**
+   * Confirm a suggested vendor, assign one manually, or reject a suggestion
+   * with `vendorId: null`. The backend verifies company ownership.
+   */
+  confirmVendorMapping: (companyId: string, invoiceId: string, vendorId: string | null) =>
+    apiFetch<InvoiceDto>(`${base(companyId)}/${invoiceId}/vendor-mapping`, {
+      method: "POST",
+      body: JSON.stringify({ vendor_id: vendorId }),
+    }),
 };

@@ -21,12 +21,16 @@ import {
   type InvoiceFormValues,
 } from "@/lib/api/invoices";
 import {
+  useConfirmVendorMapping,
   useCreateInvoice,
   useDeleteInvoice,
   useInvoices,
   useProcessInvoice,
   useUpdateInvoice,
+  useVendorMatch,
 } from "@/lib/queries/invoices";
+import { useVendors } from "@/lib/queries/vendors";
+import { VendorMappingPanel } from "@/components/pal/vendor-mapping";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -49,13 +53,20 @@ function InvoicePage() {
 
   const { data, isPending, isError, error, refetch } = useInvoices(companyId);
   const { data: documents } = useDocuments(companyId);
+  const { data: vendors } = useVendors(companyId, true);
   const createInvoice = useCreateInvoice(companyId);
   const updateInvoice = useUpdateInvoice(companyId);
   const deleteInvoice = useDeleteInvoice(companyId);
   const process = useProcessInvoice(companyId);
+  const confirmMapping = useConfirmVendorMapping(companyId);
 
   const invoices = data ?? [];
   const invoice = invoices.find((i) => i.id === inv) ?? invoices[0];
+  const matchPreview = useVendorMatch(
+    companyId,
+    invoice?.id,
+    invoice?.vendorMappingStatus === "AMBIGUOUS",
+  );
   const [form, setForm] = useState<InvoiceFormValues | null>(null);
   const [dirty, setDirty] = useState(false);
 
@@ -231,6 +242,15 @@ function InvoicePage() {
     }
   };
 
+  const mapVendor = async (vendorId: string | null) => {
+    try {
+      await confirmMapping.mutateAsync({ id: invoice.id, vendorId });
+      toast.success(vendorId ? "Vendor mapping confirmed" : "Vendor suggestion rejected");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not update vendor mapping");
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -372,10 +392,21 @@ function InvoicePage() {
             />
           </Section>
 
-          <Section title="Ledger Mapping">
-            <EmptyState
-              title="Vendor mapping is not connected yet"
-              hint="Mapping a vendor to a ledger is its own later step."
+          <Section title="Vendor Mapping">
+            <VendorMappingPanel
+              key={invoice.id}
+              status={invoice.vendorMappingStatus}
+              matchMethod={invoice.vendorMatchMethod}
+              vendorId={invoice.vendorId}
+              suggestedVendorId={invoice.suggestedVendorId}
+              previousVendorId={invoice.previousVendorId}
+              vendors={vendors ?? []}
+              candidates={matchPreview.data?.candidates ?? []}
+              onConfirm={mapVendor}
+              onReject={() => mapVendor(null)}
+              onMap={mapVendor}
+              pending={confirmMapping.isPending}
+              error={confirmMapping.error instanceof Error ? confirmMapping.error.message : null}
             />
           </Section>
 

@@ -62,6 +62,34 @@ class InvoiceSource(str, enum.Enum):
     AI = "AI"
 
 
+class VendorMappingStatus(str, enum.Enum):
+    """How far the invoice has got in linking to a vendor master record.
+
+    `SUGGESTED` is deliberately separate from `MATCHED`: a name-only match is
+    not an accounting fact until a person confirms it. `REJECTED` prevents an
+    automatic matcher from silently re-applying the suggestion on a retry.
+    """
+
+    UNMAPPED = "UNMAPPED"
+    SUGGESTED = "SUGGESTED"
+    MATCHED = "MATCHED"
+    CONFIRMED = "CONFIRMED"
+    REJECTED = "REJECTED"
+    AMBIGUOUS = "AMBIGUOUS"
+
+
+class VendorMatchMethod(str, enum.Enum):
+    """The deterministic evidence behind a vendor match.
+
+    A user-confirmed mapping may carry the method of the suggestion that led to
+    it, or no method when the vendor was chosen manually.
+    """
+
+    EXACT_GSTIN = "EXACT_GSTIN"
+    EXACT_PAN = "EXACT_PAN"
+    NORMALIZED_NAME = "NORMALIZED_NAME"
+
+
 INVOICE_STATUS_ENUM = SAEnum(
     InvoiceStatus,
     name="invoice_status",
@@ -71,6 +99,18 @@ INVOICE_STATUS_ENUM = SAEnum(
 INVOICE_SOURCE_ENUM = SAEnum(
     InvoiceSource,
     name="invoice_source",
+    values_callable=lambda enum_cls: [member.value for member in enum_cls],
+)
+
+VENDOR_MAPPING_STATUS_ENUM = SAEnum(
+    VendorMappingStatus,
+    name="invoice_vendor_mapping_status",
+    values_callable=lambda enum_cls: [member.value for member in enum_cls],
+)
+
+VENDOR_MATCH_METHOD_ENUM = SAEnum(
+    VendorMatchMethod,
+    name="invoice_vendor_match_method",
     values_callable=lambda enum_cls: [member.value for member in enum_cls],
 )
 
@@ -103,6 +143,32 @@ class Invoice(Base):
         ForeignKey("vendors.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+    # A pending name-based suggestion. Separate from vendor_id so a suggestion
+    # is never mistaken for an assigned vendor by reports or exports.
+    suggested_vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vendors.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    # The immediately previous assignment, kept only when a person explicitly
+    # changes or clears a mapped vendor. This is deliberately one step of
+    # history, not an approval workflow.
+    previous_vendor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("vendors.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    vendor_mapping_status: Mapped[VendorMappingStatus] = mapped_column(
+        VENDOR_MAPPING_STATUS_ENUM,
+        nullable=False,
+        default=VendorMappingStatus.UNMAPPED,
+        server_default=VendorMappingStatus.UNMAPPED.value,
+    )
+    vendor_match_method: Mapped[VendorMatchMethod | None] = mapped_column(
+        VENDOR_MATCH_METHOD_ENUM,
+        nullable=True,
     )
 
     invoice_number: Mapped[str | None] = mapped_column(String(128))
