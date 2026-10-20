@@ -11,6 +11,7 @@ remember.
 
 from fastapi import APIRouter
 
+from app.api.v1.ai.router import router as ai_router
 from app.api.v1.bank.router import router as bank_router
 from app.api.v1.companies.router import router as companies_router
 from app.api.v1.documents.router import router as documents_router
@@ -51,6 +52,9 @@ api_router.include_router(
 api_router.include_router(
     bank_router, prefix="/companies/{company_id}", tags=["bank"]
 )
+
+# AI Provider - top-level, not company-scoped (configuration is global)
+api_router.include_router(ai_router, prefix="/ai", tags=["ai"])
 
 
 # ---------------------------------------------------------------------------

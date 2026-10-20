@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     # Uploads above this size are rejected before anything touches disk.
     document_max_upload_bytes: int = 20 * 1024 * 1024  # 20 MB
 
+    # --- AI Provider (DeepSeek) ----------------------------------------
+    # API key is NEVER logged, returned, or exposed to the frontend.
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-flash"
+
     @property
     def document_storage_dir(self) -> Path:
         """Absolute, expanded storage root for uploaded documents."""
@@ -60,6 +66,11 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """True when running against the production environment."""
         return self.app_env.lower() == "production"
+
+    @property
+    def ai_configured(self) -> bool:
+        """Whether an AI provider is configured and usable."""
+        return bool(self.deepseek_api_key and self.deepseek_api_key.strip())
 
 
 @lru_cache

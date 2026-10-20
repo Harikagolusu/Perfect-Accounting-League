@@ -8,6 +8,10 @@ python-dotenv>=1.0.0
 # Required by FastAPI to parse multipart/form-data file uploads.
 python-multipart>=0.0.9
 
+# AI Provider
+# --------------------------------------------------------------------------
+openai>=1.35.0
+
 # Database
 # --------------------------------------------------------------------------
 SQLAlchemy>=2.0.30

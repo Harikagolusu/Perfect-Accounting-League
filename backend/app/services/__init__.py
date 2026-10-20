@@ -3,6 +3,7 @@
 Routers stay thin and delegate here.
 """
 
+from app.services.ai import AIProvider, AIProviderError, AIResponse, get_ai_provider
 from app.services.bank import (
     BankAccountNotFoundError,
     BankStatementNotFoundError,
@@ -21,6 +22,9 @@ from app.services.invoice_validation import InvoiceTransitionError
 from app.services.vendor import VendorNotFoundError
 
 __all__ = [
+    "AIProvider",
+    "AIProviderError",
+    "AIResponse",
     "BankAccountNotFoundError",
     "BankStatementNotFoundError",
     "BankTransactionNotFoundError",
@@ -32,6 +36,7 @@ __all__ = [
     "InvoiceTransitionError",
     "VendorNotFoundError",
     "VendorOwnershipError",
+    "get_ai_provider",
     "validate_statement",
     "validate_transaction",
 ]
