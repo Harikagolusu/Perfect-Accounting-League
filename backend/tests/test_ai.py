@@ -292,6 +292,78 @@ class TestProviderErrorConversion:
         assert "error" in str(exc_info.value).lower()
         assert exc_info.value.code == AIProviderError.PROVIDER_ERROR
 
+    def test_generate_from_text_delegates_and_requests_json(self, monkeypatch):
+        """Text extraction uses the text capability and asks for JSON."""
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key")
+        clear_settings_cache()
+        provider = get_ai_provider()
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"is_invoice": true}'
+        mock_response.usage = None
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_response
+        provider._client = mock_client
+
+        result = provider.generate_from_text(
+            "read this", system_prompt="be careful", json_mode=True
+        )
+
+        assert result.text == '{"is_invoice": true}'
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["messages"][0] == {
+            "role": "system",
+            "content": "be careful",
+        }
+        assert kwargs["messages"][1] == {"role": "user", "content": "read this"}
+
+    def test_generate_from_images_sends_prepared_images_and_requests_json(
+        self, monkeypatch
+    ):
+        """The original vision capability still works after adding text mode."""
+        from app.services.ai.provider import ImageInput
+
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key")
+        clear_settings_cache()
+        provider = get_ai_provider()
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"is_invoice": true}'
+        mock_response.usage = None
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = mock_response
+        provider._client = mock_client
+
+        result = provider.generate_from_images(
+            "read this",
+            [ImageInput(data=b"\xff\xd8\xffpage", mime_type="image/jpeg")],
+            system_prompt="be careful",
+            json_mode=True,
+        )
+
+        assert result.text == '{"is_invoice": true}'
+        _, kwargs = mock_client.chat.completions.create.call_args
+        assert kwargs["response_format"] == {"type": "json_object"}
+        content = kwargs["messages"][1]["content"]
+        assert content[0] == {"type": "text", "text": "read this"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+    def test_generate_from_images_rejects_an_empty_image_list(self, monkeypatch):
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key")
+        clear_settings_cache()
+        provider = get_ai_provider()
+
+        with pytest.raises(AIProviderError) as exc_info:
+            provider.generate_from_images("read this", [])
+
+        assert exc_info.value.code == AIProviderError.PROVIDER_ERROR
+        assert "No images" in str(exc_info.value)
+
     def test_generate_text_returns_response_on_success(self, monkeypatch):
         """Successful generation returns an AIResponse."""
         monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-key")

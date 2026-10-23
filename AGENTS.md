@@ -10,7 +10,7 @@
 <!-- LOVABLE:END -->
 
 ## Architecture
-- PAL is frontend-only for now: all demo data lives in `src/lib/mock-data.ts` and in-memory state in `src/lib/store.tsx` — swap these for API calls when the backend lands, keep pages free of hardcoded data.
+- PAL reads company-scoped records from the FastAPI backend. There is no seeded or sample dataset; modules without a backend render empty states instead of placeholder records. Local-only session state lives in `src/lib/store.tsx`.
 - Every company-owned record carries `companyId` and pages read it via `useScoped`, so the UI never shows another company's data (backend must still enforce this).
 - File exports go through `src/lib/export.ts`; only CSV (and review XML) is generated in-browser, XLSX returns null so the UI never fakes a download.
 - Shared UI pieces live in `src/components/pal/`; colours come only from tokens in `src/styles.css`.

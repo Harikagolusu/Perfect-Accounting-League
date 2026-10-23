@@ -1,6 +1,6 @@
 import type { TDSWorking } from "./types";
 
-/** Statutory TDS due = base × rate, rounded to the rupee. Demo rule — not tax advice. */
+/** Reference TDS due = base × rate, rounded to the rupee. Not tax advice. */
 export const tdsDue = (t: Pick<TDSWorking, "base" | "rate">) => Math.round((t.base * t.rate) / 100);
 export const tdsVariance = (t: Pick<TDSWorking, "base" | "rate" | "deducted">) => tdsDue(t) - t.deducted;
 export const quarterOf = (iso: string) => {

@@ -11,11 +11,17 @@ python-multipart>=0.0.9
 # AI Provider
 # --------------------------------------------------------------------------
 openai>=1.35.0
-# Local PDF rasterisation and image preparation for invoice extraction.
-# Both run in-process; no document leaves the machine except the image payload
-# sent to the explicitly configured AI provider.
+# Local PDF text extraction, rasterisation and image preparation for invoice
+# extraction. These run in-process; no document leaves the machine except the
+# text or image payload sent to the explicitly configured AI provider.
 pymupdf>=1.24.0,<2.0
 Pillow>=10.0.0
+# Structured invoice documents are read as text, not images.
+openpyxl>=3.1.0
+python-docx>=1.1.0
+# OCR fallback for scanned PDFs. Tesseract itself is a system package: when it
+# is absent, the extractor safely falls back to the vision provider.
+pytesseract>=0.3.10
 
 # Database
 # --------------------------------------------------------------------------

@@ -26,6 +26,18 @@ from app.services.document_preparation import (
     DocumentPreparationError,
     prepare_document,
 )
+from app.services.invoice_extraction import (
+    AIDocumentInvoiceExtractor,
+    AI_UNSUPPORTED_CAPABILITY,
+    EXTRACTION_TEXT_TOO_LARGE,
+    MAX_TEXT_PROMPT_CHARACTERS,
+    ExtractionMethod,
+)
+from app.services.invoice_prompt import (
+    INVOICE_TEXT_SYSTEM_PROMPT,
+    build_text_extraction_prompt,
+)
+from app.services.text_quality import PageText
 from app.services.invoice_extraction_validation import (
     InvalidExtractionOutput,
     parse_extraction_payload,
@@ -72,6 +84,9 @@ class FakeProvider:
         self.configured = configured
         self.error = error
         self.calls = 0
+        self.text_calls = 0
+        self.image_calls = 0
+        self.prompts: tuple[str, ...] = ()
         self.images: tuple[Any, ...] = ()
         self.json_mode: bool | None = None
         self.system_prompt: str | None = None
@@ -79,8 +94,37 @@ class FakeProvider:
     def is_configured(self) -> bool:
         return self.configured
 
+    def _response(self) -> AIResponse:
+        if self.error is not None:
+            raise self.error
+        return AIResponse(
+            text=self.text,
+            model=self.model,
+            usage={
+                "prompt_tokens": 120,
+                "completion_tokens": 80,
+                "total_tokens": 200,
+            },
+        )
+
     def generate_text(self, *args: Any, **kwargs: Any) -> AIResponse:
         raise NotImplementedError
+
+    def generate_from_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        self.calls += 1
+        self.text_calls += 1
+        self.prompts = (*self.prompts, prompt)
+        self.json_mode = json_mode
+        self.system_prompt = system_prompt
+        return self._response()
 
     def generate_from_images(
         self,
@@ -93,20 +137,12 @@ class FakeProvider:
         json_mode: bool = False,
     ) -> AIResponse:
         self.calls += 1
+        self.image_calls += 1
+        self.prompts = (*self.prompts, prompt)
         self.images = tuple(images)
         self.json_mode = json_mode
         self.system_prompt = system_prompt
-        if self.error is not None:
-            raise self.error
-        return AIResponse(
-            text=self.text,
-            model=self.model,
-            usage={
-                "prompt_tokens": 120,
-                "completion_tokens": 80,
-                "total_tokens": 200,
-            },
-        )
+        return self._response()
 
 
 @pytest.fixture
@@ -128,14 +164,69 @@ def fake_ai(monkeypatch: pytest.MonkeyPatch) -> FakeProvider:
 def _company(client: TestClient, name: str = "Extraction Co") -> dict[str, Any]:
     response = client.post(COMPANIES_URL, json={"name": name})
     assert response.status_code == 201, response.text
-    return response.json()
+    company = response.json()
+    # These tests cover extraction, not vendor creation. Seed the supplier
+    # master with the sample invoice's identity so a clean extraction keeps
+    # its PROCESSED status instead of becoming a vendor-mapping review.
+    vendor = client.post(
+        f"{COMPANIES_URL}/{company['id']}/vendors",
+        json={
+            "name": SAMPLE_INVOICE["vendor_name"],
+            "gstin": SAMPLE_INVOICE["vendor_gstin"],
+            "pan": SAMPLE_INVOICE["vendor_pan"],
+        },
+    )
+    assert vendor.status_code == 201, vendor.text
+    return company
+
+
+def _pdf_text_lines(index: int) -> tuple[str, ...]:
+    """Enough real invoice text for the deterministic quality check."""
+    return (
+        "TAX INVOICE",
+        "Deccan Freight Carriers",
+        "GSTIN: 27AACCD1234F1Z2",
+        f"Invoice No: DFC/2026/{42 + index:04d}",
+        "Invoice Date: 15/03/2026",
+        "Due Date: 14/04/2026",
+        "Buyer GSTIN: 27AAJCS4821K1Z5",
+        "Taxable Amount: 1,000.00",
+        "CGST @ 9%: 90.00",
+        "SGST @ 9%: 90.00",
+        "Grand Total: 1,180.00",
+    )
 
 
 def _pdf_bytes(pages: int = 1) -> bytes:
+    """A digital PDF with a real native text layer."""
     document = pymupdf.open()
     for index in range(pages):
         page = document.new_page()
-        page.insert_text((72, 72), f"TAX INVOICE - page {index + 1}")
+        for line_index, line in enumerate(_pdf_text_lines(index)):
+            page.insert_text((72, 72 + line_index * 16), line)
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def _pdf_bytes_from_lines(lines: tuple[str, ...]) -> bytes:
+    """A one-page digital PDF with caller-supplied text."""
+    document = pymupdf.open()
+    page = document.new_page()
+    for index, line in enumerate(lines):
+        page.insert_text((72, 72 + index * 16), line)
+    data = document.tobytes()
+    document.close()
+    return data
+
+
+def _scanned_pdf_bytes(pages: int = 1) -> bytes:
+    """A PDF with page images and no text layer, like a scanner produces."""
+    document = pymupdf.open()
+    image = _image_bytes("PNG")
+    for _ in range(pages):
+        page = document.new_page(width=700, height=420)
+        page.insert_image(page.rect, stream=image)
     data = document.tobytes()
     document.close()
     return data
@@ -155,6 +246,43 @@ def _image_bytes(fmt: str = "PNG") -> bytes:
         draw.text((25, 25 + index * 40), line, fill="black")
     buffer = BytesIO()
     image.save(buffer, format=fmt)
+    return buffer.getvalue()
+
+
+def _xlsx_bytes() -> bytes:
+    from openpyxl import Workbook
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Invoice"
+    rows = (
+        ("TAX INVOICE",),
+        ("Deccan Freight Carriers",),
+        ("GSTIN", "27AACCD1234F1Z2"),
+        ("Invoice No", "DFC/2026/0042"),
+        ("Invoice Date", "15/03/2026"),
+        ("Taxable Amount", "1000.00"),
+        ("CGST", "90.00"),
+        ("SGST", "90.00"),
+        ("Grand Total", "1180.00"),
+        ("Currency", "INR"),
+    )
+    for row in rows:
+        sheet.append(row)
+    buffer = BytesIO()
+    workbook.save(buffer)
+    workbook.close()
+    return buffer.getvalue()
+
+
+def _docx_bytes() -> bytes:
+    from docx import Document as DocxDocument
+
+    document = DocxDocument()
+    for line in _pdf_text_lines(0):
+        document.add_paragraph(line)
+    buffer = BytesIO()
+    document.save(buffer)
     return buffer.getvalue()
 
 
@@ -268,12 +396,15 @@ def test_valid_pdf_extraction_creates_a_processed_ai_invoice(
     assert body["model"] == "fake-vision-1"
     assert body["usage"]["total_tokens"] == 200
     assert body["issues"] == []
+    assert body["extraction_method"] == "NATIVE_TEXT"
     assert "file_path" not in body
 
     invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    vendor = client.get(f"{COMPANIES_URL}/{company['id']}/vendors").json()[0]
     assert invoice["source"] == "AI"
     assert invoice["status"] == "PROCESSED"
-    assert invoice["vendor_id"] is None
+    assert invoice["vendor_id"] == vendor["id"]
+    assert invoice["vendor_mapping_status"] == "MATCHED"
     assert invoice["invoice_number"] == "DFC/2026/0042"
     assert invoice["invoice_date"] == "2026-03-15"
     assert invoice["due_date"] == "2026-04-14"
@@ -293,10 +424,107 @@ def test_valid_pdf_extraction_creates_a_processed_ai_invoice(
 
     assert _get_document(client, company["id"], document["id"])["status"] == "PROCESSED"
     assert fake_ai.calls == 1
+    assert fake_ai.text_calls == 1
+    # A digital PDF is never rasterised: no image payload was sent.
+    assert fake_ai.image_calls == 0
+    assert fake_ai.images == ()
     assert fake_ai.json_mode is True
-    assert len(fake_ai.images) == 1
-    assert fake_ai.images[0].mime_type == "image/jpeg"
     assert fake_ai.system_prompt and "Never invent" in fake_ai.system_prompt
+    assert "DOCUMENT TEXT" in fake_ai.prompts[0]
+    assert "DFC/2026/0042" in fake_ai.prompts[0]
+
+
+def test_llm_verification_wins_over_a_regex_candidate() -> None:
+    """Regex is a hint; the model's reading of the source is what is stored."""
+    source = (
+        "TAX INVOICE",
+        "Deccan Freight Carriers",
+        "27AACCD1234F1Z2",
+        "27AAJCS4821K1Z5",
+        "Invoice No: DFC/2026/0042",
+        "Invoice Date: 15/03/2026",
+        "Taxable Amount: 1,000.00",
+        "CGST @ 9%: 90.00",
+        "SGST @ 9%: 90.00",
+        "Grand Total: 1,180.00",
+    )
+    # The unlabelled header makes the regex guess the first GSTIN as the vendor.
+    # The model reads the surrounding layout and chooses the other way round.
+    interpreted = {
+        **SAMPLE_INVOICE,
+        "vendor_gstin": "27AAJCS4821K1Z5",
+        "vendor_pan": "AAJCS4821K",
+        "buyer_gstin": "27AACCD1234F1Z2",
+    }
+    provider = FakeProvider(text=json.dumps(interpreted))
+    extractor = AIDocumentInvoiceExtractor(provider=provider, ocr_processor=None)
+
+    result = extractor.extract(
+        _stored("invoice.pdf"), _pdf_bytes_from_lines(source)
+    )
+
+    assert result.outcome.value == "PROCESSED"
+    assert result.values["vendor_gstin"] == "27AAJCS4821K1Z5"
+    assert result.values["buyer_gstin"] == "27AACCD1234F1Z2"
+    # Both conflicting candidates reached the model, so this is not an accident
+    # of the regex failing to find the second value.
+    assert "27AACCD1234F1Z2" in provider.prompts[0]
+    assert "27AAJCS4821K1Z5" in provider.prompts[0]
+
+
+def test_ocr_confusion_is_preserved_and_not_silently_corrected() -> None:
+    """Visually similar characters are reported as read, never repaired."""
+    provider = FakeProvider(
+        text=json.dumps(
+            {
+                **SAMPLE_INVOICE,
+                "invoice_number": "INV-0O1",  # zero, letter O, one
+                "vendor_gstin": "27AACCD1234F1ZS",  # final S, not 5
+                "total_amount": "1180",  # decimal point missing
+            }
+        )
+    )
+    extractor = AIDocumentInvoiceExtractor(provider=provider, ocr_processor=None)
+
+    result = extractor.extract(
+        _stored("invoice.pdf"), _pdf_bytes_from_lines(_pdf_text_lines(0))
+    )
+
+    assert result.values["invoice_number"] == "INV-0O1"
+    assert result.values["vendor_gstin"] == "27AACCD1234F1ZS"
+    assert result.values["total_amount"] == Decimal("1180")
+    # No guessing that 0O1 meant 001 or that S meant 5.
+    assert result.values["invoice_number"] != "INV-001"
+    assert result.values["vendor_gstin"] != "27AACCD1234F1Z5"
+
+
+def test_text_prompt_states_that_candidates_are_not_authoritative() -> None:
+    prompt = build_text_extraction_prompt(
+        "SOURCE TEXT", "invoice_number: 'WRONG' (page 1)"
+    )
+
+    assert "candidate" in INVOICE_TEXT_SYSTEM_PROMPT.lower()
+    assert "Verify every value" in INVOICE_TEXT_SYSTEM_PROMPT
+    assert "Never invent" in INVOICE_TEXT_SYSTEM_PROMPT
+    assert "return null" in INVOICE_TEXT_SYSTEM_PROMPT
+    assert "may contain false positives" in prompt
+    assert "Return only values you can" in prompt
+    assert "WRONG" in prompt and "SOURCE TEXT" in prompt
+
+
+def test_text_limit_is_rejected_without_calling_the_provider() -> None:
+    provider = FakeProvider()
+    extractor = AIDocumentInvoiceExtractor(provider=provider, ocr_processor=None)
+    oversized = "TAX INVOICE " + ("x" * MAX_TEXT_PROMPT_CHARACTERS)
+
+    result = extractor._extract_text_pages(
+        (PageText(1, oversized),), ExtractionMethod.NATIVE_TEXT
+    )
+
+    assert result.outcome.value == "FAILED"
+    assert result.reason == EXTRACTION_TEXT_TOO_LARGE
+    assert result.extraction_method == "NATIVE_TEXT"
+    assert provider.calls == 0
 
 
 def test_image_document_is_accepted(
@@ -308,11 +536,14 @@ def test_image_document_is_accepted(
     response = _process_document(client, company["id"], document["id"])
 
     assert response.status_code == 200, response.text
-    assert response.json()["status"] == "PROCESSED"
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["extraction_method"] == "IMAGE_VISION"
+    assert fake_ai.image_calls == 1
     assert len(fake_ai.images) == 1
 
 
-def test_multi_page_pdf_sends_every_page(
+def test_multi_page_pdf_uses_native_text_for_every_page(
     client: TestClient, fake_ai: FakeProvider
 ) -> None:
     company = _company(client)
@@ -321,7 +552,132 @@ def test_multi_page_pdf_sends_every_page(
     response = _process_document(client, company["id"], document["id"])
 
     assert response.status_code == 200, response.text
-    assert len(fake_ai.images) == 3
+    assert response.json()["extraction_method"] == "NATIVE_TEXT"
+    assert fake_ai.text_calls == 1
+    assert fake_ai.image_calls == 0
+    # Every page boundary reaches the model; no page is silently dropped and
+    # the printed order is preserved.
+    prompt = fake_ai.prompts[0]
+    assert "--- Page 1 of 3 ---" in prompt
+    assert "--- Page 2 of 3 ---" in prompt
+    assert "--- Page 3 of 3 ---" in prompt
+    assert (
+        prompt.index("DFC/2026/0042")
+        < prompt.index("DFC/2026/0043")
+        < prompt.index("DFC/2026/0044")
+    )
+
+
+def test_scanned_pdf_falls_back_to_vision_when_ocr_is_unavailable(
+    client: TestClient, fake_ai: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnavailableOCR:
+        name = "unavailable"
+
+        def is_available(self) -> bool:
+            return False
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            raise AssertionError("must not run when unavailable")
+
+    monkeypatch.setattr(
+        "app.services.invoice_extraction.get_ocr_processor",
+        lambda: UnavailableOCR(),
+    )
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="scanned.pdf",
+        data=_scanned_pdf_bytes(pages=1),
+        content_type="application/pdf",
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["extraction_method"] == "IMAGE_VISION"
+    assert fake_ai.text_calls == 0
+    assert fake_ai.image_calls == 1
+    assert len(fake_ai.images) == 1
+
+
+def test_scanned_pdf_uses_ocr_text_when_it_is_usable(
+    client: TestClient, fake_ai: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeOCR:
+        name = "fake-ocr"
+
+        def is_available(self) -> bool:
+            return True
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            from app.services.text_quality import PageText
+
+            return (PageText(page_number=1, text="\n".join(_pdf_text_lines(0))),)
+
+    monkeypatch.setattr(
+        "app.services.invoice_extraction.get_ocr_processor", lambda: FakeOCR()
+    )
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="scanned.pdf",
+        data=_scanned_pdf_bytes(pages=1),
+        content_type="application/pdf",
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["extraction_method"] == "OCR_TEXT"
+    assert fake_ai.text_calls == 1
+    assert fake_ai.image_calls == 0
+
+
+def test_scanned_pdf_that_fails_ocr_and_vision_is_not_left_processing(
+    client: TestClient, fake_ai: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnavailableOCR:
+        name = "unavailable"
+
+        def is_available(self) -> bool:
+            return False
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            raise AssertionError("must not run when unavailable")
+
+    monkeypatch.setattr(
+        "app.services.invoice_extraction.get_ocr_processor",
+        lambda: UnavailableOCR(),
+    )
+    fake_ai.error = AIProviderError(
+        "vision timeout", provider="fake", code=AIProviderError.TIMEOUT
+    )
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="scanned.pdf",
+        data=_scanned_pdf_bytes(pages=1),
+        content_type="application/pdf",
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "FAILED"
+    assert body["reason"] == "AI_TIMEOUT"
+    assert body["extraction_method"] == "IMAGE_VISION"
+    assert _get_document(client, company["id"], document["id"])["status"] == "FAILED"
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert invoice["status"] == "FAILED"
 
 
 def test_explicit_invoice_process_endpoint_uses_the_same_lifecycle(
@@ -423,6 +779,29 @@ def test_provider_failures_move_both_records_to_failed(
     invoice = _get_invoice(client, company["id"], body["invoice_id"])
     assert invoice["status"] == "FAILED"
     assert invoice["invoice_number"] is None
+
+
+def test_failure_while_applying_the_result_does_not_leave_processing(
+    client: TestClient,
+    fake_ai: FakeProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _explode(*args: Any, **kwargs: Any) -> bool:
+        raise RuntimeError("database write failed")
+
+    monkeypatch.setattr("app.services.invoice._apply_vendor_mapping", _explode)
+    company = _company(client)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "FAILED"
+    assert body["reason"] == "EXTRACTION_INTERNAL_ERROR"
+    assert _get_document(client, company["id"], document["id"])["status"] == "FAILED"
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert invoice["status"] == "FAILED"
 
 
 def test_provider_failure_does_not_leak_the_exception_message(
@@ -824,16 +1203,16 @@ def test_company_cannot_process_another_companys_invoice(
 # ---------------------------------------------------------------------------
 
 
-def test_unsupported_document_type_fails_without_calling_ai(
+def test_legacy_xls_fails_safely_without_calling_ai(
     client: TestClient, fake_ai: FakeProvider
 ) -> None:
     company = _company(client)
     document = _upload(
         client,
         company["id"],
-        filename="ledger.xlsx",
-        data=b"PK\x03\x04" + b"0" * 40,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="ledger.xls",
+        data=b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"0" * 40,
+        content_type="application/vnd.ms-excel",
     )
 
     response = _process_document(client, company["id"], document["id"])
@@ -841,9 +1220,96 @@ def test_unsupported_document_type_fails_without_calling_ai(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["status"] == "FAILED"
-    assert body["reason"] == "UNSUPPORTED_DOCUMENT_TYPE"
-    assert "PDF, JPEG and PNG" in body["message"]
+    assert body["reason"] == "DOCUMENT_UNREADABLE"
+    assert ".xlsx" in body["message"]
     assert fake_ai.calls == 0
+
+
+def test_router_rejects_an_unsupported_extension() -> None:
+    from app.services.document_preparation import route_document
+
+    with pytest.raises(DocumentPreparationError) as caught:
+        route_document(_stored("ledger.csv"), b"a,b,c", max_pages=10)
+
+    assert (
+        caught.value.code
+        == DocumentPreparationError.UNSUPPORTED_DOCUMENT_TYPE
+    )
+
+
+def test_xlsx_invoice_uses_structured_text(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="invoice.xlsx",
+        data=_xlsx_bytes(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["extraction_method"] == "EXCEL_TEXT"
+    assert fake_ai.text_calls == 1
+    assert fake_ai.image_calls == 0
+    assert "--- Sheet: Invoice ---" in fake_ai.prompts[0]
+    assert "DFC/2026/0042" in fake_ai.prompts[0]
+
+
+def test_misnamed_structured_document_fails_without_calling_ai(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """A zip signature alone is not proof that the file is a real DOCX."""
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="renamed.docx",
+        data=_xlsx_bytes(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "FAILED"
+    assert body["reason"] == "DOCUMENT_UNREADABLE"
+    assert fake_ai.calls == 0
+
+
+def test_docx_invoice_uses_structured_text(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    company = _company(client)
+    document = _upload(
+        client,
+        company["id"],
+        filename="invoice.docx",
+        data=_docx_bytes(),
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+    )
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["extraction_method"] == "DOCX_TEXT"
+    assert fake_ai.text_calls == 1
+    assert fake_ai.image_calls == 0
+    assert "Deccan Freight Carriers" in fake_ai.prompts[0]
 
 
 # ---------------------------------------------------------------------------
@@ -936,6 +1402,302 @@ def test_manual_invoice_is_not_hijacked_by_process_document(
     assert manual_after["source"] == "MANUAL"
     assert manual_after["status"] == "DRAFT"
     assert manual_after["invoice_number"] == "MANUAL-1"
+
+
+# ---------------------------------------------------------------------------
+# Provider capability branches
+# ---------------------------------------------------------------------------
+
+
+class _TextUnsupportedProvider:
+    name = "textless"
+    model = "textless-1"
+
+    def __init__(self) -> None:
+        self.image_calls = 0
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_from_images(self, *args: Any, **kwargs: Any) -> AIResponse:
+        self.image_calls += 1
+        raise AssertionError("a PDF with text must not call vision")
+
+
+def test_text_capability_is_required_for_a_digital_pdf() -> None:
+    provider = _TextUnsupportedProvider()
+    extractor = AIDocumentInvoiceExtractor(provider=provider, ocr_processor=None)
+
+    result = extractor.extract(_stored("invoice.pdf"), _pdf_bytes())
+
+    assert result.outcome.value == "FAILED"
+    assert result.reason == AI_UNSUPPORTED_CAPABILITY
+    assert provider.image_calls == 0
+
+
+class _ImageUnsupportedProvider:
+    name = "visionless"
+    model = "visionless-1"
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_from_images(self, *args: Any, **kwargs: Any) -> AIResponse:
+        raise NotImplementedError
+
+
+def test_image_capability_failure_is_reported_safely() -> None:
+    extractor = AIDocumentInvoiceExtractor(
+        provider=_ImageUnsupportedProvider(), ocr_processor=None
+    )
+
+    result = extractor.extract(
+        _stored("invoice.png"), _image_bytes("PNG")
+    )
+
+    assert result.outcome.value == "FAILED"
+    assert result.reason == AI_UNSUPPORTED_CAPABILITY
+
+
+class _NoVisionMethodProvider:
+    """A text-capable provider with no vision method at all."""
+
+    name = "text-only"
+    model = "text-only-1"
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_from_text(self, *args: Any, **kwargs: Any) -> AIResponse:
+        raise AssertionError("an image must not be sent through the text path")
+
+
+def test_missing_vision_method_is_an_unsupported_capability_not_an_internal_error() -> None:
+    extractor = AIDocumentInvoiceExtractor(
+        provider=_NoVisionMethodProvider(), ocr_processor=None
+    )
+
+    result = extractor.extract(_stored("invoice.jpg"), _image_bytes("JPEG"))
+
+    assert result.outcome.value == "FAILED"
+    assert result.reason == AI_UNSUPPORTED_CAPABILITY
+    assert result.extraction_method == "IMAGE_VISION"
+
+
+class _LegacyVisionProvider:
+    """A vision provider written before JSON mode existed."""
+
+    name = "legacy-vision"
+    model = "legacy-vision-1"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_from_images(
+        self,
+        prompt: str,
+        images: Any,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int | None = None,
+    ) -> AIResponse:
+        self.calls += 1
+        return AIResponse(text=json.dumps(SAMPLE_INVOICE), model=self.model)
+
+
+def test_legacy_vision_provider_without_json_mode_still_works() -> None:
+    provider = _LegacyVisionProvider()
+    extractor = AIDocumentInvoiceExtractor(provider=provider, ocr_processor=None)
+
+    result = extractor.extract(_stored("invoice.png"), _image_bytes("PNG"))
+
+    assert result.outcome.value == "PROCESSED"
+    assert result.extraction_method == "IMAGE_VISION"
+    assert provider.calls == 1
+
+
+class _LegacyTextProvider:
+    """A provider written before the explicit text capability existed."""
+
+    name = "legacy-text"
+    model = "legacy-1"
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_text(self, *args: Any, **kwargs: Any) -> AIResponse:
+        return AIResponse(text=json.dumps(SAMPLE_INVOICE), model=self.model)
+
+    def generate_from_images(self, *args: Any, **kwargs: Any) -> AIResponse:
+        raise AssertionError("a digital PDF must not call vision")
+
+
+def test_legacy_generate_text_provider_still_reads_a_digital_pdf() -> None:
+    extractor = AIDocumentInvoiceExtractor(
+        provider=_LegacyTextProvider(), ocr_processor=None
+    )
+
+    result = extractor.extract(_stored("invoice.pdf"), _pdf_bytes())
+
+    assert result.outcome.value == "PROCESSED"
+    assert result.extraction_method == "NATIVE_TEXT"
+
+
+def test_digital_pdf_never_enters_the_rasteriser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _must_not_render(*args: Any, **kwargs: Any) -> tuple:
+        raise AssertionError("a digital PDF must not be rendered")
+
+    monkeypatch.setattr(
+        "app.services.invoice_extraction.prepare_vision_images_for_extension",
+        _must_not_render,
+    )
+    extractor = AIDocumentInvoiceExtractor(
+        provider=FakeProvider(), ocr_processor=None
+    )
+
+    result = extractor.extract(_stored("invoice.pdf"), _pdf_bytes())
+
+    assert result.extraction_method == "NATIVE_TEXT"
+
+
+def test_digital_pdf_with_good_text_never_calls_ocr() -> None:
+    class ExplodingOCR:
+        name = "must-not-run"
+
+        def is_available(self) -> bool:
+            return True
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            raise AssertionError("OCR must not run when native text is usable")
+
+    provider = FakeProvider()
+    extractor = AIDocumentInvoiceExtractor(
+        provider=provider, ocr_processor=ExplodingOCR()
+    )
+
+    result = extractor.extract(_stored("invoice.pdf"), _pdf_bytes())
+
+    assert result.extraction_method == "NATIVE_TEXT"
+    assert provider.text_calls == 1
+    assert provider.image_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("filename", "fmt"),
+    (("invoice.png", "PNG"), ("invoice.jpg", "JPEG"), ("invoice.jpeg", "JPEG")),
+)
+def test_images_go_straight_to_vision_without_ocr(
+    filename: str, fmt: str
+) -> None:
+    class ExplodingOCR:
+        name = "must-not-run"
+
+        def is_available(self) -> bool:
+            return True
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            raise AssertionError("images must not go through PDF OCR")
+
+    provider = FakeProvider()
+    extractor = AIDocumentInvoiceExtractor(
+        provider=provider, ocr_processor=ExplodingOCR()
+    )
+
+    result = extractor.extract(_stored(filename), _image_bytes(fmt))
+
+    assert result.outcome.value == "PROCESSED"
+    assert result.extraction_method == "IMAGE_VISION"
+    assert provider.text_calls == 0
+    assert provider.image_calls == 1
+
+
+def test_unusable_ocr_text_falls_back_to_vision() -> None:
+    class NoisyOCR:
+        name = "noisy-ocr"
+
+        def is_available(self) -> bool:
+            return True
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            from app.services.text_quality import PageText
+
+            return (PageText(page_number=1, text="T A X"),)
+
+    provider = FakeProvider()
+    extractor = AIDocumentInvoiceExtractor(
+        provider=provider, ocr_processor=NoisyOCR()
+    )
+
+    result = extractor.extract(
+        _stored("invoice.pdf"), _scanned_pdf_bytes()
+    )
+
+    assert result.extraction_method == "IMAGE_VISION"
+    assert provider.text_calls == 0
+    assert provider.image_calls == 1
+
+
+def test_usable_ocr_text_never_enters_the_rasteriser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UsableOCR:
+        name = "usable-ocr"
+
+        def is_available(self) -> bool:
+            return True
+
+        def extract_text(self, raw_bytes: bytes, *, max_pages: int) -> tuple:
+            from app.services.text_quality import PageText
+
+            return (PageText(page_number=1, text="\n".join(_pdf_text_lines(0))),)
+
+    def _must_not_render(*args: Any, **kwargs: Any) -> tuple:
+        raise AssertionError("usable OCR text must not be rendered")
+
+    monkeypatch.setattr(
+        "app.services.invoice_extraction.prepare_vision_images_for_extension",
+        _must_not_render,
+    )
+    extractor = AIDocumentInvoiceExtractor(
+        provider=FakeProvider(), ocr_processor=UsableOCR()
+    )
+
+    result = extractor.extract(
+        _stored("invoice.pdf"), _scanned_pdf_bytes()
+    )
+
+    assert result.extraction_method == "OCR_TEXT"
+
+
+def test_process_response_exposes_only_safe_extraction_metadata() -> None:
+    from app.api.v1.invoices.router import _process_response
+    from app.services.invoice_extraction import (
+        ExtractionMethod,
+        ExtractionOutcome,
+        ExtractionResult,
+    )
+
+    result = ExtractionResult(
+        configured=True,
+        outcome=ExtractionOutcome.PROCESSED,
+        reason=None,
+        message="Invoice extracted and processed.",
+        extraction_method=ExtractionMethod.NATIVE_TEXT.value,
+        provider="fake",
+        model="fake-1",
+    )
+
+    response = _process_response(result, document_id=uuid.uuid4())
+
+    assert response.extraction_method == "NATIVE_TEXT"
+    assert "DOCUMENT TEXT" not in response.model_dump_json()
+    assert "file_path" not in response.model_dump_json()
 
 
 # ---------------------------------------------------------------------------

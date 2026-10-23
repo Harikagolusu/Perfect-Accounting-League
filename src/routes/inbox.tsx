@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Eye, Trash2 } from "lucide-react";
 import {
-  DemoNotice,
+  InfoNotice,
   PageHeader,
   StatusBadge,
   Field,
@@ -22,7 +22,7 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { useCompany, useStore } from "@/lib/store";
-import { FINANCIAL_YEARS, PERIODS } from "@/lib/mock-data";
+import { FINANCIAL_YEARS, PERIODS } from "@/lib/constants";
 import { fmtDate, fmtSize } from "@/lib/format";
 import { FILE_TYPE_OPTIONS } from "@/lib/api/documents";
 import { useDeleteDocument, useDocuments, useUploadDocuments } from "@/lib/queries/documents";
@@ -37,7 +37,7 @@ export const Route = createFileRoute("/inbox")({
 });
 
 const STATUSES: DocStatus[] = ["Uploaded", "Processing", "Extracted", "Failed"];
-const ACCEPT = ".pdf,.jpg,.jpeg,.png,.xls,.xlsx";
+const ACCEPT = ".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.docx";
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 
 function InboxPage() {
@@ -103,17 +103,17 @@ function InboxPage() {
         title="Document Inbox"
         description="Invoices and financial documents received by email or manual upload."
       />
-      <DemoNotice>
+      <InfoNotice>
         Files are validated and stored locally; nothing is processed automatically yet, so every
         document stays <b>Unknown</b> until a later step classifies it. Email intake is not
         connected.
-      </DemoNotice>
+      </InfoNotice>
 
       <div className="mb-4 grid gap-4 rounded-md border bg-card p-4 lg:grid-cols-[1fr_320px]">
         <div>
           <FileUploadDropzone
             accept={ACCEPT}
-            hint="PDF, JPEG, PNG, XLSX, XLS"
+            hint="PDF, JPEG, PNG, XLSX, XLS, DOCX"
             onFiles={(f) => setStaged((p) => [...p, ...f])}
           />
           {staged.length > 0 && (

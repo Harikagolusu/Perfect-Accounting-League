@@ -1,13 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Download, Eye, FileBarChart } from "lucide-react";
-import { PageHeader, DemoNotice, Section } from "@/components/pal/common";
+import { PageHeader, InfoNotice, Section, EmptyState } from "@/components/pal/common";
 import { ExportHistory } from "@/components/pal/export-history";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { FilterSelect } from "@/components/pal/data-table";
 import { useCompany, useScoped, useStore } from "@/lib/store";
+import { useDocuments } from "@/lib/queries/documents";
+import { useVendors } from "@/lib/queries/vendors";
 import { exportFile, type ExportFormat } from "@/lib/export";
 import { tdsDue } from "@/lib/tds";
 import { seo } from "@/lib/seo";
@@ -21,13 +23,26 @@ export const Route = createFileRoute("/reports")({
 function ReportsPage() {
   const s = useStore();
   const company = useCompany();
-  const docs = useScoped(s.documents), tds = useScoped(s.tds), reco = useScoped(s.reco), bank = useScoped(s.bankTx), maps = useScoped(s.mappings), audit = useScoped(s.audit);
+  const { data: docs = [] } = useDocuments(company?.id);
+  const { data: vendors = [] } = useVendors(company?.id, true);
+  const tds = useScoped(s.tds), reco = useScoped(s.reco), bank = useScoped(s.bankTx), audit = useScoped(s.audit);
   const [q, setQ] = useState("");
   const [type, setType] = useState("All");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
   const inRange = (d: string) => (!from || d >= from) && (!to || d.slice(0, 10) <= to);
+
+  if (!company) {
+    return (
+      <>
+        <PageHeader title="Reports & Exports" description="Generate and download accounting reports." />
+        <div className="rounded-md border bg-card p-4">
+          <EmptyState title="No company selected" hint="Create a company before generating reports." />
+        </div>
+      </>
+    );
+  }
 
   const REPORTS: { name: string; cat: string; build: () => Record<string, unknown>[] }[] = [
     { name: "Invoice Processing Report", cat: "Processing", build: () => docs.filter((d) => inRange(d.receivedAt)).map((d) => ({ ID: d.id, Name: d.name, Source: d.source, Received: d.receivedAt, Status: d.status, Reviewer: d.reviewer })) },
@@ -36,7 +51,7 @@ function ReportsPage() {
     { name: "TDS Working Report", cat: "Tax", build: () => tds.filter((t) => inRange(t.voucherDate)).map((t) => ({ Voucher: t.voucherNo, Vendor: t.vendor, Section: t.section, Base: t.base, Due: tdsDue(t), Deducted: t.deducted })) },
     { name: "GST Reconciliation Report", cat: "Tax", build: () => reco.filter((r) => inRange(r.invoiceDate)).map((r) => ({ Supplier: r.supplier, InvoiceNo: r.invoiceNo, BooksGST: r.booksGst, TwoBGST: r.twoBGst, Status: r.status })) },
     { name: "Bank Statement Report", cat: "Processing", build: () => bank.filter((b) => inRange(b.date)).map((b) => ({ Date: b.date, Narration: b.cleanNarration, Debit: b.debit, Credit: b.credit, Ledger: b.ledger, Status: b.status })) },
-    { name: "Vendor Ledger Mapping Report", cat: "Masters", build: () => maps.map((m) => ({ Vendor: m.vendorName, GSTIN: m.vendorKey, Ledger: m.expenseLedger, Confidence: m.confidence, Source: m.source })) },
+    { name: "Vendor Ledger Grouping Report", cat: "Masters", build: () => vendors.map((v) => ({ Vendor: v.name, GSTIN: v.gstin, PAN: v.pan, DefaultExpenseLedger: v.defaultExpenseLedger, CreditorLedger: v.creditorLedger, ParentGroup: v.parentGroup, Status: v.status })) },
     { name: "Audit Trail Report", cat: "Control", build: () => audit.filter((a) => inRange(a.timestamp)).map((a) => ({ Time: a.timestamp, User: a.user, Module: a.module, Action: a.action, Record: a.recordId, Status: a.status })) },
   ];
   const list = REPORTS.filter((r) => (type === "All" || r.cat === type) && r.name.toLowerCase().includes(q.toLowerCase()));
@@ -55,7 +70,7 @@ function ReportsPage() {
   return (
     <>
       <PageHeader title="Reports & Exports" description={`Reports for ${company.displayName}. CSV files are generated in your browser.`} />
-      <DemoNotice>Reports are built from sample data. XLSX export will be provided by the backend.</DemoNotice>
+      <InfoNotice>Reports are built from records currently available in the app. Modules without a backend contribute no rows; XLSX export will be provided by the backend.</InfoNotice>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Input placeholder="Search reports…" className="h-9 w-64" value={q} onChange={(e) => setQ(e.target.value)} aria-label="Search reports" />
         <Input type="date" className="h-9 w-36" value={from} onChange={(e) => setFrom(e.target.value)} aria-label="From date" />

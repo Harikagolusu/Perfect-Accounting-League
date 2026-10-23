@@ -4,7 +4,9 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  canApproveData,
   invoiceToForm,
+  mappingNeedsReview,
   mappingStatusLabel,
   mappingSummaryLabel,
   matchMethodLabel,
@@ -254,7 +256,39 @@ describe("Invoice mapper", () => {
     expect(mappingSummaryLabel("SUGGESTED", "NORMALIZED_NAME")).toBe(
       "Suggested by normalized name",
     );
+    expect(mappingSummaryLabel("SUGGESTED", null)).toBe("New vendor created from this invoice");
     expect(mappingSummaryLabel("UNMAPPED", null)).toBe("No vendor match");
+  });
+
+  it("blocks data approval while a vendor mapping still needs review", () => {
+    const pending = toInvoice({
+      ...INVOICE,
+      status: "NEEDS_REVIEW",
+      vendor_mapping_status: "SUGGESTED",
+    });
+    const ambiguous = toInvoice({
+      ...INVOICE,
+      status: "NEEDS_REVIEW",
+      vendor_mapping_status: "AMBIGUOUS",
+    });
+    const confirmed = toInvoice({
+      ...INVOICE,
+      status: "NEEDS_REVIEW",
+      vendor_mapping_status: "CONFIRMED",
+    });
+    const processed = toInvoice({
+      ...INVOICE,
+      status: "PROCESSED",
+      vendor_mapping_status: "CONFIRMED",
+    });
+
+    expect(mappingNeedsReview("SUGGESTED")).toBe(true);
+    expect(mappingNeedsReview("AMBIGUOUS")).toBe(true);
+    expect(mappingNeedsReview("CONFIRMED")).toBe(false);
+    expect(canApproveData(pending)).toBe(false);
+    expect(canApproveData(ambiguous)).toBe(false);
+    expect(canApproveData(confirmed)).toBe(true);
+    expect(canApproveData(processed)).toBe(false);
   });
 
   it("builds an editable form with blank strings for missing values", () => {

@@ -45,7 +45,7 @@ function Grouping({ vendor, pending }: { vendor: Vendor; pending?: boolean }) {
       </div>
       {pending && (
         <p className="text-xs text-muted-foreground md:col-span-3">
-          Historical grouping only — not applied until the mapping is confirmed.
+          Vendor grouping is not applied until the mapping is confirmed.
         </p>
       )}
     </div>
@@ -55,9 +55,10 @@ function Grouping({ vendor, pending }: { vendor: Vendor; pending?: boolean }) {
 /**
  * Minimal vendor-mapping panel for the Invoice page.
  *
- * It only shows deterministic evidence from the backend. There is deliberately
- * no confidence percentage and no automatic "create vendor" action: a vendor
- * must be created explicitly in the Vendor Master.
+ * The backend can create a vendor master record from an unmatched invoice's
+ * printed supplier details, but always links it as a suggestion. This panel
+ * shows that suggestion and requires a person to confirm it; no confidence
+ * percentage is invented.
  */
 export function VendorMappingPanel({
   status,
@@ -115,6 +116,12 @@ export function VendorMappingPanel({
           <p className="mt-1 text-xs text-muted-foreground">
             {mappingSummaryLabel(status, matchMethod)}. Confirm before it is used for accounting.
           </p>
+          {matchMethod === null && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              The vendor record was created from the extracted supplier details. Set its expense
+              ledger in the Vendor Master after confirming the identity.
+            </p>
+          )}
           <Grouping vendor={suggested} pending />
           <div className="mt-3 flex flex-wrap gap-2">
             <Button
@@ -159,7 +166,8 @@ export function VendorMappingPanel({
         </p>
       ) : (
         <p className="text-sm text-muted-foreground">
-          No vendor match found. Choose a vendor to map this invoice.
+          No vendor match found. When supplier details are available, processing creates a vendor
+          automatically from the extracted name and GSTIN/PAN.
         </p>
       )}
 
@@ -196,7 +204,7 @@ export function VendorMappingPanel({
 
       {!selectable.length && (
         <p className="mt-2 text-xs text-muted-foreground">
-          Add a vendor in the Vendor Master first. No vendor is created automatically.
+          No vendors yet. Processing this invoice creates one from its supplier details.
         </p>
       )}
 

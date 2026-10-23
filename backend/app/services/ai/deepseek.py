@@ -4,9 +4,11 @@ Uses the OpenAI-compatible client since DeepSeek exposes an OpenAI-compatible
 API endpoint. This keeps the dependency minimal — no LangChain, LlamaIndex,
 or other frameworks.
 
-Two capabilities are exposed behind the provider interface:
+Three capabilities are exposed behind the provider interface:
 
-* `generate_text` — text-only prompts;
+* `generate_text` — the compatibility text method;
+* `generate_from_text` — the explicit text capability used by native PDF,
+  OCR, XLSX and DOCX extraction;
 * `generate_from_images` — prompts plus prepared images (vision).
 
 The invoice extraction service depends only on `AIProvider`, so replacing
@@ -68,6 +70,7 @@ class DeepSeekProvider(AIProvider):
         system_prompt: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> AIResponse:
         if not self.is_configured():
             raise AIProviderError(
@@ -81,7 +84,28 @@ class DeepSeekProvider(AIProvider):
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
         return self._complete(
-            messages, temperature=temperature, max_tokens=max_tokens
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
+
+    def generate_from_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        """Text capability; delegates to the compatibility method."""
+        return self.generate_text(
+            prompt,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
         )
 
     def generate_from_images(

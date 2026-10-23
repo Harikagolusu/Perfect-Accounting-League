@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from dataclasses import replace
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -39,7 +40,7 @@ from app.models.invoice import (
     InvoiceStatus,
     VendorMappingStatus,
 )
-from app.models.vendor import Vendor
+from app.models.vendor import Vendor, VendorStatus
 from app.schemas.invoice import InvoiceCreate, InvoiceUpdate
 from app.services.company import get_company
 from app.services.document import get_document
@@ -53,12 +54,18 @@ from app.services.invoice_extraction import (
     get_extractor,
 )
 from app.services.invoice_validation import (
+    InvoiceTransitionError,
     InvoiceValidationResult,
     assert_transition_allowed,
     validate_invoice_fields,
 )
 from app.services.vendor import VendorNotFoundError, get_vendor
-from app.services.vendor_matching import VendorMatchStatus, match_vendor
+from app.services.vendor_matching import (
+    VendorMatchStatus,
+    match_vendor,
+    normalize_gstin,
+    normalize_pan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +105,11 @@ _EXTRACTED_FIELDS = (
     "round_off",
     "total_amount",
 )
+
+#: Standard Tally group for supplier accounts. Only the group and the creditor
+#: ledger are filled in automatically; the expense ledger stays unset until a
+#: person chooses the correct accounting head.
+_AUTO_VENDOR_PARENT_GROUP = "Sundry Creditors"
 
 
 class InvoiceNotFoundError(Exception):
@@ -285,6 +297,17 @@ def update_invoice(db: Session, invoice: Invoice, data: InvoiceUpdate) -> Invoic
     target_status = payload.pop("status", None)
     if target_status is not None and target_status is not invoice.status:
         assert_transition_allowed(invoice.status, target_status)
+        if (
+            target_status is InvoiceStatus.PROCESSED
+            and invoice.vendor_mapping_status
+            in {VendorMappingStatus.SUGGESTED, VendorMappingStatus.AMBIGUOUS}
+        ):
+            # A pending suggestion or an ambiguous match is the review the
+            # invoice was sent back for. Approving the data would silently
+            # bypass it and leave PROCESSED next to an unconfirmed mapping.
+            raise InvoiceTransitionError(
+                "Confirm or reject the vendor suggestion before approving this invoice."
+            )
         invoice.status = target_status
 
     for field, value in payload.items():
@@ -310,6 +333,42 @@ def delete_invoice(db: Session, company_id: uuid.UUID, invoice_id: uuid.UUID) ->
     return invoice
 
 
+def _create_vendor_from_invoice(db: Session, invoice: Invoice) -> Vendor | None:
+    """Record the supplier identity printed on an unmatched invoice.
+
+    The vendor master starts from facts the document actually contains: the
+    printed name and valid GSTIN/PAN. The creditor ledger and the standard
+    "Sundry Creditors" group are safe Tally defaults; the expense ledger is
+    deliberately left empty because the invoice does not say which accounting
+    head applies. The record is created as NEEDS_MAPPING so that gap stays
+    visible in the Vendor Master.
+
+    The caller links the result as a suggestion, never as a confirmed mapping.
+    """
+    name = (invoice.vendor_name or "").strip()
+    if not name:
+        return None
+
+    vendor = Vendor(
+        company_id=invoice.company_id,
+        name=name,
+        gstin=normalize_gstin(invoice.vendor_gstin),
+        pan=normalize_pan(invoice.vendor_pan),
+        creditor_ledger=name,
+        parent_group=_AUTO_VENDOR_PARENT_GROUP,
+        status=VendorStatus.NEEDS_MAPPING,
+    )
+    db.add(vendor)
+    db.flush()
+    logger.info(
+        "Vendor auto-created from invoice: company=%s invoice=%s vendor=%s",
+        invoice.company_id,
+        invoice.id,
+        vendor.id,
+    )
+    return vendor
+
+
 def _apply_vendor_mapping(db: Session, invoice: Invoice) -> bool:
     """Match the invoice's printed supplier identity to a vendor master record.
 
@@ -317,8 +376,9 @@ def _apply_vendor_mapping(db: Session, invoice: Invoice) -> bool:
     but not committed; the extraction lifecycle commits it with the final
     status, so an extraction and its mapping cannot land half-applied.
 
-    Existing assignments are never overwritten. A REJECTED invoice is never
-    silently re-matched on a retry.
+    When no vendor matches, a vendor master record is created from the printed
+    identity and linked as a suggestion. Existing assignments are never
+    overwritten. A REJECTED invoice is never silently re-matched on a retry.
     """
     if invoice.vendor_id is not None:
         # A vendor is already assigned. Only a person may change it.
@@ -342,6 +402,11 @@ def _apply_vendor_mapping(db: Session, invoice: Invoice) -> bool:
         # confirmed identity left, so fall through and evaluate afresh.
         invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
         invoice.vendor_match_method = None
+
+    if invoice.suggested_vendor_id is not None:
+        # An unconfirmed suggestion stays a suggestion on a retry. Reprocessing
+        # must not turn it into an automatic assignment.
+        return True
 
     result = match_vendor(
         db,
@@ -372,11 +437,20 @@ def _apply_vendor_mapping(db: Session, invoice: Invoice) -> bool:
         invoice.vendor_match_method = None
         requires_review = True
     else:
+        vendor = _create_vendor_from_invoice(db, invoice)
         invoice.vendor_id = None
-        invoice.suggested_vendor_id = None
-        invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
-        invoice.vendor_match_method = None
-        requires_review = False
+        if vendor is not None:
+            invoice.suggested_vendor_id = vendor.id
+            invoice.vendor_mapping_status = VendorMappingStatus.SUGGESTED
+            # No historical match produced this suggestion, so there is no
+            # match method to claim. The UI labels it as auto-created.
+            invoice.vendor_match_method = None
+            requires_review = True
+        else:
+            invoice.suggested_vendor_id = None
+            invoice.vendor_mapping_status = VendorMappingStatus.UNMAPPED
+            invoice.vendor_match_method = None
+            requires_review = False
 
     logger.info(
         "Vendor mapping finished: company=%s invoice=%s status=%s method=%s reason=%s",
@@ -400,7 +474,16 @@ def confirm_vendor_mapping(
 
     The vendor is resolved through the company-scoped Vendor service, so an id
     from another company is indistinguishable from a missing one (404).
+
+    Confirming a suggestion on an invoice that was already marked PROCESSED
+    reopens it for data approval. That combination means the mapping review was
+    bypassed earlier; the assigned ledger changes the accounting, so a person
+    must approve the data again.
     """
+    was_pending_review = invoice.vendor_mapping_status in {
+        VendorMappingStatus.SUGGESTED,
+        VendorMappingStatus.AMBIGUOUS,
+    }
     if vendor_id is None:
         if invoice.vendor_id is not None:
             raise VendorMappingConflictError(
@@ -421,6 +504,11 @@ def confirm_vendor_mapping(
         invoice.vendor_mapping_status = VendorMappingStatus.CONFIRMED
         if not was_suggestion:
             invoice.vendor_match_method = None
+        if was_pending_review and invoice.status is InvoiceStatus.PROCESSED:
+            # Repair the state a premature approval could leave behind. The
+            # transition is deliberate: this is the explicit reopen that the
+            # lifecycle otherwise keeps out of normal edits.
+            invoice.status = InvoiceStatus.NEEDS_REVIEW
 
     db.commit()
     db.refresh(invoice)
@@ -502,9 +590,10 @@ def process_invoice(
 
     try:
         result = extractor.extract(document, raw)
-    except Exception:  # defensive: the extractor already maps known errors
-        logger.exception(
-            "Unexpected extraction failure: company=%s document=%s invoice=%s",
+    except Exception as exc:  # defensive: the extractor already maps known errors
+        logger.error(
+            "Unexpected extraction failure (%s): company=%s document=%s invoice=%s",
+            type(exc).__name__,
             invoice.company_id,
             document.id,
             invoice.id,
@@ -526,23 +615,47 @@ def process_invoice(
         return invoice, result
 
     mapping_review_required = False
-    if result.outcome is ExtractionOutcome.PROCESSED:
-        if result.values:
-            _apply_extracted_values(invoice, result.values)
-        invoice.source = InvoiceSource.AI
-        mapping_review_required = _apply_vendor_mapping(db, invoice)
+    try:
+        if result.outcome is ExtractionOutcome.PROCESSED:
+            if result.values:
+                _apply_extracted_values(invoice, result.values)
+            invoice.source = InvoiceSource.AI
+            mapping_review_required = _apply_vendor_mapping(db, invoice)
 
-    if result.outcome is ExtractionOutcome.NEEDS_REVIEW and result.is_invoice:
-        # Apply whatever was read; the reviewer sees the values and the issues.
-        if result.values:
-            _apply_extracted_values(invoice, result.values)
-        invoice.source = InvoiceSource.AI
-        mapping_review_required = _apply_vendor_mapping(db, invoice)
+        if result.outcome is ExtractionOutcome.NEEDS_REVIEW and result.is_invoice:
+            # Apply whatever was read; the reviewer sees the values and issues.
+            if result.values:
+                _apply_extracted_values(invoice, result.values)
+            invoice.source = InvoiceSource.AI
+            mapping_review_required = _apply_vendor_mapping(db, invoice)
+    except Exception as exc:
+        # A persistence or mapping failure must still leave a terminal state.
+        # Roll back the partial application (the PROCESSING status was already
+        # committed) and let `_finish` record a safe failure. Log only the
+        # exception class: a database error can carry SQL values or paths.
+        db.rollback()
+        logger.error(
+            "Could not apply extraction result (%s): company=%s document=%s invoice=%s",
+            type(exc).__name__,
+            invoice.company_id,
+            document.id,
+            invoice.id,
+        )
+        result = ExtractionResult(
+            configured=True,
+            outcome=ExtractionOutcome.FAILED,
+            reason=EXTRACTION_INTERNAL_ERROR,
+            message="Automatic extraction could not be applied.",
+            provider=result.provider,
+            model=result.model,
+            extraction_method=result.extraction_method,
+        )
+        mapping_review_required = False
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
         "Invoice extraction finished: company=%s document=%s invoice=%s "
-        "outcome=%s reason=%s provider=%s model=%s elapsed_ms=%d",
+        "outcome=%s reason=%s provider=%s model=%s method=%s elapsed_ms=%d",
         invoice.company_id,
         document.id,
         invoice.id,
@@ -550,6 +663,7 @@ def process_invoice(
         result.reason,
         result.provider,
         result.model,
+        result.extraction_method,
         elapsed_ms,
     )
     return _finish(
@@ -576,9 +690,18 @@ def _finish(
     so a person must look at it even though the document was read correctly.
     """
     if result.outcome is ExtractionOutcome.PROCESSED:
-        invoice.status = (
-            InvoiceStatus.NEEDS_REVIEW if force_review else InvoiceStatus.PROCESSED
-        )
+        if force_review:
+            invoice.status = InvoiceStatus.NEEDS_REVIEW
+            # Keep the API result consistent with the stored invoice: a
+            # mapping that needs a person is not a fully processed invoice.
+            result = replace(
+                result,
+                outcome=ExtractionOutcome.NEEDS_REVIEW,
+                reason="VENDOR_MAPPING_REVIEW",
+                message="Invoice extracted. Review the vendor mapping before approving.",
+            )
+        else:
+            invoice.status = InvoiceStatus.PROCESSED
         document.status = DocumentStatus.PROCESSED
     elif result.outcome is ExtractionOutcome.NEEDS_REVIEW:
         invoice.status = InvoiceStatus.NEEDS_REVIEW

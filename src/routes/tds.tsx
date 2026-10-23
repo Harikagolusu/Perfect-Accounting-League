@@ -1,14 +1,14 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Download, AlertTriangle, Percent, IndianRupee, UserX, Settings2 } from "lucide-react";
-import { PageHeader, KPICard, DemoNotice, StatusBadge, KV, Field } from "@/components/pal/common";
+import { PageHeader, KPICard, InfoNotice, StatusBadge, KV, Field } from "@/components/pal/common";
 import { DataTable, FilterSelect } from "@/components/pal/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useScoped, useStore } from "@/lib/store";
-import { PERIODS, TDS_SECTIONS, tdsRates } from "@/lib/mock-data";
+import { PERIODS, TDS_SECTIONS, tdsRates } from "@/lib/constants";
 import { fmtDate, fmtINR } from "@/lib/format";
 import { quarterOf, tdsDue, tdsVariance } from "@/lib/tds";
 import { exportFile } from "@/lib/export";
@@ -50,7 +50,7 @@ function TDSPage() {
           <Button variant="outline" onClick={() => setRules(true)}><Settings2 />Rule configuration</Button>
           <Button onClick={() => { const n = exportFile("CSV", `TDS_Working_${s.financialYear}`, rows.map((t) => ({ VoucherDate: t.voucherDate, VoucherNo: t.voucherNo, Vendor: t.vendor, PAN: t.pan, Section: t.section, Gross: t.gross, Base: t.base, Rate: t.rate, Due: tdsDue(t), Deducted: t.deducted, Variance: tdsVariance(t), Status: t.status }))); toast.success(`Exported ${n} rows`); }}><Download />Export to Excel (CSV)</Button>
         </>} />
-      <DemoNotice>Demo calculations only — not verified statutory advice. Rates shown are simplified.</DemoNotice>
+      <InfoNotice>Workings are not connected to the backend yet. Reference rates are shown for configuration only and are not statutory advice.</InfoNotice>
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KPICard label="Base value" value={fmtINR(rows.reduce((a, t) => a + t.base, 0))} icon={IndianRupee} hint={`${rows.length} vouchers`} />
         <KPICard label="TDS due" value={fmtINR(rows.reduce((a, t) => a + tdsDue(t), 0))} icon={Percent} />
@@ -107,7 +107,7 @@ function TDSPage() {
       </Sheet>
       <Dialog open={rules} onOpenChange={setRules}>
         <DialogContent>
-          <DialogHeader><DialogTitle>TDS rule configuration (demo)</DialogTitle></DialogHeader>
+          <DialogHeader><DialogTitle>TDS rule configuration</DialogTitle></DialogHeader>
           <div className="grid gap-3">
             {TDS_SECTIONS.map((sec) => (
               <Field key={sec} label={`Section ${sec} rate (%)`}><Input type="number" step="0.1" className="num" value={rateDraft[sec]} onChange={(e) => setRateDraft({ ...rateDraft, [sec]: Number(e.target.value) })} /></Field>

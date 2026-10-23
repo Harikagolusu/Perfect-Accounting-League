@@ -143,6 +143,9 @@ describe("Document mapper", () => {
     expect(fileTypeLabel("image/jpeg")).toBe("JPEG");
     expect(fileTypeLabel("image/png")).toBe("PNG");
     expect(fileTypeLabel("application/vnd.ms-excel")).toBe("XLS");
+    expect(
+      fileTypeLabel("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+    ).toBe("DOCX");
     expect(toInboxDocument(XLSX).fileType).toBe("XLSX");
   });
 

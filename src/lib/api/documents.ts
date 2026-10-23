@@ -10,7 +10,7 @@
  * classifies it.
  */
 
-import { API_V1_PREFIX, apiFetch } from "@/lib/api/client";
+import { API_BASE_URL, API_V1_PREFIX, apiFetch } from "@/lib/api/client";
 import type { InboxDocument } from "@/lib/types";
 
 /** Mirrors `DocumentStatus` in backend/app/models/document.py. */
@@ -73,6 +73,7 @@ const FILE_TYPE_LABELS: Record<string, string> = {
   "image/png": "PNG",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "XLSX",
   "application/vnd.ms-excel": "XLS",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "DOCX",
 };
 
 export const statusToApi = (status: DocumentUiStatus): DocumentStatus =>
@@ -91,7 +92,7 @@ export const fileTypeLabel = (fileType: string): string => {
 };
 
 /** The format labels the inbox filter offers, in display form. */
-export const FILE_TYPE_OPTIONS: readonly string[] = ["PDF", "JPEG", "PNG", "XLSX", "XLS"];
+export const FILE_TYPE_OPTIONS: readonly string[] = ["PDF", "JPEG", "PNG", "XLSX", "XLS", "DOCX"];
 
 /** API payload -> UI model. */
 export const toInboxDocument = (dto: DocumentDto): InboxDocument => ({
@@ -129,6 +130,9 @@ export const documentsApi = {
     body.append("file", file);
     return apiFetch<DocumentDto>(base(companyId), { method: "POST", body });
   },
+  /** Inline URL for an iframe/image preview of the stored file. */
+  fileUrl: (companyId: string, documentId: string, download = false) =>
+    `${API_BASE_URL}${base(companyId)}/${documentId}/file${download ? "?download=true" : ""}`,
   /** Removes both the stored file and the record. */
   remove: (companyId: string, documentId: string) =>
     apiFetch<void>(`${base(companyId)}/${documentId}`, { method: "DELETE" }),

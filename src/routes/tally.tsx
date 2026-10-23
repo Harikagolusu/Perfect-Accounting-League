@@ -1,12 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { CircleDashed, FileCode, FileSpreadsheet, CheckCircle2, XCircle } from "lucide-react";
-import { PageHeader, Section, KV, StatusBadge, Field, DemoNotice } from "@/components/pal/common";
+import { PageHeader, Section, KV, StatusBadge, Field, InfoNotice, EmptyState } from "@/components/pal/common";
 import { ExportHistory } from "@/components/pal/export-history";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useCompany, useScoped, useStore } from "@/lib/store";
-import { EXPENSE_LEDGERS, PERIODS } from "@/lib/mock-data";
+import { PERIODS } from "@/lib/constants";
 import { exportFile } from "@/lib/export";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
@@ -22,20 +22,31 @@ function TallyPage() {
   const s = useStore();
   const company = useCompany();
   const mappings = useScoped(s.mappings);
-  const [cfg, setCfg] = useState({ voucherType: "Purchase", tallyCompany: company.legalName, purchaseLedger: "Purchase - Raw Material", cgst: "Input CGST", sgst: "Input SGST", igst: "Input IGST", parent: "Sundry Creditors" });
+  const [cfg, setCfg] = useState({ voucherType: "Purchase", tallyCompany: company?.legalName ?? "", purchaseLedger: "", cgst: "", sgst: "", igst: "", parent: "" });
   const [period, setPeriod] = useState(s.period);
   const set = (k: keyof typeof cfg, v: string) => setCfg((c) => ({ ...c, [k]: v }));
+
+  if (!company) {
+    return (
+      <>
+        <PageHeader title="Tally Integration" description="Tally Prime configuration and voucher exports." />
+        <div className="rounded-md border bg-card p-4">
+          <EmptyState title="No company selected" hint="Create a company before configuring a Tally connection." />
+        </div>
+      </>
+    );
+  }
 
   const checks = [
     { label: "Voucher type selected", ok: !!cfg.voucherType },
     { label: "Tax ledgers mapped (CGST / SGST / IGST)", ok: !!(cfg.cgst && cfg.sgst && cfg.igst) },
     { label: "Parent group for creditors set", ok: !!cfg.parent },
-    { label: "All vendor mappings approved", ok: mappings.every((m) => m.status === "Approved") },
+    { label: "Vendor ledger mappings available", ok: mappings.length > 0 && mappings.every((m) => m.status === "Approved") },
   ];
 
   const rows = mappings.filter((m) => m.status === "Approved").map((m) => ({ LEDGERNAME: m.creditorLedger, PARENT: cfg.parent, GSTIN: m.vendorKey, EXPENSELEDGER: m.expenseLedger, TAXLEDGER: m.taxLedger }));
   const run = (format: "XML" | "CSV") => {
-    if (!checks.slice(0, 3).every((c) => c.ok)) return toast.error("Complete the configuration before exporting.");
+    if (!checks.every((c) => c.ok)) return toast.error("Complete the configuration before exporting.");
     const n = exportFile(format, `Tally_${company.displayName.replace(/\s/g, "")}_${period}`, rows);
     if (n == null) return toast.error("This format is produced by the backend.");
     s.addExport({ name: `Ledger masters ${period}`, type: "Ledger Masters", format, records: n, status: "Generated", target: "Tally" });
@@ -46,7 +57,7 @@ function TallyPage() {
   return (
     <>
       <PageHeader title="Tally Integration" description="Tally Prime configuration and voucher exports." />
-      <DemoNotice>No live Tally connection exists. Settings here are demo-only and are not sent anywhere.</DemoNotice>
+      <InfoNotice>No live Tally connection exists. Configuration is kept in this browser session only and is not sent anywhere.</InfoNotice>
       <div className="grid gap-4 lg:grid-cols-3">
         <Section title="Connection Status">
           <div className="mb-3 flex items-center gap-2 text-sm"><CircleDashed className="h-4 w-4 text-muted-foreground" /> <StatusBadge status="Not connected" /></div>
@@ -58,13 +69,13 @@ function TallyPage() {
           <div className="grid gap-3 md:grid-cols-3">
             <Field label="Tally company name"><Input value={cfg.tallyCompany} onChange={(e) => set("tallyCompany", e.target.value)} /></Field>
             <Field label="Voucher type"><select className={selectCls} value={cfg.voucherType} onChange={(e) => set("voucherType", e.target.value)}>{["Purchase", "Journal", "Payment", "Receipt"].map((x) => <option key={x}>{x}</option>)}</select></Field>
-            <Field label="Default ledger"><select className={selectCls} value={cfg.purchaseLedger} onChange={(e) => set("purchaseLedger", e.target.value)}>{EXPENSE_LEDGERS.map((x) => <option key={x}>{x}</option>)}</select></Field>
+            <Field label="Default ledger"><Input value={cfg.purchaseLedger} onChange={(e) => set("purchaseLedger", e.target.value)} placeholder="Tally ledger name" /></Field>
             <Field label="CGST ledger"><Input value={cfg.cgst} onChange={(e) => set("cgst", e.target.value)} /></Field>
             <Field label="SGST ledger"><Input value={cfg.sgst} onChange={(e) => set("sgst", e.target.value)} /></Field>
             <Field label="IGST ledger"><Input value={cfg.igst} onChange={(e) => set("igst", e.target.value)} /></Field>
             <Field label="Parent group mapping"><Input value={cfg.parent} onChange={(e) => set("parent", e.target.value)} /></Field>
           </div>
-          <div className="mt-3"><Button variant="outline" onClick={() => toast.success("Configuration saved (demo state)")}>Save configuration</Button></div>
+          <div className="mt-3"><Button variant="outline" onClick={() => toast.success("Configuration saved in this browser session")}>Save configuration</Button></div>
         </Section>
         <Section title="Validation Status">
           {checks.map((c) => (
@@ -88,7 +99,7 @@ function TallyPage() {
             <li>Enable Tally Prime ODBC / XML server (Help → Settings → Connectivity).</li>
             <li>Confirm the Tally company name matches exactly.</li>
             <li>Map tax ledgers and creditor parent group.</li>
-            <li>Approve vendor ledger mappings in Vendor Master.</li>
+            <li>Vendor ledger mappings will be available when the backend exposes them.</li>
             <li>Export and import via Gateway of Tally → Import Data.</li>
           </ol>
         </Section>

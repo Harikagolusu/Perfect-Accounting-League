@@ -1,7 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Download, Check, Flag, MessageSquare, Eye, CheckCircle2, Mail } from "lucide-react";
-import { PageHeader, KPICard, DemoNotice, StatusBadge, Field, Section } from "@/components/pal/common";
+import { PageHeader, KPICard, InfoNotice, StatusBadge, Field, Section, EmptyState } from "@/components/pal/common";
 import { DataTable } from "@/components/pal/data-table";
 import { FileUploadDropzone } from "@/components/pal/dropzone";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useCompany, useScoped, useStore } from "@/lib/store";
-import { FINANCIAL_YEARS, PERIODS } from "@/lib/mock-data";
+import { FINANCIAL_YEARS, PERIODS } from "@/lib/constants";
 import { fmtDate, fmtINR } from "@/lib/format";
 import { exportSheets } from "@/lib/export";
 import type { ReconciliationRecord, RecoStatus } from "@/lib/types";
@@ -47,6 +47,17 @@ function RecoPage() {
   const [open, setOpen] = useState<ReconciliationRecord | null>(null);
   const [note, setNote] = useState("");
 
+  if (!company) {
+    return (
+      <>
+        <PageHeader title="GST Reconciliation" description="Compare purchase register records with GSTR-2B." />
+        <div className="rounded-md border bg-card p-4">
+          <EmptyState title="No company selected" hint="Create a company before running reconciliation." />
+        </div>
+      </>
+    );
+  }
+
   const sum = (f: (r: ReconciliationRecord) => number) => recs.reduce((a, r) => a + f(r), 0);
   const itcBooks = sum((r) => r.booksGst ?? 0);
   const itc2b = sum((r) => r.twoBGst ?? 0);
@@ -71,7 +82,7 @@ function RecoPage() {
   return (
     <>
       <PageHeader title="GST Reconciliation" description="Compare purchase register records with GSTR-2B and review discrepancies." actions={<Button onClick={doExport}><Download />Export Report</Button>} />
-      <DemoNotice>Sample reconciliation data. PAL does not access the GST portal; GSTR-2B must be uploaded.</DemoNotice>
+      <InfoNotice>Reconciliation is not connected to the backend yet. PAL does not access the GST portal; GSTR-2B must be uploaded.</InfoNotice>
 
       <div className="mb-4 grid gap-4 lg:grid-cols-3">
         <Section title="Reconciliation Setup" className="lg:col-span-2">
@@ -86,7 +97,7 @@ function RecoPage() {
             <div><FileUploadDropzone multiple={false} accept=".json,.xlsx,.xls" label="GSTR-2B" hint="JSON or Excel" onFiles={(f) => setTwoB(f[0])} />
               <p className="mt-1 flex items-center gap-1 text-xs">{twoB ? <><CheckCircle2 className="h-3 w-3 text-success" />{twoB.name}</> : <span className="text-muted-foreground">Not uploaded</span>}</p></div>
           </div>
-          <Button className="mt-3" disabled={!pr || !twoB} onClick={() => toast.success("Files received", { description: "Matching runs on the backend. Showing sample results." })}>Run reconciliation</Button>
+          <Button className="mt-3" disabled={!pr || !twoB} onClick={() => toast.info("Reconciliation is not connected to the backend yet; no results were generated.")}>Run reconciliation</Button>
         </Section>
         <Section title="Matching Tolerances">
           <div className="grid gap-3">

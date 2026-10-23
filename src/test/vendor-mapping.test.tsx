@@ -134,6 +134,20 @@ describe("Vendor mapping panel", () => {
     expect(onConfirm).toHaveBeenCalledWith(VENDOR.id);
   });
 
+  it("labels a vendor created automatically from the invoice data", () => {
+    renderPanel({
+      status: "SUGGESTED",
+      matchMethod: null,
+      suggestedVendorId: VENDOR.id,
+    });
+
+    expect(screen.getByText(/New vendor created from this invoice/)).toBeTruthy();
+    expect(
+      screen.getByText(/vendor record was created from the extracted supplier details/),
+    ).toBeTruthy();
+    expect(screen.getByText(/not applied until the mapping is confirmed/)).toBeTruthy();
+  });
+
   it("can reject a suggestion without assigning a vendor", () => {
     const onReject = vi.fn();
     const onConfirm = vi.fn();
@@ -164,11 +178,13 @@ describe("Vendor mapping panel", () => {
     expect(screen.getByText("Vendor not found")).toBeTruthy();
   });
 
-  it("never offers to create a vendor automatically", () => {
+  it("explains that processing creates a vendor when none exist", () => {
     renderPanel({ vendors: [] });
 
-    expect(screen.getByText(/Add a vendor in the Vendor Master first/)).toBeTruthy();
-    expect(screen.queryByText(/create vendor/i)).toBeNull();
+    expect(
+      screen.getByText(/Processing this invoice creates one from its supplier details/),
+    ).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /create vendor/i })).toBeNull();
     expect(screen.getByLabelText("Map to vendor")).toBeDisabled();
   });
 
@@ -178,6 +194,8 @@ describe("Vendor mapping panel", () => {
     });
 
     expect(screen.queryByText("Inactive Vendor")).toBeNull();
-    expect(screen.getByText(/Add a vendor in the Vendor Master first/)).toBeTruthy();
+    expect(
+      screen.getByText(/Processing this invoice creates one from its supplier details/),
+    ).toBeTruthy();
   });
 });

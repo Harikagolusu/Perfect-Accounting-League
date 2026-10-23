@@ -59,6 +59,7 @@ def _process_response(
         provider=result.provider,
         model=result.model,
         usage=result.usage,
+        extraction_method=result.extraction_method,
     )
 
 

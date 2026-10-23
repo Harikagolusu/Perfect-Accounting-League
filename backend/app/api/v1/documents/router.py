@@ -21,11 +21,12 @@ from fastapi import (
     UploadFile,
     status,
 )
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.database import get_db
-from app.core.storage import StorageError, UploadValidationError
+from app.core.storage import StorageError, UploadValidationError, resolve_storage_path
 from app.models.document import Document, DocumentStatus, DocumentType
 from app.schemas.document import DocumentResponse
 from app.services.company import CompanyNotFoundError
@@ -62,7 +63,7 @@ def document_or_404(
 )
 async def post_document(
     company_id: UUID = Path(description="Company the document belongs to."),
-    file: UploadFile = File(description="PDF, JPEG, PNG, XLS or XLSX file."),
+    file: UploadFile = File(description="PDF, JPEG, PNG, XLS, XLSX or DOCX file."),
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
     max_bytes = get_settings().document_max_upload_bytes
@@ -114,6 +115,41 @@ def get_documents(
 @router.get("/{document_id}", response_model=DocumentResponse, summary="Get a document")
 def get_document_by_id(document: Document = Depends(document_or_404)) -> DocumentResponse:
     return document
+
+
+@router.get(
+    "/{document_id}/file",
+    response_class=FileResponse,
+    summary="Preview or download a document's stored file",
+)
+def get_document_file(
+    document: Document = Depends(document_or_404),
+    download: bool = Query(
+        default=False,
+        description="Send the file as an attachment instead of an inline preview.",
+    ),
+) -> FileResponse:
+    """Return the stored bytes for the invoice preview pane.
+
+    The document is resolved through `document_or_404`, so a file can only be
+    read through the company that owns its record. A database row whose file
+    has gone missing returns 404 rather than leaking an internal path.
+    """
+    try:
+        path = resolve_storage_path(document.file_path)
+        if not path.is_file():
+            raise StorageError("Stored file is missing.")
+    except StorageError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Stored file not found"
+        ) from None
+
+    return FileResponse(
+        path,
+        media_type=document.file_type,
+        filename=document.original_filename,
+        content_disposition_type="attachment" if download else "inline",
+    )
 
 
 @router.delete(

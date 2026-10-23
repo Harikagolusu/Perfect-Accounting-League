@@ -133,6 +133,8 @@ export interface ProcessResult {
   provider: string | null;
   model: string | null;
   usage: Record<string, number> | null;
+  /** Safe processing-path metadata, e.g. NATIVE_TEXT or IMAGE_VISION. */
+  extraction_method?: string | null;
 }
 
 /** The editable string forms the UI binds to. */
@@ -280,6 +282,20 @@ const MAPPING_STATUS_LABEL: Record<VendorMappingStatus, string> = {
 export const mappingStatusLabel = (status: VendorMappingStatus): string =>
   MAPPING_STATUS_LABEL[status] ?? status;
 
+/** A pending vendor decision must be resolved before the data is approved. */
+export const mappingNeedsReview = (status: VendorMappingStatus): boolean =>
+  status === "SUGGESTED" || status === "AMBIGUOUS";
+
+/**
+ * Data approval is a human sign-off. A pending vendor suggestion or an
+ * ambiguous match is exactly the review the invoice was sent back for, so the
+ * button must not be able to skip it. PROCESSED is already approved.
+ */
+export const canApproveData = (invoice: {
+  status: InvoiceStatus;
+  vendorMappingStatus: VendorMappingStatus;
+}): boolean => invoice.status !== "PROCESSED" && !mappingNeedsReview(invoice.vendorMappingStatus);
+
 export const matchMethodLabel = (method: VendorMatchMethod | null): string => {
   if (method === "EXACT_GSTIN") return "Matched by GSTIN";
   if (method === "EXACT_PAN") return "Matched by PAN";
@@ -295,7 +311,10 @@ export const mappingSummaryLabel = (
   status: VendorMappingStatus,
   method: VendorMatchMethod | null,
 ): string => {
-  if (status === "SUGGESTED") return "Suggested by normalized name";
+  if (status === "SUGGESTED") {
+    if (method === "NORMALIZED_NAME") return "Suggested by normalized name";
+    return "New vendor created from this invoice";
+  }
   if (status === "MATCHED") {
     if (method === "NORMALIZED_NAME") return "Matched from confirmed history";
     return matchMethodLabel(method);

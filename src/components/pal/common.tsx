@@ -120,7 +120,6 @@ const STATUS_TONE: Record<string, "success" | "warning" | "danger" | "info" | "n
   Inactive: "neutral",
   Low: "neutral",
   "Not Available": "neutral",
-  "Demo only": "neutral",
   "Not connected": "neutral",
 };
 
@@ -141,11 +140,11 @@ export function ConfidenceBadge({ value }: { value: number }) {
   );
 }
 
-export function DemoNotice({ children }: { children?: ReactNode }) {
+export function InfoNotice({ children }: { children?: ReactNode }) {
   return (
     <div className="mb-4 flex items-start gap-2 rounded-md border border-primary/20 bg-secondary px-3 py-2 text-xs text-secondary-foreground">
       <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-      <span>{children ?? "Sample data. Figures are fictional and for demonstration only."}</span>
+      <span>{children ?? "This module is not connected to the backend yet."}</span>
     </div>
   );
 }

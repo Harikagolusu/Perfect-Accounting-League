@@ -1,23 +1,26 @@
-"""Invoice document preparation.
+"""Document routing and provider-ready image preparation.
 
-Turns one stored document into the image payload the AI provider accepts. This
-module is deliberately separate from both storage and the provider:
+This module is the single place that decides *what kind of file* an invoice
+document is. Keeping routing here means the extractor never scatters extension
+checks through its branches:
 
-* it reads bytes the caller already loaded from the existing document layer;
-* it never writes to disk, so the original uploaded file is untouched;
-* it returns plain image bytes plus a MIME type, not provider-specific objects.
+* PDF   -> native text first, OCR/vision only as fallbacks;
+* JPEG/PNG -> vision directly;
+* XLSX/XLS/DOCX -> structured text, then the text model.
 
-PDFs are rendered locally to images because the vision path accepts images, not
-PDF files. The configured page limit is enforced before any page is rendered:
-an oversized PDF is reported as an explicit, controlled failure instead of
-being silently truncated.
+It also owns the vision fallback's image preparation: the stored bytes are
+turned into bounded JPEGs in memory. Nothing is written to disk, so the original
+upload is untouched, and no provider-specific object leaks out of this module.
 
-No OCR, no cloud call and no parsing of accounting data happen here.
+Errors use the shared `DocumentPreparationError` codes. Messages are safe to
+show a user and never contain a filesystem path or document content.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from enum import Enum
 from io import BytesIO
 from pathlib import Path
 
@@ -27,15 +30,22 @@ from PIL import Image, ImageOps
 from app.core.storage import CONTENT_SIGNATURES
 from app.models.document import Document
 from app.services.ai import ImageInput
+from app.services.document_errors import DocumentPreparationError
+from app.services.pdf_text import inspect_pdf
 
 logger = logging.getLogger(__name__)
 
-#: Invoice documents this step can prepare. The inbox itself also accepts
-#: spreadsheets, which are not invoice inputs and are rejected here.
+#: Documents the vision fallback can turn into images.
 SUPPORTED_EXTENSIONS: frozenset[str] = frozenset({".pdf", ".jpg", ".jpeg", ".png"})
 
-#: Render resolution for PDF pages. 150 DPI keeps normal invoice text legible
-#: while staying far below the size at which the payload becomes wasteful.
+#: Documents the invoice extractor can route. Spreadsheets and DOCX go through
+#: the text/structured path; images and PDFs may use vision as a fallback.
+SUPPORTED_INVOICE_EXTENSIONS: frozenset[str] = (
+    SUPPORTED_EXTENSIONS | frozenset({".xlsx", ".xls", ".docx"})
+)
+
+#: Render resolution for PDF pages when vision is genuinely required. 150 DPI
+#: keeps normal invoice text legible while staying below the wasteful range.
 PDF_RENDER_DPI = 150
 #: Longest edge kept for any image. Invoice text remains readable and the
 #: base64 payload stays bounded.
@@ -44,30 +54,23 @@ MAX_IMAGE_EDGE = 2200
 JPEG_QUALITY = 88
 
 
-class DocumentPreparationError(Exception):
-    """The document cannot be turned into provider-ready images.
+class DocumentKind(str, Enum):
+    """How the extraction pipeline should read a stored document."""
 
-    `code` is a stable machine-readable reason; `message` is safe to show a
-    user. Neither contains a filesystem path.
-    """
+    PDF = "PDF"
+    IMAGE = "IMAGE"
+    XLSX = "XLSX"
+    XLS = "XLS"
+    DOCX = "DOCX"
 
-    #: Extension is not one of PDF/JPEG/PNG.
-    UNSUPPORTED_DOCUMENT_TYPE = "UNSUPPORTED_DOCUMENT_TYPE"
-    #: The file is empty or does not match its declared format.
-    INVALID_DOCUMENT = "INVALID_DOCUMENT"
-    #: The file could not be parsed at all.
-    DOCUMENT_UNREADABLE = "DOCUMENT_UNREADABLE"
-    #: The PDF has more pages than the configured limit.
-    DOCUMENT_TOO_MANY_PAGES = "DOCUMENT_TOO_MANY_PAGES"
-    #: The PDF is password-protected.
-    DOCUMENT_ENCRYPTED = "DOCUMENT_ENCRYPTED"
-    #: The page limit is not usable (misconfigured).
-    INVALID_CONFIGURATION = "INVALID_CONFIGURATION"
 
-    def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
+@dataclass(frozen=True)
+class DetectedDocument:
+    """A validated document plus the processing path it routes to."""
+
+    kind: DocumentKind
+    extension: str
+    page_count: int | None = None
 
 
 def _document_extension(document: Document) -> str:
@@ -79,22 +82,81 @@ def _document_extension(document: Document) -> str:
     return Path(document.original_filename).suffix.lower()
 
 
-def prepare_document(
+def route_document(
+    document: Document,
+    raw_bytes: bytes,
+    *,
+    max_pages: int,
+) -> DetectedDocument:
+    """Validate a stored document and decide which reader should handle it.
+
+    Raises `DocumentPreparationError` with a stable code on any unsupported,
+    empty, mismatched, encrypted or oversized input. This runs before any
+    provider call, so an invalid document never costs a request.
+    """
+    extension = _document_extension(document)
+    if extension not in SUPPORTED_INVOICE_EXTENSIONS:
+        raise DocumentPreparationError(
+            DocumentPreparationError.UNSUPPORTED_DOCUMENT_TYPE,
+            "Only PDF, JPEG, PNG, XLSX, XLS and DOCX documents can be read for "
+            "invoice extraction.",
+        )
+
+    if not raw_bytes:
+        raise DocumentPreparationError(
+            DocumentPreparationError.INVALID_DOCUMENT,
+            "The stored document is empty.",
+        )
+
+    signature = CONTENT_SIGNATURES.get(extension)
+    if signature is not None and not raw_bytes.startswith(signature):
+        raise DocumentPreparationError(
+            DocumentPreparationError.INVALID_DOCUMENT,
+            "The stored file does not look like its declared format.",
+        )
+
+    if extension == ".pdf":
+        page_count = inspect_pdf(raw_bytes, max_pages=max_pages)
+        return DetectedDocument(DocumentKind.PDF, extension, page_count=page_count)
+    if extension in {".jpg", ".jpeg", ".png"}:
+        return DetectedDocument(DocumentKind.IMAGE, extension)
+    if extension == ".xlsx":
+        return DetectedDocument(DocumentKind.XLSX, extension)
+    if extension == ".xls":
+        return DetectedDocument(DocumentKind.XLS, extension)
+    return DetectedDocument(DocumentKind.DOCX, extension)
+
+
+def prepare_vision_images(
     document: Document,
     raw_bytes: bytes,
     *,
     max_pages: int,
 ) -> tuple[ImageInput, ...]:
-    """Prepare a stored document for the vision provider.
+    """Prepare a stored PDF or image for the vision provider."""
+    return prepare_vision_images_for_extension(
+        _document_extension(document),
+        raw_bytes,
+        max_pages=max_pages,
+    )
 
-    Raises `DocumentPreparationError` with a stable code on any unsupported or
-    unreadable input. The original bytes are never modified.
+
+def prepare_vision_images_for_extension(
+    extension: str,
+    raw_bytes: bytes,
+    *,
+    max_pages: int,
+) -> tuple[ImageInput, ...]:
+    """Prepare an already-routed PDF or image for the vision provider.
+
+    PDFs are rendered only when vision is actually needed. Digital PDFs use
+    `pdf_text` instead, so they are never rasterised in the normal path.
     """
-    extension = _document_extension(document)
+    extension = extension.lower()
     if extension not in SUPPORTED_EXTENSIONS:
         raise DocumentPreparationError(
             DocumentPreparationError.UNSUPPORTED_DOCUMENT_TYPE,
-            "Only PDF, JPEG and PNG documents can be read for invoice extraction.",
+            "Only PDF, JPEG and PNG documents can be prepared as images.",
         )
 
     if not raw_bytes:
@@ -113,6 +175,11 @@ def prepare_document(
     if extension == ".pdf":
         return _prepare_pdf(raw_bytes, max_pages=max_pages)
     return (_prepare_image(raw_bytes),)
+
+
+#: Backwards-compatible name used by the original image-only pipeline and its
+#: tests. New code should call `prepare_vision_images`.
+prepare_document = prepare_vision_images
 
 
 def _prepare_pdf(raw_bytes: bytes, *, max_pages: int) -> tuple[ImageInput, ...]:
@@ -214,7 +281,13 @@ def _to_jpeg_bytes(image: Image.Image) -> bytes:
 
 
 __all__ = [
+    "DetectedDocument",
+    "DocumentKind",
     "DocumentPreparationError",
     "SUPPORTED_EXTENSIONS",
+    "SUPPORTED_INVOICE_EXTENSIONS",
     "prepare_document",
+    "prepare_vision_images",
+    "prepare_vision_images_for_extension",
+    "route_document",
 ]

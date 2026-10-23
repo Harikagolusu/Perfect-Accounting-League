@@ -55,20 +55,45 @@ class AIProvider(Protocol):
         system_prompt: str | None = None,
         temperature: float = 0.1,
         max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> AIResponse:
         """Generate text from a prompt.
+
+        This is the compatibility text method. Extraction prefers
+        `generate_from_text` for native PDF text, OCR text and structured
+        document text; it must not be used for image-only inputs.
 
         Args:
             prompt: The user prompt.
             system_prompt: Optional system-level instruction.
             temperature: Sampling temperature (0 = deterministic).
             max_tokens: Optional hard cap on output tokens.
+            json_mode: Ask the provider for a JSON object response when the
+                underlying API supports it.
 
         Returns:
             An AIResponse with the generated text and metadata.
 
         Raises:
             AIProviderError: If the provider cannot complete the request.
+        """
+        ...
+
+    def generate_from_text(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+        temperature: float = 0.1,
+        max_tokens: int | None = None,
+        json_mode: bool = False,
+    ) -> AIResponse:
+        """Generate text from a text-only prompt.
+
+        Kept as a distinct capability from vision so a provider that cannot
+        accept images is still usable for digital PDFs, OCR text, Excel and
+        DOCX. `generate_text` remains the compatibility method; providers may
+        implement both by delegating one to the other.
         """
         ...
 
@@ -125,6 +150,8 @@ class AIProviderError(Exception):
     CONNECTION_ERROR = "connection_error"
     #: The provider is missing required configuration (e.g. an API key).
     NOT_CONFIGURED = "not_configured"
+    #: The provider does not implement the capability the caller needs.
+    UNSUPPORTED_CAPABILITY = "unsupported_capability"
 
     def __init__(
         self,

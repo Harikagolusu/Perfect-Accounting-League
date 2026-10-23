@@ -211,6 +211,9 @@ class ProcessInvoiceResponse(BaseModel):
     provider: str | None = None
     model: str | None = None
     usage: dict[str, int] | None = None
+    # Safe operational metadata: NATIVE_TEXT, OCR_TEXT, IMAGE_VISION,
+    # EXCEL_TEXT or DOCX_TEXT. Never contains document content.
+    extraction_method: str | None = None
 
 
 __all__ = [

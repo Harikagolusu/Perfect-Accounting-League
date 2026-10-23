@@ -5,7 +5,7 @@ import {
   PageHeader,
   StatusBadge,
   Field,
-  DemoNotice,
+  InfoNotice,
   Section,
   EmptyState,
   KV,
@@ -412,11 +412,11 @@ function BankPage() {
           </Button>
         }
       />
-      <DemoNotice>
+      <InfoNotice>
         Automatic parsing is not configured. Statements are stored against their source document and
         every transaction is entered by hand — nothing here is read from the file, cleaned, or
         mapped to a ledger.
-      </DemoNotice>
+      </InfoNotice>
 
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,2fr)_3fr]">
         <div className="flex flex-col gap-4">

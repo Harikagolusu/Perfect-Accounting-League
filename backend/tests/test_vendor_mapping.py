@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.models.invoice import VendorMappingStatus
+from app.models.invoice import Invoice, InvoiceStatus, VendorMappingStatus
 from app.services.invoice_extraction import ExtractionOutcome, ExtractionResult
 from app.services.vendor_matching import (
     VendorMatchMethod,
@@ -497,15 +497,17 @@ def test_name_match_is_only_a_suggestion(
     assert invoice["status"] == "NEEDS_REVIEW"
 
 
-def test_no_match_leaves_the_invoice_unmapped(
+def test_invoice_without_supplier_details_stays_unmapped(
     client: TestClient, extractor: FakeExtractor
 ) -> None:
     company = _company(client)
     document = _document(client, company["id"])
+    extractor.values = _values(vendor_name=None)
 
     body = _process_document(client, company["id"], document["id"]).json()
     invoice = _get_invoice(client, company["id"], body["invoice_id"])
 
+    assert client.get(f"{COMPANIES_URL}/{company['id']}/vendors").json() == []
     assert invoice["vendor_id"] is None
     assert invoice["suggested_vendor_id"] is None
     assert invoice["vendor_mapping_status"] == "UNMAPPED"
@@ -575,17 +577,35 @@ def test_existing_manual_vendor_is_preserved(
     assert invoice["vendor_mapping_status"] == "CONFIRMED"
 
 
-def test_no_vendor_is_created_automatically(
+def test_unmatched_vendor_is_created_and_suggested(
     client: TestClient, extractor: FakeExtractor
 ) -> None:
     company = _company(client)
     document = _document(client, company["id"])
+    extractor.values = _values(vendor_gstin=GSTIN_A, vendor_pan=PAN_A)
 
-    _process_document(client, company["id"], document["id"])
+    body = _process_document(client, company["id"], document["id"]).json()
 
     listed = client.get(f"{COMPANIES_URL}/{company['id']}/vendors")
     assert listed.status_code == 200
-    assert listed.json() == []
+    vendors = listed.json()
+    assert len(vendors) == 1
+    vendor = vendors[0]
+    assert vendor["name"] == "ABC Traders Pvt Ltd"
+    assert vendor["gstin"] == GSTIN_A
+    assert vendor["pan"] == PAN_A
+    assert vendor["creditor_ledger"] == "ABC Traders Pvt Ltd"
+    assert vendor["parent_group"] == "Sundry Creditors"
+    assert vendor["default_expense_ledger"] is None
+    assert vendor["status"] == "NEEDS_MAPPING"
+
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert invoice["vendor_id"] is None
+    assert invoice["suggested_vendor_id"] == vendor["id"]
+    assert invoice["vendor_mapping_status"] == "SUGGESTED"
+    assert invoice["vendor_match_method"] is None
+    assert invoice["status"] == "NEEDS_REVIEW"
+    assert body["status"] == "NEEDS_REVIEW"
 
 
 def test_confirming_a_suggestion_assigns_the_vendor(
@@ -603,8 +623,59 @@ def test_confirming_a_suggestion_assigns_the_vendor(
     assert invoice["vendor_id"] == vendor["id"]
     assert invoice["suggested_vendor_id"] is None
     assert invoice["vendor_mapping_status"] == "CONFIRMED"
+    # Confirming while the invoice is already in review does not change status.
+    assert invoice["status"] == "NEEDS_REVIEW"
     # The evidence that produced the suggestion is kept.
     assert invoice["vendor_match_method"] == "NORMALIZED_NAME"
+
+
+def test_approving_data_with_pending_mapping_is_rejected(
+    client: TestClient, extractor: FakeExtractor
+) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="ABC Traders")
+    document = _document(client, company["id"])
+    body = _process_document(client, company["id"], document["id"]).json()
+    assert body["status"] == "NEEDS_REVIEW"
+
+    response = client.patch(
+        f"{_invoices_url(company['id'])}/{body['invoice_id']}",
+        json={"status": "PROCESSED"},
+    )
+
+    assert response.status_code == 409
+    assert "vendor suggestion" in response.json()["detail"].lower()
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert invoice["status"] == "NEEDS_REVIEW"
+    assert invoice["vendor_mapping_status"] == "SUGGESTED"
+
+
+def test_confirming_a_mapping_reopens_a_processed_invoice(
+    client: TestClient, extractor: FakeExtractor, db: Session
+) -> None:
+    company = _company(client)
+    vendor = _vendor(client, company["id"], name="ABC Traders")
+    document = _document(client, company["id"])
+    body = _process_document(client, company["id"], document["id"]).json()
+    invoice = db.get(Invoice, uuid.UUID(body["invoice_id"]))
+    assert invoice is not None
+    # Reproduce the state an approval that skipped the mapping review left.
+    invoice.status = InvoiceStatus.PROCESSED
+    db.commit()
+
+    confirmed = _confirm(client, company["id"], body["invoice_id"], vendor["id"])
+
+    assert confirmed.status_code == 200, confirmed.text
+    reopened = confirmed.json()
+    assert reopened["status"] == "NEEDS_REVIEW"
+    assert reopened["vendor_mapping_status"] == "CONFIRMED"
+
+    approved = client.patch(
+        f"{_invoices_url(company['id'])}/{body['invoice_id']}",
+        json={"status": "PROCESSED"},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["status"] == "PROCESSED"
 
 
 def test_rejecting_a_suggestion_is_not_reapplied_on_reprocess(
@@ -834,16 +905,20 @@ def test_cross_company_identity_does_not_leak_into_matching(
 ) -> None:
     company_a = _company(client, "Company A")
     company_b = _company(client, "Company B")
-    _vendor(client, company_b["id"], name="ABC Traders", gstin=GSTIN_B)
+    vendor_b = _vendor(client, company_b["id"], name="ABC Traders", gstin=GSTIN_B)
     document = _document(client, company_a["id"])
     extractor.values = _values(vendor_gstin=GSTIN_B)
 
     body = _process_document(client, company_a["id"], document["id"]).json()
 
+    vendor_a = client.get(f"{COMPANIES_URL}/{company_a['id']}/vendors").json()[0]
+    assert vendor_a["id"] != vendor_b["id"]
+    assert vendor_a["gstin"] == GSTIN_B
+
     invoice = _get_invoice(client, company_a["id"], body["invoice_id"])
     assert invoice["vendor_id"] is None
-    assert invoice["suggested_vendor_id"] is None
-    assert invoice["vendor_mapping_status"] == "UNMAPPED"
+    assert invoice["suggested_vendor_id"] == vendor_a["id"]
+    assert invoice["vendor_mapping_status"] == "SUGGESTED"
 
 
 def test_invalid_gstin_is_preserved_and_reported(
@@ -1023,10 +1098,13 @@ def test_match_preview_with_no_match_has_no_candidates(
 ) -> None:
     company = _company(client)
     document = _document(client, company["id"])
-    body = _process_document(client, company["id"], document["id"]).json()
+    created = client.post(
+        _invoices_url(company["id"]),
+        json={"document_id": document["id"], "vendor_name": "ABC Traders"},
+    ).json()
 
     preview = client.get(
-        f"{_invoices_url(company['id'])}/{body['invoice_id']}/vendor-match"
+        f"{_invoices_url(company['id'])}/{created['id']}/vendor-match"
     ).json()
 
     assert preview["status"] == "NO_MATCH"

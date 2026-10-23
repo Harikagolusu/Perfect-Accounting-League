@@ -7,6 +7,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useStore } from "@/lib/store";
 import { fmtDate } from "@/lib/format";
 import { useCompany } from "@/lib/queries/companies";
+import { useDocuments } from "@/lib/queries/documents";
+import { useVendors } from "@/lib/queries/vendors";
 import { CompanyDialog } from "./companies.index";
 
 export const Route = createFileRoute("/companies/$id")({
@@ -34,6 +36,8 @@ function CompanyDetail() {
   const s = useStore();
   const [edit, setEdit] = useState(false);
   const { data: c, isPending, isError } = useCompany(id);
+  const { data: docs = [] } = useDocuments(id);
+  const { data: vendors = [] } = useVendors(id, true);
 
   if (isPending) {
     return (
@@ -51,12 +55,7 @@ function CompanyDetail() {
   if (isError || !c)
     return <EmptyState title="Company not found" hint="It may have been removed." />;
 
-  // Documents, vendors and reconciliation still come from mock data and are
-  // keyed to the old demo ids, so they stay empty until those modules move to
-  // the API.
-  const docs = s.documents.filter((d) => d.companyId === id);
-  const reco = s.reco.filter((r) => r.companyId === id);
-  const vendorCount = s.vendors.filter((v) => v.companyId === id).length;
+  const vendorCount = vendors.length;
 
   return (
     <>
@@ -106,12 +105,12 @@ function CompanyDetail() {
           <KV
             k="Tally Prime"
             v={
-              <StatusBadge status={c.software === "Tally Prime" ? "Demo only" : "Not connected"} />
+              <StatusBadge status="Not connected" />
             }
           />
           <KV
             k="Zoho Books"
-            v={<StatusBadge status={c.software === "Zoho Books" ? "Demo only" : "Not connected"} />}
+            v={<StatusBadge status="Not connected" />}
           />
           <p className="mt-2 text-xs text-muted-foreground">
             Live connections are configured by your engineering team.
@@ -150,23 +149,10 @@ function CompanyDetail() {
           )}
         </Section>
         <Section title="Recent Reconciliation Activity" className="lg:col-span-3">
-          {reco
-            .filter((r) => r.status !== "Exact Match")
-            .slice(0, 5)
-            .map((r) => (
-              <div
-                key={r.id}
-                className="flex items-center justify-between border-b py-2 text-sm last:border-0"
-              >
-                <span>
-                  {r.supplier} · <span className="num">{r.invoiceNo}</span>
-                </span>
-                <StatusBadge status={r.status} />
-              </div>
-            ))}
-          {!reco.filter((r) => r.status !== "Exact Match").length && (
-            <EmptyState title="No reconciliation activity yet" />
-          )}
+          <EmptyState
+            title="No reconciliation activity yet"
+            hint="Reconciliation will appear here once the backend provides it."
+          />
         </Section>
       </div>
       {edit && <CompanyDialog initial={c} open={edit} onOpenChange={setEdit} />}

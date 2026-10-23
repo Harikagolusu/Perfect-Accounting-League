@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useStore } from "@/lib/store";
-import { FINANCIAL_YEARS } from "@/lib/mock-data";
+import { FINANCIAL_YEARS } from "@/lib/constants";
 import { EMAIL_RE, GSTIN_RE, PAN_RE } from "@/lib/format";
 import {
   useCompanies,

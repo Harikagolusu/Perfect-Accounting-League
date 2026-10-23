@@ -1,13 +1,12 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { Check, X, RotateCcw, ExternalLink } from "lucide-react";
-import { PageHeader, StatusBadge, DemoNotice, KV, Field } from "@/components/pal/common";
+import { PageHeader, StatusBadge, InfoNotice, KV, Field, EmptyState } from "@/components/pal/common";
 import { DataTable, FilterSelect } from "@/components/pal/data-table";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useCompany, useScoped, useStore } from "@/lib/store";
-import { USERS } from "@/lib/mock-data";
 import { fmtDate } from "@/lib/format";
 import type { ReviewTask } from "@/lib/types";
 import { seo } from "@/lib/seo";
@@ -36,6 +35,18 @@ function ReviewPage() {
   const [comment, setComment] = useState("");
   const open = tasks.find((t) => t.id === openId) ?? null;
   const canAct = s.role !== "Viewer";
+  const assignees = Array.from(new Set(s.reviews.map((t) => t.assignedTo).filter(Boolean)));
+
+  if (!company) {
+    return (
+      <>
+        <PageHeader title="Review Queue" description="Items awaiting accountant review." />
+        <div className="rounded-md border bg-card p-4">
+          <EmptyState title="No company selected" hint="Create a company before reviewing records." />
+        </div>
+      </>
+    );
+  }
 
   const update = (ids: string[], patch: Partial<ReviewTask>, msg: string) => {
     if (!canAct) return toast.error("Your role does not permit review actions.");
@@ -47,7 +58,7 @@ function ReviewPage() {
   return (
     <>
       <PageHeader title="Review Queue" description={`Items awaiting accountant review for ${company.displayName}.`} />
-      {!canAct && <DemoNotice>You are previewing as Viewer — approve/reject actions are disabled.</DemoNotice>}
+      {!canAct && <InfoNotice>You are previewing as Viewer — approve/reject actions are disabled.</InfoNotice>}
       <DataTable
         rows={tasks.filter((t) => (type === "All" || t.type === type) && (st === "All" || t.status === st) && (pr === "All" || t.priority === pr))}
         rowKey={(r) => r.id}
@@ -58,7 +69,7 @@ function ReviewPage() {
           <Button size="sm" variant="outline" className="h-7" onClick={() => { update(ids, { status: "Approved" }, `${ids.length} approved`); clear(); }}>Approve</Button>
           <Button size="sm" variant="outline" className="h-7" onClick={() => { update(ids, { status: "Rejected" }, `${ids.length} rejected`); clear(); }}>Reject</Button>
           <select aria-label="Assign selected" className="h-7 rounded border border-input bg-background text-xs" defaultValue="" onChange={(e) => { if (e.target.value) { update(ids, { assignedTo: e.target.value }, `Assigned to ${e.target.value}`); clear(); } }}>
-            <option value="">Assign…</option>{USERS.map((u) => <option key={u}>{u}</option>)}
+            <option value="">Assign…</option>{assignees.map((u) => <option key={u}>{u}</option>)}
           </select>
         </>}
         toolbar={<>
@@ -85,7 +96,7 @@ function ReviewPage() {
               <div><KV k="Type" v={open.type} /><KV k="Description" v={open.description} /><KV k="Priority" v={<StatusBadge status={open.priority} />} /><KV k="Status" v={<StatusBadge status={open.status} />} /></div>
               <Field label="Assign reviewer">
                 <select className="h-9 rounded-md border border-input bg-background px-2 text-sm" value={open.assignedTo} onChange={(e) => update([open.id], { assignedTo: e.target.value }, `Assigned to ${e.target.value}`)}>
-                  {["Unassigned", ...USERS].map((u) => <option key={u}>{u}</option>)}
+                  {["Unassigned", ...assignees].map((u) => <option key={u}>{u}</option>)}
                 </select>
               </Field>
               <Button variant="outline" className="w-full" onClick={() => navigate({ to: LINK[open.type] })}><ExternalLink />Open record</Button>
@@ -98,7 +109,7 @@ function ReviewPage() {
                 <h3 className="mb-2 text-sm font-semibold">Comments</h3>
                 {open.comments.map((c, i) => <p key={i} className="mb-1 rounded bg-muted p-2 text-xs">{c}</p>)}
                 <Textarea rows={2} value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Add a comment…" />
-                <Button size="sm" className="mt-2" disabled={!comment.trim()} onClick={() => { s.setReviews((all) => all.map((t) => (t.id === open.id ? { ...t, comments: [...t.comments, `Ananya Rao: ${comment}`] } : t))); setComment(""); toast.success("Comment added"); }}>Add comment</Button>
+                <Button size="sm" className="mt-2" disabled={!comment.trim()} onClick={() => { s.setReviews((all) => all.map((t) => (t.id === open.id ? { ...t, comments: [...t.comments, `Local user: ${comment}`] } : t))); setComment(""); toast.success("Comment added"); }}>Add comment</Button>
               </div>
             </div>
           )}

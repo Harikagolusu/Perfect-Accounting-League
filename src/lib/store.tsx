@@ -1,7 +1,8 @@
-// Frontend-only demo state. This is the seam where API calls will plug in:
-// replace the initial mock arrays with fetched data and the setters with mutations.
+// Session state shared by the app. Domain records come from the API; the
+// remaining arrays are local-only placeholders used by modules whose backend
+// does not exist yet.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import * as mock from "./mock-data";
+import { FINANCIAL_YEARS, currentPeriod } from "./constants";
 import { useCompanies } from "./queries/companies";
 import type {
   AuditEvent,
@@ -27,8 +28,8 @@ interface Store {
   setPeriod: (p: string) => void;
   role: "Partner" | "Accountant" | "Viewer";
   setRole: (r: Store["role"]) => void;
-  // Companies are the first API-backed module, so they are read-only here:
-  // writes go through the companies API and React Query invalidation refills.
+  // Companies are API-backed and read-only here: writes go through the
+  // companies API and React Query invalidation refills the list.
   companies: Company[];
   vendors: Vendor[];
   setVendors: Setter<Vendor>;
@@ -54,27 +55,23 @@ const Ctx = createContext<Store | null>(null);
 const PREFS_KEY = "pal.prefs"; // non-sensitive UI preferences only
 
 export function StoreProvider({ children }: { children: ReactNode }) {
-  const [companyId, setCompanyId] = useState("c1");
-  const [financialYear, setFinancialYear] = useState(mock.FINANCIAL_YEARS[0]);
-  const [period, setPeriod] = useState("October");
+  const [companyId, setCompanyId] = useState("");
+  const [financialYear, setFinancialYear] = useState(FINANCIAL_YEARS[0]);
+  const [period, setPeriod] = useState(currentPeriod());
   const [role, setRole] = useState<Store["role"]>("Partner");
 
-  // The mock list stays only as a fallback, so pages still showing module mock
-  // data (invoices, GST, ...) keep working before the backend returns companies
-  // or while it is unreachable. Those modules get real data in their own steps,
-  // after which the fallback can go.
   const { data: apiCompanies } = useCompanies(true);
-  const companies = apiCompanies?.length ? apiCompanies : mock.companies;
+  const companies = useMemo(() => apiCompanies ?? [], [apiCompanies]);
 
-  const [vendors, setVendors] = useState(mock.vendors);
-  const [mappings, setMappings] = useState(mock.ledgerMappings);
-  const [documents, setDocuments] = useState(mock.documents);
-  const [bankTx, setBankTx] = useState(mock.bankTransactions);
-  const [tds, setTds] = useState(mock.tdsWorkings);
-  const [reco, setReco] = useState(mock.reconciliationRecords);
-  const [reviews, setReviews] = useState(mock.reviewTasks);
-  const [audit, setAudit] = useState(mock.auditEvents);
-  const [exports, setExports] = useState(mock.exportJobs);
+  const [vendors, setVendors] = useState<Vendor[]>([]);
+  const [mappings, setMappings] = useState<LedgerMapping[]>([]);
+  const [documents, setDocuments] = useState<InboxDocument[]>([]);
+  const [bankTx, setBankTx] = useState<BankTransaction[]>([]);
+  const [tds, setTds] = useState<TDSWorking[]>([]);
+  const [reco, setReco] = useState<ReconciliationRecord[]>([]);
+  const [reviews, setReviews] = useState<ReviewTask[]>([]);
+  const [audit, setAudit] = useState<AuditEvent[]>([]);
+  const [exports, setExports] = useState<ExportJob[]>([]);
 
   useEffect(() => {
     try {
@@ -91,14 +88,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [companyId, financialYear, period]);
 
   // The selected company must be a real backend UUID, because company-scoped
-  // requests address /companies/{company_id}/... and an id like "c1" does not
-  // exist there. Real companies have no "c1", so the first real one is picked.
-  // While the API is unreachable the list is the mock one, which still has
-  // "c1", so the existing demo behaviour is preserved.
+  // requests address /companies/{company_id}/... . Pick the first real company
+  // when nothing valid is selected.
   useEffect(() => {
     if (!companies.length) return;
     if (companyId && companies.some((c) => c.id === companyId)) return;
-    setCompanyId(companies.find((c) => c.id === "c1")?.id ?? companies[0].id);
+    setCompanyId(companies[0].id);
   }, [companies, companyId]);
 
   const value = useMemo<Store>(() => {
@@ -135,7 +130,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             ...e,
             id: `AE-${Date.now()}`,
             timestamp: now(),
-            user: "Ananya Rao",
+            user: "Local user",
             companyId,
             status: "Success",
           },
@@ -179,7 +174,7 @@ export function useStore() {
   return s;
 }
 
-/** Returns only rows belonging to the selected company. UI scoping only — the backend must enforce isolation. */
+/** Returns only rows belonging to the selected company. UI scoping only - the backend must enforce isolation. */
 export function useScoped<T extends { companyId: string }>(rows: T[]) {
   const { companyId } = useStore();
   return useMemo(() => rows.filter((r) => r.companyId === companyId), [rows, companyId]);

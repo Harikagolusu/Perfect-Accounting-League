@@ -9,8 +9,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { CommandDialog, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList } from "@/components/ui/command";
-import { useStore } from "@/lib/store";
-import { FINANCIAL_YEARS, PERIODS } from "@/lib/mock-data";
+import { useCompany, useStore } from "@/lib/store";
+import { FINANCIAL_YEARS, PERIODS } from "@/lib/constants";
+import { useDocuments } from "@/lib/queries/documents";
+import { useVendors } from "@/lib/queries/vendors";
 import { ALL_NAV } from "./nav";
 import { toast } from "sonner";
 
@@ -19,12 +21,15 @@ const selectCls =
 
 export function AppHeader() {
   const s = useStore();
+  const company = useCompany();
   const path = useRouterState({ select: (r) => r.location.pathname });
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const current = ALL_NAV.find((n) => (n.url === "/" ? path === "/" : path.startsWith(n.url)));
-  const openReviews = s.reviews.filter((r) => r.companyId === s.companyId && r.status === "Open");
-  const failed = s.documents.filter((d) => d.companyId === s.companyId && d.status === "Failed");
+  const openReviews = s.reviews.filter((r) => r.companyId === (company?.id ?? "") && r.status === "Open");
+  const { data: documents = [] } = useDocuments(company?.id);
+  const { data: vendors = [] } = useVendors(company?.id, true);
+  const failed = documents.filter((d) => d.status === "Failed");
 
   return (
     <header className="sticky top-0 z-20 flex flex-col gap-2 border-b bg-background px-3 py-2 lg:flex-row lg:items-center">
@@ -38,7 +43,7 @@ export function AppHeader() {
         </nav>
       </div>
       <div className="flex flex-1 flex-wrap items-center gap-2 lg:justify-end">
-        <select aria-label="Company" className={selectCls} value={s.companyId} onChange={(e) => { s.setCompanyId(e.target.value); toast.success("Company switched", { description: s.companies.find((c) => c.id === e.target.value)?.displayName }); }}>
+        <select aria-label="Company" className={selectCls} value={company?.id ?? ""} onChange={(e) => { s.setCompanyId(e.target.value); toast.success("Company switched", { description: s.companies.find((c) => c.id === e.target.value)?.displayName }); }}>
           {s.companies.map((c) => <option key={c.id} value={c.id}>{c.displayName}</option>)}
         </select>
         <select aria-label="Financial year" className={selectCls} value={s.financialYear} onChange={(e) => s.setFinancialYear(e.target.value)}>
@@ -62,7 +67,7 @@ export function AppHeader() {
               ))}
             </CommandGroup>
             <CommandGroup heading="Vendors">
-              {s.vendors.filter((v) => v.companyId === s.companyId).map((v) => (
+              {vendors.map((v) => (
                 <CommandItem key={v.id} onSelect={() => { setOpen(false); navigate({ to: "/vendors" }); }}>{v.name}</CommandItem>
               ))}
             </CommandGroup>
@@ -79,20 +84,19 @@ export function AppHeader() {
             <div className="border-b px-3 py-2 text-sm font-semibold">Notifications</div>
             <div className="max-h-72 overflow-auto text-sm">
               <Link to="/review" className="block border-b px-3 py-2 hover:bg-muted">{openReviews.length} items awaiting review</Link>
-              <Link to="/inbox" className="block border-b px-3 py-2 hover:bg-muted">{failed.length} documents failed processing</Link>
-              <Link to="/" className="block px-3 py-2 hover:bg-muted">TDS Return Q2 due 31 Oct 2026</Link>
+              <Link to="/inbox" className="block px-3 py-2 hover:bg-muted">{failed.length} documents failed processing</Link>
             </div>
           </PopoverContent>
         </Popover>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="outline" size="sm" className="h-8 gap-2">
-              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-navy text-[10px] text-navy-foreground">AR</span>
-              <span className="hidden text-xs md:inline">Ananya Rao</span>
+              <span className="flex h-5 w-5 items-center justify-center rounded-full bg-navy text-[10px] text-navy-foreground">LU</span>
+              <span className="hidden text-xs md:inline">Local user</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="w-56">
-            <DropdownMenuLabel className="text-xs">Signed in as Ananya Rao<br /><span className="font-normal text-muted-foreground">Demo session</span></DropdownMenuLabel>
+            <DropdownMenuLabel className="text-xs">Local session<br /><span className="font-normal text-muted-foreground">Authentication is not connected</span></DropdownMenuLabel>
             <DropdownMenuSeparator />
             <DropdownMenuLabel className="flex items-center gap-1 text-xs"><Shield className="h-3 w-3" /> Preview role</DropdownMenuLabel>
             <DropdownMenuRadioGroup value={s.role} onValueChange={(v) => s.setRole(v as typeof s.role)}>

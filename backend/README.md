@@ -235,6 +235,25 @@ pytest -v
 Tests run against a real PostgreSQL database and override `get_db`, so no
 running server is required.
 
+## Optional OCR support
+
+Digital PDFs are read from their native text layer and never need OCR. For a
+scanned PDF, the extractor can try Tesseract before falling back to the vision
+provider:
+
+1. install the Python wrapper: `pip install -r requirements.txt` (includes
+   `pytesseract`);
+2. install the Tesseract executable for the host OS and make sure `tesseract`
+   is on `PATH` (for example, the `tesseract-ocr` system package on Debian or
+   Ubuntu, or the Windows installer);
+3. optionally install the English language data if the installer does not
+   include it.
+
+`pytesseract` is only a wrapper around the executable. When Tesseract is absent,
+startup and digital-PDF extraction still work; the extractor logs that OCR is
+unavailable and uses the configured vision provider instead. OCR is not a hard
+dependency.
+
 ## Endpoints
 
 | Method | Path | Description |

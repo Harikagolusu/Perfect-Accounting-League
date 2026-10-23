@@ -17,6 +17,7 @@ import {
   type UiInvoice,
   type VendorMatch,
 } from "@/lib/api/invoices";
+import { vendorKeys } from "@/lib/queries/vendors";
 
 export const invoiceKeys = {
   all: ["invoices"] as const,
@@ -115,9 +116,12 @@ export function useProcessInvoice(companyId: string | undefined) {
     mutationFn: async (id: string) =>
       invoicesApi.process(companyId as string, id) as Promise<ProcessResult>,
     // The backend moves the invoice through PROCESSING to a final state and
-    // may write extracted fields, so the cached list must be refetched.
+    // may write extracted fields or auto-create a vendor, so both caches must
+    // be refetched.
     onSuccess: () => {
-      if (companyId) queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: vendorKeys.list(companyId) });
     },
   });
 }

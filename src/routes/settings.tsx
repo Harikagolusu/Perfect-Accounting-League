@@ -1,13 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 import { Lock, Plus } from "lucide-react";
-import { PageHeader, Section, Field, StatusBadge, DemoNotice } from "@/components/pal/common";
+import { PageHeader, Section, Field, StatusBadge, InfoNotice, EmptyState } from "@/components/pal/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { useStore } from "@/lib/store";
-import { USERS, tdsRates } from "@/lib/mock-data";
+import { tdsRates } from "@/lib/constants";
 import { EMAIL_RE } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { seo } from "@/lib/seo";
@@ -35,10 +35,10 @@ const SECTIONS: { id: string; title: string; fields?: FieldDef[] }[] = [
   { id: "security", title: "Security Settings", fields: [{ key: "mfa", label: "Require two-factor authentication", type: "toggle" }, { key: "session", label: "Session timeout (minutes)", type: "number" }, { key: "ipAllow", label: "Restrict access by IP allowlist", type: "toggle" }] },
 ];
 const DEFAULTS: Record<string, string | boolean> = {
-  firm: "Rao & Mehta Associates (Sample)", frn: "123456W", email: "admin@raomehta-demo.in", city: "Pune",
+  firm: "", frn: "", email: "", city: "",
   defaultSoftware: "Tally Prime", autoAssign: true, maskPan: false, fyStart: "April", lockPrev: true, invoicePrefix: "PAL", dateFormat: "DD-MM-YYYY",
   autoApprove: "95", reviewBelow: "80", keywordMatch: true, gstFreq: "Monthly", rcm: true, taxTol: "10", dateTol: "3", normalize: true,
-  nDeadline: true, nReview: true, nFailed: true, inbox: "invoices@raomehta-demo.in", provider: "Google Workspace", mfa: true, session: "30", ipAllow: false,
+  nDeadline: true, nReview: true, nFailed: true, inbox: "", provider: "Google Workspace", mfa: true, session: "30", ipAllow: false,
   ...Object.fromEntries(Object.entries(tdsRates).map(([k, v]) => [`tds${k}`, String(v)])),
 };
 const PERMS = ["View data", "Edit records", "Approve", "Export", "Manage settings"];
@@ -50,7 +50,7 @@ function SettingsPage() {
   const [vals, setVals] = useState(DEFAULTS);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [confirm, setConfirm] = useState(false);
-  const [users, setUsers] = useState(USERS.map((u, i) => ({ name: u, role: i === 0 ? "Partner" : i === 4 ? "Viewer" : "Accountant", active: true })));
+  const [users, setUsers] = useState<{ name: string; role: string; active: boolean }[]>([]);
   const [newUser, setNewUser] = useState("");
   const sec = SECTIONS.find((x) => x.id === active)!;
 
@@ -73,8 +73,8 @@ function SettingsPage() {
 
   return (
     <>
-      <PageHeader title="Settings" description="Firm-wide configuration. Changes are kept in this demo session only." />
-      <DemoNotice>Passwords, API keys and credentials are never stored in the browser. Secrets will be managed by the backend.</DemoNotice>
+      <PageHeader title="Settings" description="Firm-wide configuration. Changes are kept in this browser session only." />
+      <InfoNotice>Passwords, API keys and credentials are never stored in the browser. Secrets will be managed by the backend.</InfoNotice>
       <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
         <nav className="flex gap-1 overflow-x-auto rounded-md border bg-card p-2 lg:flex-col">
           {SECTIONS.map((x) => (
@@ -102,13 +102,17 @@ function SettingsPage() {
           )}
           {active === "users" && (
             <div>
-              <div className="mb-3 flex gap-2"><Input placeholder="Full name" value={newUser} onChange={(e) => setNewUser(e.target.value)} className="h-9 max-w-xs" /><Button disabled={!newUser.trim()} onClick={() => { setUsers([...users, { name: newUser.trim(), role: "Accountant", active: true }]); setNewUser(""); toast.success("Invitation queued (demo)"); }}><Plus />Invite user</Button></div>
-              <table className="w-full text-sm"><thead className="text-xs text-muted-foreground"><tr><th className="py-2 text-left">User</th><th className="text-left">Role</th><th className="text-left">Active</th></tr></thead>
-                <tbody>{users.map((u, i) => (
-                  <tr key={u.name} className="border-t"><td className="py-2">{u.name}</td>
-                    <td><select className="h-8 rounded border border-input bg-background px-1 text-sm" value={u.role} onChange={(e) => setUsers(users.map((x, j) => (j === i ? { ...x, role: e.target.value } : x)))}>{Object.keys(ROLE_PERMS).map((r) => <option key={r}>{r}</option>)}</select></td>
-                    <td><Switch checked={u.active} onCheckedChange={(v) => setUsers(users.map((x, j) => (j === i ? { ...x, active: v } : x)))} /></td></tr>
-                ))}</tbody></table>
+              <div className="mb-3 flex gap-2"><Input placeholder="Full name" value={newUser} onChange={(e) => setNewUser(e.target.value)} className="h-9 max-w-xs" /><Button disabled={!newUser.trim()} onClick={() => { setUsers([...users, { name: newUser.trim(), role: "Accountant", active: true }]); setNewUser(""); toast.success("User added to this browser session"); }}><Plus />Add user</Button></div>
+              {users.length ? (
+                <table className="w-full text-sm"><thead className="text-xs text-muted-foreground"><tr><th className="py-2 text-left">User</th><th className="text-left">Role</th><th className="text-left">Active</th></tr></thead>
+                  <tbody>{users.map((u, i) => (
+                    <tr key={u.name} className="border-t"><td className="py-2">{u.name}</td>
+                      <td><select className="h-8 rounded border border-input bg-background px-1 text-sm" value={u.role} onChange={(e) => setUsers(users.map((x, j) => (j === i ? { ...x, role: e.target.value } : x)))}>{Object.keys(ROLE_PERMS).map((r) => <option key={r}>{r}</option>)}</select></td>
+                      <td><Switch checked={u.active} onCheckedChange={(v) => setUsers(users.map((x, j) => (j === i ? { ...x, active: v } : x)))} /></td></tr>
+                  ))}</tbody></table>
+              ) : (
+                <EmptyState title="No users configured" hint="User accounts and invitations will be provided by the backend." />
+              )}
             </div>
           )}
           {active === "roles" && (
@@ -122,7 +126,7 @@ function SettingsPage() {
       </div>
       <AlertDialog open={confirm} onOpenChange={setConfirm}>
         <AlertDialogContent>
-          <AlertDialogHeader><AlertDialogTitle>Save {sec.title.toLowerCase()}?</AlertDialogTitle><AlertDialogDescription>These changes apply firm-wide for this demo session.</AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogHeader><AlertDialogTitle>Save {sec.title.toLowerCase()}?</AlertDialogTitle><AlertDialogDescription>These changes apply for this browser session only.</AlertDialogDescription></AlertDialogHeader>
           <AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction onClick={() => { s.log({ module: "Settings", action: "Updated", recordId: sec.id.toUpperCase(), previous: "—", next: sec.title }); toast.success("Settings saved"); }}>Save</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

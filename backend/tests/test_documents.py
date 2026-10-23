@@ -27,6 +27,7 @@ JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 16
 XLSX_BYTES = b"PK\x03\x04\x14\x00\x06\x00" + b"\x00" * 16
 XLS_BYTES = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 16
+DOCX_BYTES = b"PK\x03\x04\x14\x00\x06\x00" + b"\x00" * 16
 
 
 def _documents_url(company_id: Any) -> str:
@@ -91,6 +92,12 @@ def two_companies(client: TestClient) -> tuple[dict[str, Any], dict[str, Any]]:
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ),
         (XLS_BYTES, "old.xls", "application/vnd.ms-excel", "application/vnd.ms-excel"),
+        (
+            DOCX_BYTES,
+            "page.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ),
     ],
 )
 def test_upload_supported_formats(
@@ -121,11 +128,6 @@ def test_jpeg_long_extension_is_accepted(
     [
         ("notes.txt", b"hello", "text/plain"),
         ("payload.exe", b"MZ\x90\x00", "application/octet-stream"),
-        (
-            "page.docx",
-            b"PK\x03\x04\x14\x00",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        ),
         ("archive.zip", b"PK\x03\x04\x14\x00", "application/zip"),
         ("shell.sh", b"#!/bin/sh\necho hi", "application/x-sh"),
     ],
@@ -158,6 +160,31 @@ def test_reject_mime_that_contradicts_the_extension(
     response = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "image/png")
 
     assert response.status_code == 415
+
+
+def test_reject_renamed_jpeg_with_png_bytes(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    """Same MIME family is not enough: the bytes must match the extension."""
+    response = _upload(
+        client, company["id"], PNG_BYTES, "invoice.jpg", "image/png"
+    )
+
+    assert response.status_code == 415
+
+
+def test_reject_renamed_docx_with_pdf_bytes(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    """A document-office and a PDF share the application/* family."""
+    response = _upload(
+        client, company["id"], PDF_BYTES, "invoice.docx", "application/pdf"
+    )
+
+    assert response.status_code == 415
+
+
+
 
 
 def test_generic_mime_is_still_content_checked(
@@ -356,6 +383,46 @@ def test_get_nonexistent_document_returns_404(
     assert response.json()["detail"] == "Document not found"
 
 
+def test_file_preview_returns_stored_bytes(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
+
+    response = client.get(f"{_documents_url(company['id'])}/{created['id']}/file")
+
+    assert response.status_code == 200
+    assert response.content == PDF_BYTES
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert "inline" in response.headers["content-disposition"]
+
+
+def test_file_download_uses_attachment_disposition(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
+
+    response = client.get(
+        f"{_documents_url(company['id'])}/{created['id']}/file",
+        params={"download": True},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/pdf")
+    assert "attachment" in response.headers["content-disposition"]
+
+
+def test_file_preview_returns_404_when_stored_file_is_missing(
+    client: TestClient, company: dict[str, Any], db: Session
+) -> None:
+    created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
+    resolve_storage_path(_stored_path(db, company["id"], created["id"])).unlink()
+
+    response = client.get(f"{_documents_url(company['id'])}/{created['id']}/file")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Stored file not found"
+
+
 # --- Delete ----------------------------------------------------------------
 
 
@@ -417,6 +484,17 @@ def test_cross_company_get_returns_404(
     b_document = client.get(_documents_url(b["id"])).json()[0]
 
     response = client.get(f"{_documents_url(a['id'])}/{b_document['id']}")
+
+    assert response.status_code == 404, response.text
+
+
+def test_cross_company_file_preview_returns_404(
+    client: TestClient, two_companies: tuple[dict[str, Any], dict[str, Any]]
+) -> None:
+    a, b = two_companies
+    b_document = client.get(_documents_url(b["id"])).json()[0]
+
+    response = client.get(f"{_documents_url(a['id'])}/{b_document['id']}/file")
 
     assert response.status_code == 404, response.text
 
