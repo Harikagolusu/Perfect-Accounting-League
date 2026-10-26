@@ -1,0 +1,1 @@
+"""Client accounting-voucher export."""

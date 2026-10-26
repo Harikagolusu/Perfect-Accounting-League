@@ -61,6 +61,12 @@ export interface BankTransactionDto {
   credit_amount: string;
   balance: string | null;
   transaction_type: TransactionType;
+  counterparty_name: string | null;
+  counterparty_ledger: string | null;
+  counterparty_address: string | null;
+  counterparty_pincode: string | null;
+  counterparty_gstin: string | null;
+  is_inter_account_transfer: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -79,6 +85,21 @@ export interface BankTransactionWriteDto {
   debit_amount?: string | null;
   credit_amount?: string | null;
   balance?: string | null;
+  counterparty_name?: string | null;
+  counterparty_ledger?: string | null;
+  counterparty_address?: string | null;
+  counterparty_pincode?: string | null;
+  counterparty_gstin?: string | null;
+  is_inter_account_transfer?: boolean;
+}
+
+export interface BankTransactionMappingWriteDto {
+  counterparty_name?: string | null;
+  counterparty_ledger?: string | null;
+  counterparty_address?: string | null;
+  counterparty_pincode?: string | null;
+  counterparty_gstin?: string | null;
+  is_inter_account_transfer?: boolean;
 }
 
 export interface ProcessStatementResultDto {
@@ -107,6 +128,12 @@ export interface TransactionFormValues {
   debitAmount: string;
   creditAmount: string;
   balance: string;
+  counterpartyName: string;
+  counterpartyLedger: string;
+  counterpartyAddress: string;
+  counterpartyPincode: string;
+  counterpartyGstin: string;
+  isInterAccountTransfer: boolean;
 }
 
 const blank = (v: string | null | undefined): string => v ?? "";
@@ -146,6 +173,12 @@ export const toBankTransaction = (dto: BankTransactionDto) => ({
   creditAmount: dto.credit_amount,
   balance: dto.balance,
   transactionType: dto.transaction_type,
+  counterpartyName: dto.counterparty_name,
+  counterpartyLedger: dto.counterparty_ledger,
+  counterpartyAddress: dto.counterparty_address,
+  counterpartyPincode: dto.counterparty_pincode,
+  counterpartyGstin: dto.counterparty_gstin,
+  isInterAccountTransfer: dto.is_inter_account_transfer,
   createdAt: dto.created_at,
   updatedAt: dto.updated_at,
 });
@@ -175,6 +208,12 @@ export const toTransactionPayload = (form: TransactionFormValues): BankTransacti
   debit_amount: optional(form.debitAmount),
   credit_amount: optional(form.creditAmount),
   balance: optional(form.balance),
+  counterparty_name: optional(form.counterpartyName),
+  counterparty_ledger: optional(form.counterpartyLedger),
+  counterparty_address: optional(form.counterpartyAddress),
+  counterparty_pincode: optional(form.counterpartyPincode),
+  counterparty_gstin: optional(form.counterpartyGstin),
+  is_inter_account_transfer: form.isInterAccountTransfer,
 });
 
 export const statementToForm = (statement: UiBankStatement): StatementFormValues => ({
@@ -194,6 +233,12 @@ export const transactionToForm = (transaction: UiBankTransaction): TransactionFo
   debitAmount: transaction.debitAmount,
   creditAmount: transaction.creditAmount,
   balance: blank(transaction.balance),
+  counterpartyName: blank(transaction.counterpartyName),
+  counterpartyLedger: blank(transaction.counterpartyLedger),
+  counterpartyAddress: blank(transaction.counterpartyAddress),
+  counterpartyPincode: blank(transaction.counterpartyPincode),
+  counterpartyGstin: blank(transaction.counterpartyGstin),
+  isInterAccountTransfer: transaction.isInterAccountTransfer,
 });
 
 /** Display labels for StatusBadge, which already understands these words. */
@@ -265,4 +310,17 @@ export const bankStatementsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  updateTransactionMapping: (
+    companyId: string,
+    statementId: string,
+    transactionId: string,
+    body: BankTransactionMappingWriteDto,
+  ) =>
+    apiFetch<BankTransactionDto>(
+      `${base(companyId)}/${statementId}/transactions/${transactionId}/mapping`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
 };

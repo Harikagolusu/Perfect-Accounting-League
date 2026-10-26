@@ -39,12 +39,15 @@ from app.models.bank import (
     BankTransaction,
     TransactionType,
 )
+from app.models.voucher import AccountingEntityType
+from app.services.accounting_audit import record_event
 from app.schemas.bank import (
     BankAccountCreate,
     BankAccountUpdate,
     BankStatementCreate,
     BankStatementUpdate,
     BankTransactionCreate,
+    BankTransactionMappingUpdate,
 )
 from app.services.bank_extraction import (
     StatementExtractionResult,
@@ -401,6 +404,12 @@ def create_transaction(
         debit_amount=debit,
         credit_amount=credit,
         balance=data.balance,
+        counterparty_name=data.counterparty_name,
+        counterparty_ledger=data.counterparty_ledger,
+        counterparty_address=data.counterparty_address,
+        counterparty_pincode=data.counterparty_pincode,
+        counterparty_gstin=data.counterparty_gstin,
+        is_inter_account_transfer=data.is_inter_account_transfer,
         transaction_type=derive_transaction_type(debit, credit),
     )
     db.add(transaction)
@@ -413,6 +422,48 @@ def create_transaction(
             transaction.id,
             "; ".join(review.issues),
         )
+    return transaction
+
+
+def update_transaction_mapping(
+    db: Session,
+    company_id: uuid.UUID,
+    statement_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    data: BankTransactionMappingUpdate,
+    *,
+    actor: str = "local-user",
+) -> BankTransaction:
+    """Record a human counterparty mapping without touching bank facts.
+
+    Amounts, dates, narration and the derived transaction type stay exactly as
+    the bank (or the person who entered the statement) supplied them. Every
+    changed mapping field is appended to the accounting audit trail.
+    """
+    transaction = get_transaction(db, company_id, statement_id, transaction_id)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        old_value = getattr(transaction, field)
+        if old_value == value:
+            continue
+        setattr(transaction, field, value)
+        record_event(
+            db,
+            company_id=company_id,
+            entity_type=AccountingEntityType.MAPPING,
+            entity_id=transaction.id,
+            event_type="BANK_TRANSACTION_MAPPING_UPDATED",
+            actor=actor,
+            field=field,
+            old_value=old_value,
+            new_value=value,
+            reason="Reviewer-confirmed bank transaction mapping.",
+            metadata={
+                "statement_id": str(statement_id),
+                "transaction_id": str(transaction.id),
+            },
+        )
+    db.commit()
+    db.refresh(transaction)
     return transaction
 
 
@@ -490,4 +541,5 @@ __all__ = [
     "statement_review_issues",
     "update_bank_account",
     "update_bank_statement",
+    "update_transaction_mapping",
 ]

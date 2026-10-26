@@ -18,6 +18,13 @@ export interface Company {
   software: AccountingSoftware;
   assignedUsers: string[];
   status: EntityStatus;
+  /** Company-level ledger names used by deterministic voucher generation. */
+  cgstLedger?: string;
+  sgstLedger?: string;
+  igstLedger?: string;
+  cessLedger?: string;
+  roundOffLedger?: string;
+  salesLedger?: string;
 }
 
 export interface Vendor {

@@ -62,6 +62,18 @@ class Company(Base):
     email: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(32))
     address: Mapped[str | None] = mapped_column(Text)
+    # Ledger names used when a company's vouchers are generated. They stay
+    # optional because a company may be onboarded before its Tally/Zoho chart
+    # of accounts is confirmed; an export then reports a mapping exception
+    # rather than inventing a ledger name.
+    cgst_ledger: Mapped[str | None] = mapped_column(String(255))
+    sgst_ledger: Mapped[str | None] = mapped_column(String(255))
+    igst_ledger: Mapped[str | None] = mapped_column(String(255))
+    cess_ledger: Mapped[str | None] = mapped_column(String(255))
+    round_off_ledger: Mapped[str | None] = mapped_column(String(255))
+    #: Sales/income ledger used by the sales-voucher flow. It stays optional:
+    #: a missing ledger is a review exception, not a guessed account.
+    sales_ledger: Mapped[str | None] = mapped_column(String(255))
     financial_year: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[CompanyStatus] = mapped_column(
         COMPANY_STATUS_ENUM,

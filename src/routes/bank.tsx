@@ -18,7 +18,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useCompany } from "@/lib/store";
 import { fmtDate, fmtMoney, compareMoney } from "@/lib/format";
-import { exportFile } from "@/lib/export";
+import { downloadBlob, exportFile } from "@/lib/export";
+import { BankVoucherPanel } from "@/components/pal/bank-voucher";
+import { exportsApi, firstExportError } from "@/lib/api/exports";
 import {
   bankAccountLabel,
   toBankAccountPayload,
@@ -85,6 +87,12 @@ const emptyTransactionForm: TransactionFormValues = {
   debitAmount: "",
   creditAmount: "",
   balance: "",
+  counterpartyName: "",
+  counterpartyLedger: "",
+  counterpartyAddress: "",
+  counterpartyPincode: "",
+  counterpartyGstin: "",
+  isInterAccountTransfer: false,
 };
 
 function BankPage() {
@@ -116,6 +124,7 @@ function BankPage() {
   const [dFrom, setDFrom] = useState("");
   const [dTo, setDTo] = useState("");
   const [open, setOpen] = useState<UiBankTransaction | null>(null);
+  const [exportingClient, setExportingClient] = useState(false);
 
   // Follow the company: a switch must not leave another company's selection.
   useEffect(() => {
@@ -274,6 +283,43 @@ function BankPage() {
     toast.success(`Exported ${n} transactions`);
   };
 
+  const exportClientBank = async () => {
+    if (!companyId) return;
+    setExportingClient(true);
+    try {
+      const options = {
+        statementId: statement?.id,
+        dateFrom: dFrom || undefined,
+        dateTo: dTo || undefined,
+      };
+      const preview = await exportsApi.bankPreview(companyId, options);
+      const blocking = preview.rows === 0 ? firstExportError(preview) : null;
+      if (blocking) {
+        toast.error(blocking);
+        return;
+      }
+      const file = await exportsApi.bankFile(companyId, options);
+      downloadBlob(file.filename, file.blob);
+      if (preview.exceptions.length) {
+        toast.warning(
+          `Downloaded ${preview.vouchers} voucher(s); ${preview.exceptions.length} exception(s) were excluded.`,
+        );
+      } else if (preview.warnings.length) {
+        toast.warning(
+          `Downloaded ${preview.vouchers} voucher(s) with ${preview.warnings.length} warning(s).`,
+        );
+      } else {
+        toast.success(
+          `Client bank workbook downloaded (${preview.vouchers} voucher(s), ${preview.rows} row(s))`,
+        );
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not export the client workbook");
+    } finally {
+      setExportingClient(false);
+    }
+  };
+
   const columns: Column<UiBankTransaction>[] = [
     { key: "transactionDate", header: "Txn Date", cell: (r) => fmtDate(r.transactionDate) },
     {
@@ -406,10 +452,20 @@ function BankPage() {
         title="Bank Statements"
         description="Record bank accounts, statement periods and the transactions inside them."
         actions={
-          <Button variant="outline" onClick={exportCsv} disabled={transactions.length === 0}>
-            <Download />
-            Export CSV
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" onClick={exportCsv} disabled={transactions.length === 0}>
+              <Download />
+              Export CSV
+            </Button>
+            <Button
+              variant="outline"
+              onClick={exportClientBank}
+              disabled={exportingClient || transactions.length === 0}
+            >
+              <Download />
+              Client Excel
+            </Button>
+          </div>
         }
       />
       <InfoNotice>
@@ -725,9 +781,57 @@ function BankPage() {
                   onChange={(e) => setTransactionField("balance", e.target.value)}
                 />
               </Field>
+              <Field label="Counterparty name (optional)">
+                <Input
+                  value={transactionForm.counterpartyName}
+                  onChange={(e) => setTransactionField("counterpartyName", e.target.value)}
+                />
+              </Field>
+              <Field label="Counterparty ledger (optional)">
+                <Input
+                  value={transactionForm.counterpartyLedger}
+                  onChange={(e) => setTransactionField("counterpartyLedger", e.target.value)}
+                  placeholder="Must exist in Ledger Master"
+                />
+              </Field>
+              <Field label="Counterparty GSTIN (optional)">
+                <Input
+                  className="num"
+                  value={transactionForm.counterpartyGstin}
+                  onChange={(e) =>
+                    setTransactionField("counterpartyGstin", e.target.value.toUpperCase())
+                  }
+                />
+              </Field>
+              <Field label="Counterparty address (optional)">
+                <Input
+                  value={transactionForm.counterpartyAddress}
+                  onChange={(e) => setTransactionField("counterpartyAddress", e.target.value)}
+                />
+              </Field>
+              <Field label="Counterparty pincode (optional)">
+                <Input
+                  value={transactionForm.counterpartyPincode}
+                  onChange={(e) => setTransactionField("counterpartyPincode", e.target.value)}
+                />
+              </Field>
+              <label className="flex items-center gap-2 self-end text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={transactionForm.isInterAccountTransfer}
+                  onChange={(e) =>
+                    setTransactionForm((current) => ({
+                      ...current,
+                      isInterAccountTransfer: e.target.checked,
+                    }))
+                  }
+                />
+                Inter-account transfer (reviewer-confirmed)
+              </label>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              Enter a debit or a credit, not both. A transaction with neither is rejected.
+              Enter a debit or a credit, not both. A transaction with neither is rejected. The
+              inter-account flag is never inferred from the narration.
             </p>
             <Button
               className="mt-3"
@@ -807,6 +911,12 @@ function BankPage() {
                   }
                 />
                 <KV k="Running balance" v={fmtMoney(open.balance)} />
+                <KV k="Counterparty" v={dash(open.counterpartyName)} />
+                <KV k="Counterparty ledger" v={dash(open.counterpartyLedger)} />
+                <KV
+                  k="Inter-account transfer"
+                  v={open.isInterAccountTransfer ? "Reviewer-confirmed" : "No"}
+                />
               </div>
               <Field label="Narration as printed by the bank">
                 <div className="num rounded border bg-muted p-2 text-xs">
@@ -816,6 +926,13 @@ function BankPage() {
               <p className="text-xs text-muted-foreground">
                 Stored exactly as entered. Nothing has been cleaned, categorised or reinterpreted.
               </p>
+              <BankVoucherPanel
+                companyId={companyId}
+                statementId={statement?.id ?? ""}
+                transactionId={open.id}
+                transaction={open}
+                onTransactionUpdated={setOpen}
+              />
             </div>
           )}
         </SheetContent>

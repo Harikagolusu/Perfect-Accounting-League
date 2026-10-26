@@ -19,6 +19,9 @@ export type InvoiceStatus = "DRAFT" | "PROCESSING" | "PROCESSED" | "NEEDS_REVIEW
  */
 export type InvoiceSource = "MANUAL" | "AI";
 
+/** Mirrors `InvoiceDirection`; sales vouchers are never inferred from amounts. */
+export type InvoiceDirection = "PURCHASE" | "SALES";
+
 /** Mirrors `VendorMappingStatus` in backend/app/models/invoice.py. */
 export type VendorMappingStatus =
   "UNMAPPED" | "SUGGESTED" | "MATCHED" | "CONFIRMED" | "REJECTED" | "AMBIGUOUS";
@@ -85,6 +88,7 @@ export interface InvoiceDto {
   buyer_gstin: string | null;
   po_number: string | null;
   currency: string;
+  direction: InvoiceDirection;
   taxable_amount: string | null;
   cgst_amount: string | null;
   sgst_amount: string | null;
@@ -111,6 +115,7 @@ export interface InvoiceWriteDto {
   buyer_gstin?: string | null;
   po_number?: string | null;
   currency?: string;
+  direction?: InvoiceDirection;
   taxable_amount?: string | null;
   cgst_amount?: string | null;
   sgst_amount?: string | null;
@@ -148,6 +153,7 @@ export interface InvoiceFormValues {
   buyerGstin: string;
   poNumber: string;
   currency: string;
+  direction: InvoiceDirection;
   taxableAmount: string;
   cgstAmount: string;
   sgstAmount: string;
@@ -178,6 +184,7 @@ export const toInvoice = (dto: InvoiceDto) => ({
   buyerGstin: dto.buyer_gstin,
   poNumber: dto.po_number,
   currency: dto.currency,
+  direction: dto.direction,
   taxableAmount: dto.taxable_amount,
   cgstAmount: dto.cgst_amount,
   sgstAmount: dto.sgst_amount,
@@ -229,6 +236,7 @@ export const toInvoicePayload = (form: Partial<InvoiceFormValues>): InvoiceWrite
   if ("buyerGstin" in form) payload.buyer_gstin = optional(form.buyerGstin);
   if ("poNumber" in form) payload.po_number = optional(form.poNumber);
   if ("currency" in form && form.currency) payload.currency = form.currency.trim().toUpperCase();
+  if ("direction" in form && form.direction) payload.direction = form.direction;
   if ("taxableAmount" in form) payload.taxable_amount = optional(form.taxableAmount);
   if ("cgstAmount" in form) payload.cgst_amount = optional(form.cgstAmount);
   if ("sgstAmount" in form) payload.sgst_amount = optional(form.sgstAmount);
@@ -250,6 +258,7 @@ export const invoiceToForm = (invoice: UiInvoice): InvoiceFormValues => ({
   buyerGstin: blank(invoice.buyerGstin),
   poNumber: blank(invoice.poNumber),
   currency: invoice.currency,
+  direction: invoice.direction,
   taxableAmount: blank(invoice.taxableAmount),
   cgstAmount: blank(invoice.cgstAmount),
   sgstAmount: blank(invoice.sgstAmount),

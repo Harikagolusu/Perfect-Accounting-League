@@ -84,6 +84,12 @@ const TRANSACTION: BankTransactionDto = {
   debit_amount: "0.00",
   credit_amount: "2000.00",
   balance: "12000.00",
+  counterparty_name: null,
+  counterparty_ledger: null,
+  counterparty_address: null,
+  counterparty_pincode: null,
+  counterparty_gstin: null,
+  is_inter_account_transfer: false,
   transaction_type: "CREDIT",
   created_at: "2026-10-19T06:00:00Z",
   updated_at: "2026-10-19T06:00:00Z",
@@ -372,6 +378,12 @@ describe("Bank transaction mapper", () => {
       debitAmount: "10.00",
       creditAmount: "",
       balance: "",
+      counterpartyName: "",
+      counterpartyLedger: "",
+      counterpartyAddress: "",
+      counterpartyPincode: "",
+      counterpartyGstin: "",
+      isInterAccountTransfer: false,
     });
 
     // The direction is derived server-side from the amounts.

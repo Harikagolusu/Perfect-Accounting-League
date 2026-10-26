@@ -21,10 +21,26 @@ export interface CompanyDto {
   email: string | null;
   phone: string | null;
   address: string | null;
+  cgst_ledger: string | null;
+  sgst_ledger: string | null;
+  igst_ledger: string | null;
+  cess_ledger: string | null;
+  round_off_ledger: string | null;
+  sales_ledger: string | null;
   financial_year: string | null;
   status: CompanyStatus;
   created_at: string;
   updated_at: string;
+}
+
+/** Company-level ledger names used by deterministic voucher generation. */
+export interface CompanyAccountingWriteDto {
+  cgst_ledger?: string | null;
+  sgst_ledger?: string | null;
+  igst_ledger?: string | null;
+  cess_ledger?: string | null;
+  round_off_ledger?: string | null;
+  sales_ledger?: string | null;
 }
 
 /** The only shape the API accepts on write; unknown keys are rejected. */
@@ -131,6 +147,12 @@ export const toCompany = (dto: CompanyDto): Company => ({
   software: "None",
   assignedUsers: [],
   status: statusToUi(dto.status),
+  cgstLedger: dto.cgst_ledger ?? "",
+  sgstLedger: dto.sgst_ledger ?? "",
+  igstLedger: dto.igst_ledger ?? "",
+  cessLedger: dto.cess_ledger ?? "",
+  roundOffLedger: dto.round_off_ledger ?? "",
+  salesLedger: dto.sales_ledger ?? "",
 });
 
 /** UI model -> API payload. Sends only fields the API actually stores. */
@@ -156,6 +178,11 @@ export const companiesApi = {
       body: JSON.stringify(body),
     }),
   update: (id: string, body: CompanyWriteDto) =>
+    apiFetch<CompanyDto>(`${API_V1_PREFIX}/companies/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  updateAccounting: (id: string, body: CompanyAccountingWriteDto) =>
     apiFetch<CompanyDto>(`${API_V1_PREFIX}/companies/${id}`, {
       method: "PATCH",
       body: JSON.stringify(body),

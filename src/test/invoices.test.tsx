@@ -47,6 +47,7 @@ const INVOICE: InvoiceDto = {
   buyer_gstin: "27AAJCS4821K1Z5",
   po_number: "PO-8891",
   currency: "INR",
+  direction: "PURCHASE",
   taxable_amount: "1000.00",
   cgst_amount: "90.00",
   sgst_amount: "90.00",

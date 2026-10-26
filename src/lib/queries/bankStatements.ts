@@ -15,6 +15,7 @@ import {
   toBankTransaction,
   type BankStatementStatus,
   type BankStatementWriteDto,
+  type BankTransactionMappingWriteDto,
   type BankTransactionWriteDto,
   type ProcessStatementResultDto,
   type UiBankStatement,
@@ -154,6 +155,32 @@ export function useCreateBankTransaction(companyId: string | undefined) {
           queryKey: bankTransactionKeys.list(companyId, input.statementId),
         });
       }
+    },
+  });
+}
+
+export function useUpdateBankTransactionMapping(companyId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      statementId: string;
+      transactionId: string;
+      body: BankTransactionMappingWriteDto;
+    }) =>
+      toBankTransaction(
+        await bankStatementsApi.updateTransactionMapping(
+          companyId as string,
+          input.statementId,
+          input.transactionId,
+          input.body,
+        ),
+      ),
+    onSuccess: (_updated, input) => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({
+        queryKey: bankTransactionKeys.list(companyId, input.statementId),
+      });
+      queryClient.invalidateQueries({ queryKey: ["vouchers", companyId] });
     },
   });
 }

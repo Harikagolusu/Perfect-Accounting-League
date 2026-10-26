@@ -48,6 +48,12 @@ const blank: Company = {
   software: "None",
   assignedUsers: [],
   status: "Onboarding",
+  cgstLedger: "",
+  sgstLedger: "",
+  igstLedger: "",
+  cessLedger: "",
+  roundOffLedger: "",
+  salesLedger: "",
 };
 
 export function CompanyDialog({

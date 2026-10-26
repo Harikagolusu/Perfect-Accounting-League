@@ -1,6 +1,15 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, CheckCheck, FileCode, FileSpreadsheet, Save, Send, X } from "lucide-react";
+import {
+  Check,
+  CheckCheck,
+  Download,
+  FileCode,
+  FileSpreadsheet,
+  Save,
+  Send,
+  X,
+} from "lucide-react";
 import {
   PageHeader,
   Section,
@@ -33,7 +42,9 @@ import {
 } from "@/lib/queries/invoices";
 import { useVendors } from "@/lib/queries/vendors";
 import { VendorMappingPanel } from "@/components/pal/vendor-mapping";
-import { exportFile } from "@/lib/export";
+import { InvoiceVoucherPanel } from "@/components/pal/invoice-voucher";
+import { downloadBlob, exportFile } from "@/lib/export";
+import { exportsApi, firstExportError } from "@/lib/api/exports";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -76,6 +87,7 @@ function InvoicePage() {
   );
   const [form, setForm] = useState<InvoiceFormValues | null>(null);
   const [dirty, setDirty] = useState(false);
+  const [exportingClient, setExportingClient] = useState(false);
 
   useEffect(() => {
     setForm(invoice ? invoiceToForm(invoice) : null);
@@ -441,6 +453,50 @@ function InvoicePage() {
     toast.success("Zoho CSV downloaded");
   };
 
+  const exportClientFormat = async () => {
+    setExportingClient(true);
+    try {
+      const preview = await exportsApi.invoicePreview(companyId, invoice.id);
+      const blocking = preview.rows === 0 ? firstExportError(preview) : null;
+      if (blocking) {
+        toast.error(blocking);
+        return;
+      }
+      const file = await exportsApi.invoiceFile(companyId, invoice.id);
+      downloadBlob(file.filename, file.blob);
+      s.addExport({
+        name: `Invoice ${form.invoiceNumber || invoice.id}`,
+        type: "Invoices",
+        format: "XLSX",
+        records: preview.rows,
+        status: "Generated",
+        target: "Report",
+      });
+      s.log({
+        module: "Invoice Processing",
+        action: "Exported client invoice workbook",
+        recordId: invoice.invoiceNumber ?? invoice.id,
+        previous: invoice.status,
+        next: "XLSX",
+      });
+      if (preview.exceptions.length) {
+        toast.warning(
+          `Downloaded ${preview.rows} row(s); ${preview.exceptions.length} exception(s) were excluded.`,
+        );
+      } else if (preview.warnings.length) {
+        toast.warning(
+          `Downloaded ${preview.rows} row(s) with ${preview.warnings.length} warning(s).`,
+        );
+      } else {
+        toast.success(`Client invoice workbook downloaded (${preview.rows} row(s))`);
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not export the client workbook");
+    } finally {
+      setExportingClient(false);
+    }
+  };
+
   return (
     <>
       <PageHeader
@@ -542,6 +598,16 @@ function InvoicePage() {
           <Section title="Invoice Fields">
             <fieldset disabled={processInvoice.isPending} className="contents">
               <div className="grid gap-3 md:grid-cols-3">
+                <Field label="Invoice direction">
+                  <select
+                    className={selectCls}
+                    value={form.direction}
+                    onChange={(e) => set("direction", e.target.value)}
+                  >
+                    <option value="PURCHASE">Purchase (expense / creditor)</option>
+                    <option value="SALES">Sales (customer / revenue)</option>
+                  </select>
+                </Field>
                 <Field label="Vendor Name (as printed)">
                   <Input
                     value={form.vendorName}
@@ -653,6 +719,12 @@ function InvoicePage() {
             />
           </Section>
 
+          <InvoiceVoucherPanel
+            key={`${companyId}-${invoice.id}`}
+            companyId={companyId}
+            invoiceId={invoice.id}
+          />
+
           <div className="sticky bottom-0 flex flex-col gap-2 rounded-md border bg-card p-3">
             <div className="flex flex-wrap gap-2">
               <Button
@@ -711,6 +783,14 @@ function InvoicePage() {
               <Button variant="outline" onClick={exportZoho} disabled={processInvoice.isPending}>
                 <FileSpreadsheet />
                 Export for Zoho
+              </Button>
+              <Button
+                variant="outline"
+                onClick={exportClientFormat}
+                disabled={processInvoice.isPending || exportingClient}
+              >
+                <Download />
+                Client Excel
               </Button>
               <Button
                 variant="destructive"

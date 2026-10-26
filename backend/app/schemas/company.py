@@ -38,9 +38,27 @@ class _CompanyFields(NormalisedTaxIds, NormalisedEmail):
     email: str | None = Field(default=None, max_length=255)
     phone: str | None = Field(default=None, max_length=32)
     address: str | None = None
+    cgst_ledger: str | None = Field(default=None, max_length=255)
+    sgst_ledger: str | None = Field(default=None, max_length=255)
+    igst_ledger: str | None = Field(default=None, max_length=255)
+    cess_ledger: str | None = Field(default=None, max_length=255)
+    round_off_ledger: str | None = Field(default=None, max_length=255)
+    sales_ledger: str | None = Field(default=None, max_length=255)
     financial_year: str | None = Field(default=None, max_length=32)
 
-    @field_validator("legal_name", "phone", "address", "financial_year", mode="before")
+    @field_validator(
+        "legal_name",
+        "phone",
+        "address",
+        "cgst_ledger",
+        "sgst_ledger",
+        "igst_ledger",
+        "cess_ledger",
+        "round_off_ledger",
+        "sales_ledger",
+        "financial_year",
+        mode="before",
+    )
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
         return clean_optional(value)
@@ -91,5 +109,11 @@ class CompanyResponse(TimestampedResponse):
     email: str | None
     phone: str | None
     address: str | None
+    cgst_ledger: str | None
+    sgst_ledger: str | None
+    igst_ledger: str | None
+    cess_ledger: str | None
+    round_off_ledger: str | None
+    sales_ledger: str | None
     financial_year: str | None
     status: CompanyStatus

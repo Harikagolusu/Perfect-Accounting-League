@@ -49,9 +49,10 @@ class BankAccountCreate(BaseModel):
     account_name: str | None = Field(default=None, max_length=128)
     # The only place a full account number is ever accepted.
     account_number: str = Field(max_length=64)
+    ledger_name: str | None = Field(default=None, max_length=255)
     currency: str = Field(default="INR", min_length=3, max_length=3)
 
-    @field_validator("bank_name", "account_name", mode="before")
+    @field_validator("bank_name", "account_name", "ledger_name", mode="before")
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
         return clean_optional(value)
@@ -78,10 +79,11 @@ class BankAccountUpdate(BaseModel):
     bank_name: str | None = Field(default=None, max_length=128)
     account_name: str | None = Field(default=None, max_length=128)
     account_number: str | None = Field(default=None, max_length=64)
+    ledger_name: str | None = Field(default=None, max_length=255)
     currency: str | None = Field(default=None, min_length=3, max_length=3)
     is_active: bool | None = None
 
-    @field_validator("bank_name", "account_name", mode="before")
+    @field_validator("bank_name", "account_name", "ledger_name", mode="before")
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
         return clean_optional(value)
@@ -108,6 +110,7 @@ class BankAccountResponse(TimestampedResponse):
     account_name: str | None
     #: Masked, e.g. "XXXX1234". The full number is never returned.
     masked_account_number: str
+    ledger_name: str | None
     currency: str
     is_active: bool
 
@@ -184,10 +187,68 @@ class BankTransactionCreate(BaseModel):
     credit_amount: Money | None = None
     balance: Money | None = None
 
-    @field_validator("description", "reference_number", mode="before")
+    # Human-confirmed ledger mapping. These are assertions about the
+    # counterparty, not values read from the bank line.
+    counterparty_name: str | None = Field(default=None, max_length=255)
+    counterparty_ledger: str | None = Field(default=None, max_length=255)
+    counterparty_address: str | None = None
+    counterparty_pincode: str | None = Field(default=None, max_length=10)
+    counterparty_gstin: str | None = Field(default=None, max_length=15)
+    is_inter_account_transfer: bool = False
+
+    @field_validator(
+        "description",
+        "reference_number",
+        "counterparty_name",
+        "counterparty_ledger",
+        "counterparty_address",
+        "counterparty_pincode",
+        mode="before",
+    )
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
         return clean_optional(value)
+
+    @field_validator("counterparty_gstin", mode="before")
+    @classmethod
+    def _normalise_gstin(cls, value: Any) -> str | None:
+        cleaned = clean_optional(value)
+        return cleaned.upper() if cleaned else None
+
+
+class BankTransactionMappingUpdate(BaseModel):
+    """Payload for confirming a bank transaction's counterparty ledger.
+
+    Only mapping fields are accepted. Amounts, dates and narration are bank
+    facts and must be corrected through their own facts, not a mapping edit.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    counterparty_name: str | None = Field(default=None, max_length=255)
+    counterparty_ledger: str | None = Field(default=None, max_length=255)
+    counterparty_address: str | None = None
+    counterparty_pincode: str | None = Field(default=None, max_length=10)
+    counterparty_gstin: str | None = Field(default=None, max_length=15)
+    #: A reviewer may flag an inter-account transfer; PAL never infers it.
+    is_inter_account_transfer: bool | None = None
+
+    @field_validator(
+        "counterparty_name",
+        "counterparty_ledger",
+        "counterparty_address",
+        "counterparty_pincode",
+        mode="before",
+    )
+    @classmethod
+    def _normalise_text(cls, value: Any) -> str | None:
+        return clean_optional(value)
+
+    @field_validator("counterparty_gstin", mode="before")
+    @classmethod
+    def _normalise_gstin(cls, value: Any) -> str | None:
+        cleaned = clean_optional(value)
+        return cleaned.upper() if cleaned else None
 
 
 class BankTransactionResponse(TimestampedResponse):
@@ -203,6 +264,12 @@ class BankTransactionResponse(TimestampedResponse):
     debit_amount: MoneyOut
     credit_amount: MoneyOut
     balance: MoneyOut | None
+    counterparty_name: str | None
+    counterparty_ledger: str | None
+    counterparty_address: str | None
+    counterparty_pincode: str | None
+    counterparty_gstin: str | None
+    is_inter_account_transfer: bool
     transaction_type: TransactionType
 
 
@@ -225,6 +292,7 @@ __all__ = [
     "BankStatementResponse",
     "BankStatementUpdate",
     "BankTransactionCreate",
+    "BankTransactionMappingUpdate",
     "BankTransactionResponse",
     "ProcessStatementResponse",
     "mask_account_number",

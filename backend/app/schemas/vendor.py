@@ -4,9 +4,10 @@
 the request body, so a client cannot create a vendor against a company it did
 not address.
 
-Contact fields (email, phone, address, city, state, pincode) are not modelled:
-the existing Vendor Master UI collects none of them, so adding columns now
-would be speculative. They arrive with the requirements that need them.
+Address and pincode are modelled because the client invoice and bank voucher
+templates carry them. They remain optional: a vendor whose only identity is a
+GSTIN is still valid, and an export reports the missing field rather than
+inventing one.
 """
 
 import uuid
@@ -30,12 +31,21 @@ class _VendorFields(NormalisedTaxIds):
 
     gstin: str | None = Field(default=None, max_length=15)
     pan: str | None = Field(default=None, max_length=10)
+    address: str | None = None
+    pincode: str | None = Field(default=None, max_length=10)
+    msme_registration: str | None = Field(default=None, max_length=64)
     default_expense_ledger: str | None = Field(default=None, max_length=255)
     creditor_ledger: str | None = Field(default=None, max_length=255)
     parent_group: str | None = Field(default=None, max_length=255)
 
     @field_validator(
-        "default_expense_ledger", "creditor_ledger", "parent_group", mode="before"
+        "address",
+        "pincode",
+        "msme_registration",
+        "default_expense_ledger",
+        "creditor_ledger",
+        "parent_group",
+        mode="before",
     )
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
@@ -83,6 +93,9 @@ class VendorResponse(TimestampedResponse):
     name: str
     gstin: str | None
     pan: str | None
+    address: str | None
+    pincode: str | None
+    msme_registration: str | None
     default_expense_ledger: str | None
     creditor_ledger: str | None
     parent_group: str | None

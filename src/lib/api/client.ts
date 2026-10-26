@@ -44,7 +44,70 @@ function detailToMessage(status: number, detail: unknown): string {
     const first = detail[0] as { msg?: string } | undefined;
     if (first?.msg) return first.msg;
   }
+  if (detail && typeof detail === "object") {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
   return `Request failed (${status})`;
+}
+
+/**
+ * Extract a filename from `Content-Disposition`.
+ *
+ * The backend emits the simple quoted form, but supporting `filename*` keeps
+ * this correct if a future export has a non-ASCII company name.
+ */
+export function parseContentDisposition(header: string | null): string | null {
+  if (!header) return null;
+  const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header);
+  if (encoded?.[1]) {
+    try {
+      return decodeURIComponent(encoded[1].trim().replace(/^"|"$/g, ""));
+    } catch {
+      return encoded[1].trim().replace(/^"|"$/g, "");
+    }
+  }
+  const quoted = /filename\s*=\s*"([^"]+)"/i.exec(header);
+  if (quoted?.[1]) return quoted[1];
+  const bare = /filename\s*=\s*([^;]+)/i.exec(header);
+  return bare?.[1]?.trim() ?? null;
+}
+
+export type DownloadedFile = {
+  blob: Blob;
+  filename: string;
+};
+
+/**
+ * Download a binary response without parsing it as JSON.
+ *
+ * `apiFetch` is JSON-only by design, so XLSX downloads use this companion. It
+ * keeps the same base URL, query encoding and error shape.
+ */
+export async function apiDownload(
+  path: string,
+  init: RequestInit = {},
+  params?: QueryParams,
+): Promise<DownloadedFile> {
+  const headers: Record<string, string> = {
+    Accept: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ...(init.headers as Record<string, string> | undefined),
+  };
+  const response = await fetch(buildUrl(path, params), { ...init, headers });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new ApiError(
+      response.status,
+      detailToMessage(response.status, (payload as { detail?: unknown } | null)?.detail),
+    );
+  }
+
+  return {
+    blob: await response.blob(),
+    filename:
+      parseContentDisposition(response.headers.get("content-disposition")) ?? "download.xlsx",
+  };
 }
 
 export async function apiFetch<T>(

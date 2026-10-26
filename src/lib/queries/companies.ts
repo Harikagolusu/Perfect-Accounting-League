@@ -7,7 +7,12 @@
 
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { companiesApi, toCompany, toCompanyPayload } from "@/lib/api/companies";
+import {
+  companiesApi,
+  toCompany,
+  toCompanyPayload,
+  type CompanyAccountingWriteDto,
+} from "@/lib/api/companies";
 import type { Company } from "@/lib/types";
 
 export const companyKeys = {
@@ -61,6 +66,15 @@ export function useUpdateCompany() {
   return useMutation({
     mutationFn: async (company: Company) =>
       toCompany(await companiesApi.update(company.id, toCompanyPayload(company))),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateCompanyAccounting(id: string | undefined) {
+  const invalidate = useInvalidateCompanies();
+  return useMutation({
+    mutationFn: async (body: CompanyAccountingWriteDto) =>
+      toCompany(await companiesApi.updateAccounting(id as string, body)),
     onSuccess: invalidate,
   });
 }

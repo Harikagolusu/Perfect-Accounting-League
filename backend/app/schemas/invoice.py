@@ -14,6 +14,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
 
 from app.models.invoice import (
+    InvoiceDirection,
     InvoiceSource,
     InvoiceStatus,
     VendorMappingStatus,
@@ -48,9 +49,11 @@ class _InvoiceFields(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=15)
     vendor_pan: str | None = Field(default=None, max_length=10)
     buyer_gstin: str | None = Field(default=None, max_length=15)
+    place_of_supply: str | None = Field(default=None, max_length=128)
     po_number: str | None = Field(default=None, max_length=128)
 
     currency: str = Field(default="INR", min_length=3, max_length=3)
+    direction: InvoiceDirection = InvoiceDirection.PURCHASE
 
     taxable_amount: NonNegativeMoney | None = None
     cgst_amount: NonNegativeMoney | None = None
@@ -61,7 +64,9 @@ class _InvoiceFields(BaseModel):
     round_off: Money | None = None
     total_amount: NonNegativeMoney | None = None
 
-    @field_validator("invoice_number", "vendor_name", "po_number", mode="before")
+    @field_validator(
+        "invoice_number", "vendor_name", "place_of_supply", "po_number", mode="before"
+    )
     @classmethod
     def _normalise_text(cls, value: Any) -> str | None:
         """Trim the edges only.
@@ -125,8 +130,10 @@ class InvoiceResponse(TimestampedResponse):
     vendor_gstin: str | None
     vendor_pan: str | None
     buyer_gstin: str | None
+    place_of_supply: str | None
     po_number: str | None
     currency: str
+    direction: InvoiceDirection
 
     taxable_amount: MoneyOut | None
     cgst_amount: MoneyOut | None

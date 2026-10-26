@@ -11,12 +11,17 @@ remember.
 
 from fastapi import APIRouter
 
+from app.api.v1.accounting_audit.router import router as accounting_audit_router
+from app.api.v1.accounting_mappings.router import router as accounting_mappings_router
+from app.api.v1.accounting_vouchers.router import router as accounting_vouchers_router
 from app.api.v1.ai.router import router as ai_router
 from app.api.v1.bank.router import router as bank_router
 from app.api.v1.companies.router import router as companies_router
 from app.api.v1.documents.router import router as documents_router
 from app.api.v1.invoices.router import router as invoices_router
+from app.api.v1.ledgers.router import router as ledgers_router
 from app.api.v1.vendors.router import router as vendors_router
+from app.api.v1.vouchers.router import router as vouchers_router
 from app.core.config import get_settings
 from app.schemas import HealthResponse
 
@@ -40,6 +45,22 @@ def health() -> HealthResponse:
 # ---------------------------------------------------------------------------
 api_router.include_router(companies_router, prefix="/companies", tags=["companies"])
 api_router.include_router(
+    ledgers_router, prefix="/companies/{company_id}/ledgers", tags=["ledgers"]
+)
+api_router.include_router(
+    accounting_mappings_router,
+    prefix="/companies/{company_id}/accounting-mappings",
+    tags=["accounting-mappings"],
+)
+api_router.include_router(
+    vouchers_router, prefix="/companies/{company_id}/vouchers", tags=["vouchers"]
+)
+api_router.include_router(
+    accounting_audit_router,
+    prefix="/companies/{company_id}/accounting-audit",
+    tags=["accounting-audit"],
+)
+api_router.include_router(
     vendors_router, prefix="/companies/{company_id}/vendors", tags=["vendors"]
 )
 api_router.include_router(
@@ -47,6 +68,11 @@ api_router.include_router(
 )
 api_router.include_router(
     invoices_router, prefix="/companies/{company_id}/invoices", tags=["invoices"]
+)
+api_router.include_router(
+    accounting_vouchers_router,
+    prefix="/companies/{company_id}/accounting-vouchers",
+    tags=["accounting-vouchers"],
 )
 # Bank accounts, statements and transactions all hang off the company.
 api_router.include_router(

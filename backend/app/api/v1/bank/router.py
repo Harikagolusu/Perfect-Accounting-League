@@ -13,6 +13,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
 from sqlalchemy.orm import Session
 
+from app.api.v1.deps import get_actor
 from app.core.database import get_db
 from app.models.bank import (
     BankAccount,
@@ -28,9 +29,12 @@ from app.schemas.bank import (
     BankStatementResponse,
     BankStatementUpdate,
     BankTransactionCreate,
+    BankTransactionMappingUpdate,
     BankTransactionResponse,
     ProcessStatementResponse,
 )
+from app.schemas.exports import ExportPreviewResponse
+from app.schemas.voucher import LedgerSuggestionResponse
 from app.services.bank import (
     BankAccountNotFoundError,
     BankStatementNotFoundError,
@@ -50,6 +54,7 @@ from app.services.bank import (
     statement_review_issues,
     update_bank_account,
     update_bank_statement,
+    update_transaction_mapping,
 )
 from app.services.bank_validation import (
     BankTransitionError,
@@ -57,6 +62,9 @@ from app.services.bank_validation import (
 )
 from app.services.company import CompanyNotFoundError
 from app.services.document import DocumentNotFoundError
+from app.services.exports.common.workbook import content_disposition
+from app.services.exports.service import bank_export_file, bank_export_preview
+from app.services.ledger_suggestion import suggest_for_bank_transaction
 
 router = APIRouter()
 
@@ -71,6 +79,7 @@ def _account_response(account: BankAccount) -> BankAccountResponse:
         bank_name=account.bank_name,
         account_name=account.account_name,
         masked_account_number=mask_account_number(account.account_number) or "",
+        ledger_name=account.ledger_name,
         currency=account.currency,
         is_active=account.is_active,
         created_at=account.created_at,
@@ -394,3 +403,112 @@ def get_transaction_by_id(
 ) -> BankTransactionResponse:
     _require_statement(db, company_id, statement_id)
     return _require_transaction(db, company_id, statement_id, transaction_id)
+
+
+@router.get(
+    "/bank-statements/{statement_id}/transactions/{transaction_id}/ledger-suggestion",
+    response_model=LedgerSuggestionResponse,
+    summary="Explainable ledger suggestions for a bank transaction",
+)
+def get_transaction_ledger_suggestion(
+    statement_id: UUID = Path(description="Statement id, scoped to this company."),
+    company_id: UUID = Path(description="Owning company id."),
+    transaction_id: UUID = Path(description="Transaction id."),
+    db: Session = Depends(get_db),
+) -> LedgerSuggestionResponse:
+    return suggest_for_bank_transaction(
+        db, company_id, statement_id, transaction_id
+    )
+
+
+@router.patch(
+    "/bank-statements/{statement_id}/transactions/{transaction_id}/mapping",
+    response_model=BankTransactionResponse,
+    summary="Confirm a transaction's counterparty ledger mapping",
+)
+def patch_transaction_mapping(
+    payload: BankTransactionMappingUpdate,
+    statement_id: UUID = Path(description="Statement id, scoped to this company."),
+    company_id: UUID = Path(description="Owning company id."),
+    transaction_id: UUID = Path(description="Transaction id."),
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_actor),
+) -> BankTransactionResponse:
+    try:
+        return update_transaction_mapping(
+            db, company_id, statement_id, transaction_id, payload, actor=actor
+        )
+    except BankTransactionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
+        ) from None
+
+
+@router.get(
+    "/bank-transactions/export/preview",
+    response_model=ExportPreviewResponse,
+    summary="Preview the client bank-voucher export",
+)
+def get_bank_export_preview(
+    company_id: UUID = Path(description="Owning company id."),
+    statement_id: UUID | None = Query(
+        default=None, description="Export one statement; omit to export all."
+    ),
+    date_from: date | None = Query(default=None, description="Earliest date."),
+    date_to: date | None = Query(default=None, description="Latest date."),
+    db: Session = Depends(get_db),
+) -> ExportPreviewResponse:
+    try:
+        return bank_export_preview(
+            db,
+            company_id,
+            statement_id=statement_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Company not found"
+        ) from None
+    except BankStatementNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank statement not found"
+        ) from None
+
+
+@router.get(
+    "/bank-transactions/export.xlsx",
+    summary="Download the client bank-voucher workbook",
+)
+def get_bank_export_workbook(
+    company_id: UUID = Path(description="Owning company id."),
+    statement_id: UUID | None = Query(
+        default=None, description="Export one statement; omit to export all."
+    ),
+    date_from: date | None = Query(default=None, description="Earliest date."),
+    date_to: date | None = Query(default=None, description="Latest date."),
+    db: Session = Depends(get_db),
+) -> Response:
+    try:
+        result = bank_export_file(
+            db,
+            company_id,
+            statement_id=statement_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Company not found"
+        ) from None
+    except BankStatementNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank statement not found"
+        ) from None
+    return Response(
+        content=result.content,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
+        headers={"Content-Disposition": content_disposition(result.filename)},
+    )

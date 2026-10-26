@@ -12,8 +12,9 @@ stay separate:
   the invoice itself. They are what the document says, and must stay readable
   even when no vendor master record is (or ever will be) linked.
 
-There are deliberately no line-item, ledger-mapping or export columns: those
-belong to later, separate entities.
+Line items live in `invoice_line_items`, a separate company-owned entity. They
+are not embedded in the invoice row, and they are not named after any client
+spreadsheet column.
 
 Money is `NUMERIC`, never float. Python-side values are `Decimal` all the way
 through, so no binary-floating-point error can enter an accounting total.
@@ -62,6 +63,18 @@ class InvoiceSource(str, enum.Enum):
     AI = "AI"
 
 
+class InvoiceDirection(str, enum.Enum):
+    """Whether the document is a purchase bill or a sales invoice.
+
+    The existing invoice model was purchase-oriented. The client's Phase 1
+    workflow explicitly needs both directions, so the direction is a canonical
+    field rather than something inferred from tax amounts.
+    """
+
+    PURCHASE = "PURCHASE"
+    SALES = "SALES"
+
+
 class VendorMappingStatus(str, enum.Enum):
     """How far the invoice has got in linking to a vendor master record.
 
@@ -99,6 +112,12 @@ INVOICE_STATUS_ENUM = SAEnum(
 INVOICE_SOURCE_ENUM = SAEnum(
     InvoiceSource,
     name="invoice_source",
+    values_callable=lambda enum_cls: [member.value for member in enum_cls],
+)
+
+INVOICE_DIRECTION_ENUM = SAEnum(
+    InvoiceDirection,
+    name="invoice_direction",
     values_callable=lambda enum_cls: [member.value for member in enum_cls],
 )
 
@@ -180,6 +199,9 @@ class Invoice(Base):
     vendor_gstin: Mapped[str | None] = mapped_column(String(15))
     vendor_pan: Mapped[str | None] = mapped_column(String(10))
     buyer_gstin: Mapped[str | None] = mapped_column(String(15))
+    # The GST place of supply as printed on the invoice. It cannot be derived
+    # from the buyer's GSTIN without guessing, which the export must not do.
+    place_of_supply: Mapped[str | None] = mapped_column(String(128))
     po_number: Mapped[str | None] = mapped_column(String(128))
 
     currency: Mapped[str] = mapped_column(
@@ -194,6 +216,14 @@ class Invoice(Base):
     round_off: Mapped[Decimal | None] = mapped_column(MONEY)
     total_amount: Mapped[Decimal | None] = mapped_column(MONEY)
 
+    #: Purchase bill or sales invoice. Defaults to PURCHASE so every existing
+    #: row keeps its original meaning.
+    direction: Mapped[InvoiceDirection] = mapped_column(
+        INVOICE_DIRECTION_ENUM,
+        nullable=False,
+        default=InvoiceDirection.PURCHASE,
+        server_default=InvoiceDirection.PURCHASE.value,
+    )
     status: Mapped[InvoiceStatus] = mapped_column(
         INVOICE_STATUS_ENUM,
         nullable=False,

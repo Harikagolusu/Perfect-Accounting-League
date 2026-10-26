@@ -1,0 +1,1 @@
+"""Client bank-voucher export."""

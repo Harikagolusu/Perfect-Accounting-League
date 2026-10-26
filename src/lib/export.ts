@@ -1,6 +1,6 @@
-// Export service abstraction. CSV is generated client-side for real.
-// XML (Tally) and XLSX are produced by the future backend; `exportFile` reports
-// "unsupported" instead of pretending a file was generated.
+// Export service abstraction. CSV and review XML are generated client-side.
+// Client-format XLSX workbooks are fetched from the backend and saved with
+// `downloadBlob`; `exportFile` reports "unsupported" instead of faking one.
 
 export type ExportFormat = "CSV" | "XML" | "XLSX";
 
@@ -12,11 +12,17 @@ function escapeCsv(v: unknown) {
 export function toCsv(rows: Record<string, unknown>[], columns?: string[]) {
   if (!rows.length && !columns) return "";
   const cols = columns ?? Object.keys(rows[0] ?? {});
-  return [cols.join(","), ...rows.map((r) => cols.map((c) => escapeCsv(r[c])).join(","))].join("\n");
+  return [cols.join(","), ...rows.map((r) => cols.map((c) => escapeCsv(r[c])).join(","))].join(
+    "\n",
+  );
 }
 
 export function downloadText(filename: string, content: string, mime = "text/csv;charset=utf-8") {
-  const blob = new Blob([content], { type: mime });
+  downloadBlob(filename, new Blob([content], { type: mime }));
+}
+
+/** Trigger a browser download for a file already fetched from the backend. */
+export function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -41,16 +47,30 @@ export function exportFile(
   if (format === "XML") {
     // Minimal Tally-style envelope for review. Backend will produce the import-ready file.
     const body = rows
-      .map((r) => `  <ROW>${Object.entries(r).map(([k, v]) => `<${k}>${String(v ?? "").replace(/[<&>]/g, "")}</${k}>`).join("")}</ROW>`)
+      .map(
+        (r) =>
+          `  <ROW>${Object.entries(r)
+            .map(([k, v]) => `<${k}>${String(v ?? "").replace(/[<&>]/g, "")}</${k}>`)
+            .join("")}</ROW>`,
+      )
       .join("\n");
-    downloadText(`${filename}.xml`, `<?xml version="1.0"?>\n<ENVELOPE>\n${body}\n</ENVELOPE>`, "application/xml");
+    downloadText(
+      `${filename}.xml`,
+      `<?xml version="1.0"?>\n<ENVELOPE>\n${body}\n</ENVELOPE>`,
+      "application/xml",
+    );
     return rows.length;
   }
   return null;
 }
 
 /** Multi-sheet workbook simulation: one CSV per sheet, downloaded in sequence. */
-export function exportSheets(base: string, sheets: { name: string; rows: Record<string, unknown>[] }[]) {
-  sheets.forEach((s, i) => setTimeout(() => downloadText(`${base} - ${i + 1} ${s.name}.csv`, toCsv(s.rows)), i * 250));
+export function exportSheets(
+  base: string,
+  sheets: { name: string; rows: Record<string, unknown>[] }[],
+) {
+  sheets.forEach((s, i) =>
+    setTimeout(() => downloadText(`${base} - ${i + 1} ${s.name}.csv`, toCsv(s.rows)), i * 250),
+  );
   return sheets.length;
 }

@@ -17,7 +17,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, func
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -63,6 +63,12 @@ class Vendor(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     gstin: Mapped[str | None] = mapped_column(String(15))
     pan: Mapped[str | None] = mapped_column(String(10))
+    # Printed/contact details used by the client invoice and voucher templates.
+    # They are master data, not calculations, and may legitimately be absent
+    # for a vendor whose only identity is a GSTIN.
+    address: Mapped[str | None] = mapped_column(Text)
+    pincode: Mapped[str | None] = mapped_column(String(10))
+    msme_registration: Mapped[str | None] = mapped_column(String(64))
     default_expense_ledger: Mapped[str | None] = mapped_column(String(255))
     creditor_ledger: Mapped[str | None] = mapped_column(String(255))
     parent_group: Mapped[str | None] = mapped_column(String(255))

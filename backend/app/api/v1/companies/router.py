@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.orm import Session
 
+from app.api.v1.deps import get_actor
 from app.core.database import get_db
 from app.models.company import Company
 from app.schemas.company import CompanyCreate, CompanyResponse, CompanyUpdate
@@ -75,8 +76,9 @@ def patch_company(
     payload: CompanyUpdate,
     company: Company = Depends(company_or_404),
     db: Session = Depends(get_db),
+    actor: str = Depends(get_actor),
 ) -> CompanyResponse:
-    return update_company(db, company, payload)
+    return update_company(db, company, payload, actor=actor)
 
 
 @router.delete(

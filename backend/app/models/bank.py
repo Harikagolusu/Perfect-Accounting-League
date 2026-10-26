@@ -16,9 +16,10 @@ balance.
 
 Scope discipline
 ----------------
-Narration cleaning, counterparty detection, ledger mapping, confidence
-scoring and categorisation are all later steps. None of those columns exist
-here, because nothing populates them yet.
+Narration cleaning, automatic counterparty detection, confidence scoring and
+categorisation are still later steps. The `counterparty_*` columns record a
+human-confirmed mapping only; they are not filled from narration and are never
+used as evidence that a mapping is correct.
 """
 
 from __future__ import annotations
@@ -106,6 +107,10 @@ class BankAccount(Base):
     account_name: Mapped[str | None] = mapped_column(String(128))
     # Sensitive. Stored in full, never returned in full, never logged.
     account_number: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Chart-of-accounts name used when this account appears in a voucher.
+    # Optional so an unmapped account becomes an export exception instead of a
+    # guessed "Bank A/c" ledger.
+    ledger_name: Mapped[str | None] = mapped_column(String(255))
     currency: Mapped[str] = mapped_column(
         String(3), nullable=False, default="INR", server_default="INR"
     )
@@ -226,6 +231,19 @@ class BankTransaction(Base):
         MONEY, nullable=False, server_default="0"
     )
     balance: Mapped[Decimal | None] = mapped_column(MONEY)
+    # Human-confirmed counterparty mapping. These are assertions, not bank
+    # narration, and stay optional until a person or an approved rule supplies
+    # them. A missing ledger is an export exception, never a guessed ledger.
+    counterparty_name: Mapped[str | None] = mapped_column(String(255))
+    counterparty_ledger: Mapped[str | None] = mapped_column(String(255))
+    counterparty_address: Mapped[str | None] = mapped_column(Text)
+    counterparty_pincode: Mapped[str | None] = mapped_column(String(10))
+    counterparty_gstin: Mapped[str | None] = mapped_column(String(15))
+    #: A user may flag an inter-account transfer. PAL does not infer this from
+    #: narration; the flag changes the suggested voucher type to Contra.
+    is_inter_account_transfer: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     # Derived from the two amount columns and validated against them, so it
     # can never disagree with them.
     transaction_type: Mapped[TransactionType] = mapped_column(
