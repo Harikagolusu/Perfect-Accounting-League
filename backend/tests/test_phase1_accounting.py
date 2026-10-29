@@ -776,6 +776,453 @@ def test_ledger_suggestion_uses_approved_mapping_after_approval(
     assert expense["reason"]
 
 
+# --- Automatic ledger selection from Tally-history mappings ----------------
+
+
+def _tally_mapping(
+    client: TestClient,
+    company_id: str,
+    *,
+    vendor_id: str | None,
+    counterparty: str | None,
+    ledger_id: str,
+    reason: str = "Tally history: 5 of 5 purchase voucher(s) used this head.",
+    manual: bool = False,
+) -> None:
+    """Insert a mapping the way the Tally learner or a person would."""
+    from app.models.accounting_mapping import (
+        TALLY_HISTORY_CONTEXT,
+        AccountingMapping,
+        AccountingMappingMatchType,
+        AccountingMappingSourceType,
+    )
+
+    from tests.conftest import TestingSessionLocal
+
+    with TestingSessionLocal() as session:
+        session.add(
+            AccountingMapping(
+                company_id=company_id,
+                source_type=AccountingMappingSourceType.INVOICE,
+                match_type=(
+                    AccountingMappingMatchType.VENDOR
+                    if vendor_id
+                    else AccountingMappingMatchType.COUNTERPARTY
+                ),
+                vendor_id=vendor_id,
+                counterparty_name=counterparty,
+                voucher_type="PURCHASE",
+                transaction_context=None if manual else TALLY_HISTORY_CONTEXT,
+                ledger_id=ledger_id,
+                reason=reason,
+                approved_by="partner" if manual else "tally-sync",
+                is_active=True,
+            )
+        )
+        session.commit()
+
+
+def _expense_line(voucher: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        line
+        for line in voucher["lines"]
+        if line["side"] == "Dr" and line["line_type"] == "LEDGER"
+    )
+
+
+def test_tally_history_mapping_is_selected_automatically(
+    client: TestClient,
+) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    rent = _ledger(client, company["id"], "Office Rent")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    _tally_mapping(
+        client,
+        company["id"],
+        vendor_id=vendor["id"],
+        counterparty=None,
+        ledger_id=rent["id"],
+    )
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    line = _expense_line(voucher)
+    assert line["ledger_id"] == rent["id"]
+    assert line["ledger_name"] == "Office Rent"
+    # The ledger is saved on the line, not merely offered as a suggestion.
+    reread = client.get(
+        f"{_base(company['id'])}/vouchers/{voucher['id']}"
+    ).json()
+    assert _expense_line(reread)["ledger_id"] == rent["id"]
+
+
+def test_reliable_mapping_raises_no_ledger_warning(client: TestClient) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    rent = _ledger(client, company["id"], "Office Rent")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    _tally_mapping(
+        client,
+        company["id"],
+        vendor_id=vendor["id"],
+        counterparty=None,
+        ledger_id=rent["id"],
+    )
+    document = _document(client, company["id"])
+    invoice = _invoice(
+        client,
+        company["id"],
+        document["id"],
+        vendor["id"],
+        cgst_amount="0.00",
+        sgst_amount="0.00",
+        taxable_amount="1180.00",
+        total_amount="1180.00",
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    codes = {issue["code"] for issue in voucher["validation_issues"]}
+    assert "NO_HISTORICAL_MAPPING" not in codes
+    assert "MISSING_LEDGER" not in codes
+    assert voucher["is_balanced"]
+    assert voucher["status"] == "DRAFT"
+
+
+def test_manual_mapping_outranks_tally_history(client: TestClient) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    rent = _ledger(client, company["id"], "Office Rent")
+    professional = _ledger(client, company["id"], "Legal & Professional")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    _tally_mapping(
+        client, company["id"], vendor_id=vendor["id"], counterparty=None,
+        ledger_id=rent["id"],
+    )
+    _tally_mapping(
+        client, company["id"], vendor_id=vendor["id"], counterparty=None,
+        ledger_id=professional["id"], reason="Partner confirmed.", manual=True,
+    )
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    # The person's choice wins and the pair is not reported as ambiguous.
+    assert _expense_line(voucher)["ledger_id"] == professional["id"]
+    codes = {issue["code"] for issue in voucher["validation_issues"]}
+    assert "AMBIGUOUS_ACCOUNTING_MAPPING" not in codes
+
+
+def test_two_conflicting_tally_mappings_go_to_review(client: TestClient) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    rent = _ledger(client, company["id"], "Office Rent")
+    professional = _ledger(client, company["id"], "Legal & Professional")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    for ledger in (rent, professional):
+        _tally_mapping(
+            client, company["id"], vendor_id=vendor["id"], counterparty=None,
+            ledger_id=ledger["id"],
+        )
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert voucher["status"] == "NEEDS_REVIEW"
+    codes = {issue["code"] for issue in voucher["validation_issues"]}
+    assert "AMBIGUOUS_ACCOUNTING_MAPPING" in codes
+    assert _expense_line(voucher)["ledger_id"] is None
+
+
+def test_no_mapping_still_reports_missing_ledger(client: TestClient) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert voucher["status"] == "NEEDS_REVIEW"
+    codes = {issue["code"] for issue in voucher["validation_issues"]}
+    assert "MISSING_LEDGER" in codes or "NO_HISTORICAL_MAPPING" in codes
+    assert _expense_line(voucher)["ledger_id"] is None
+
+
+def test_mapping_learned_after_the_draft_repairs_it(client: TestClient) -> None:
+    """The case on screen: the draft predates the mapping."""
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+    first = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+    assert _expense_line(first)["ledger_id"] is None
+
+    rent = _ledger(client, company["id"], "Office Rent")
+    _tally_mapping(
+        client, company["id"], vendor_id=vendor["id"], counterparty=None,
+        ledger_id=rent["id"],
+    )
+
+    # Creation is idempotent; the second call re-applies the new mapping.
+    again = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert again["id"] == first["id"]
+    assert _expense_line(again)["ledger_id"] == rent["id"]
+    assert again["is_balanced"]
+    codes = {issue["code"] for issue in again["validation_issues"]}
+    assert "MISSING_LEDGER" not in codes
+
+
+def test_repair_never_replaces_a_reviewer_choice(client: TestClient) -> None:
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    chosen = _ledger(client, company["id"], "Legal & Professional")
+    rent = _ledger(client, company["id"], "Office Rent")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    # The reviewer picks a head by hand, then a different mapping is learned.
+    lines = [
+        {
+            "ledger_id": chosen["id"] if line is _expense_line(voucher) else line["ledger_id"],
+            "side": line["side"],
+            "amount": line["amount"],
+            "line_type": line["line_type"],
+        }
+        for line in voucher["lines"]
+    ]
+    patched = client.patch(
+        f"{_base(company['id'])}/vouchers/{voucher['id']}", json={"lines": lines}
+    )
+    assert patched.status_code == 200, patched.text
+    _tally_mapping(
+        client, company["id"], vendor_id=vendor["id"], counterparty=None,
+        ledger_id=rent["id"],
+    )
+
+    again = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+    assert _expense_line(again)["ledger_id"] == chosen["id"]
+
+
+def test_extraction_mismatch_stays_visible_after_auto_mapping(
+    client: TestClient,
+) -> None:
+    """Kalash Travels: a reliable ledger must not hide inconsistent amounts."""
+    company, ledgers = _company_with_ledgers(client, expense=False)
+    rent = _ledger(client, company["id"], "Office Rent")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    _tally_mapping(
+        client, company["id"], vendor_id=vendor["id"], counterparty=None,
+        ledger_id=rent["id"],
+    )
+    document = _document(client, company["id"])
+    invoice = _invoice(
+        client,
+        company["id"],
+        document["id"],
+        vendor["id"],
+        taxable_amount="499.00",
+        cgst_amount="44.91",
+        sgst_amount="44.91",
+        round_off="0.18",
+        total_amount="26503.00",
+    )
+
+    # The invoice itself reports the arithmetic it cannot reconcile.
+    assert any(
+        "does not match" in issue
+        for issue in client.get(
+            f"{_base(company['id'])}/invoices/{invoice['id']}"
+        ).json()["validation_issues"]
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    # Ledger resolved, yet the voucher is honestly still unbalanced.
+    assert _expense_line(voucher)["ledger_id"] == rent["id"]
+    assert not voucher["is_balanced"]
+    assert voucher["status"] == "NEEDS_REVIEW"
+    assert len(voucher["lines"]) == 5
+
+
+# --- AI ledger pre-selection (last resort) ---------------------------------
+
+
+class _FakeLedgerAI:
+    """Minimal provider stub that answers the ledger-choice prompt."""
+
+    name = "fake"
+    model = "fake-1"
+
+    def __init__(self, reply: str, configured: bool = True) -> None:
+        self.reply = reply
+        self.configured = configured
+        self.prompts: list[str] = []
+
+    def is_configured(self) -> bool:
+        return self.configured
+
+    def generate_from_text(self, prompt: str, **_: Any) -> Any:
+        self.prompts.append(prompt)
+        return type("R", (), {"text": self.reply, "model": self.model, "usage": None})()
+
+    generate_text = generate_from_text
+
+
+def _ai_invoice_setup(client: TestClient, name: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A company whose vendor has no configured expense ledger at all."""
+    company, _ = _company_with_ledgers(client, name=name, expense=False)
+    _ledger(client, company["id"], "Freight Inward")
+    vendor = _vendor(client, company["id"], expense_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+    return company, invoice
+
+
+def test_ai_preselects_an_existing_ledger_and_flags_it_for_review(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    company, invoice = _ai_invoice_setup(client, "AI Pick Co")
+    provider = _FakeLedgerAI(
+        '{"ledger_name": "Freight Inward", "reason": "Transport of goods."}'
+    )
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider", lambda: provider
+    )
+
+    body = client.get(
+        f"{_base(company['id'])}/invoices/{invoice['id']}/ledger-suggestion"
+    ).json()
+    expense = next(item for item in body["suggestions"] if item["purpose"] == "EXPENSE")
+    assert expense["source"] == "AI_SUGGESTION"
+    assert expense["ledger_name"] == "Freight Inward"
+    assert expense["ledger_id"] is not None
+    assert expense["reason"] == "Transport of goods."
+    # The candidate list is in the prompt, so the model picks, never invents.
+    assert "Freight Inward" in provider.prompts[0]
+    assert any(
+        issue["code"] == "AI_SUGGESTED_LEDGER" and issue["severity"] == "WARNING"
+        for issue in body["exceptions"]
+    )
+
+    # The draft is pre-filled but still parked in review for a human.
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+    assert voucher["status"] == "NEEDS_REVIEW"
+    expense_line = next(
+        line
+        for line in voucher["lines"]
+        if line["side"] == "Dr" and line["line_type"] == "LEDGER"
+    )
+    assert expense_line["ledger_name"] == "Freight Inward"
+    assert expense_line["ledger_id"] is not None
+
+
+def test_ai_answer_echoing_the_group_in_brackets_still_resolves(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """The candidate list reads "- Name (group)"; models echo the bracket."""
+    company, invoice = _ai_invoice_setup(client, "AI Bracket Co")
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider",
+        lambda: _FakeLedgerAI(
+            '{"ledger_name": "Freight Inward (Indirect Expenses)", '
+            '"reason": "Transport."}'
+        ),
+    )
+
+    body = client.get(
+        f"{_base(company['id'])}/invoices/{invoice['id']}/ledger-suggestion"
+    ).json()
+    expense = next(item for item in body["suggestions"] if item["purpose"] == "EXPENSE")
+    assert expense["ledger_name"] == "Freight Inward"
+    assert expense["ledger_id"] is not None
+
+
+def test_ai_candidates_exclude_party_bank_and_tax_ledgers(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """A creditor or GST ledger must never be offered as an expense head."""
+    company, invoice = _ai_invoice_setup(client, "AI Candidate Co")
+    _ledger(client, company["id"], "ZZCreditorOnly", parent_group="Sundry Creditors")
+    _ledger(client, company["id"], "ZZBankOnly", parent_group="Bank Accounts")
+    _ledger(client, company["id"], "ZZOutputCGST", parent_group="GST_KA")
+    _ledger(client, company["id"], "ZZRoundOff Charge", parent_group="Indirect Expenses")
+    provider = _FakeLedgerAI('{"ledger_name": "Freight Inward"}')
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider", lambda: provider
+    )
+
+    client.get(f"{_base(company['id'])}/invoices/{invoice['id']}/ledger-suggestion")
+
+    prompt = provider.prompts[0]
+    assert "Freight Inward" in prompt
+    assert "ZZCreditorOnly" not in prompt
+    assert "ZZBankOnly" not in prompt
+    assert "ZZOutputCGST" not in prompt
+
+
+def test_ai_ledger_name_outside_the_master_is_discarded(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    company, invoice = _ai_invoice_setup(client, "AI Invent Co")
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider",
+        lambda: _FakeLedgerAI('{"ledger_name": "Totally New Ledger"}'),
+    )
+
+    body = client.get(
+        f"{_base(company['id'])}/invoices/{invoice['id']}/ledger-suggestion"
+    ).json()
+    assert not any(item["purpose"] == "EXPENSE" for item in body["suggestions"])
+    assert any(
+        issue["code"] == "NO_HISTORICAL_MAPPING" for issue in body["exceptions"]
+    )
+    ledgers = client.get(f"{_base(company['id'])}/ledgers").json()
+    assert all(item["name"] != "Totally New Ledger" for item in ledgers)
+
+
+def test_unconfigured_ai_leaves_the_expense_ledger_unsuggested(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    company, invoice = _ai_invoice_setup(client, "AI Off Co")
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider",
+        lambda: _FakeLedgerAI("", configured=False),
+    )
+
+    body = client.get(
+        f"{_base(company['id'])}/invoices/{invoice['id']}/ledger-suggestion"
+    ).json()
+    assert not any(item["purpose"] == "EXPENSE" for item in body["suggestions"])
+    assert not any(
+        issue["code"] == "AI_SUGGESTED_LEDGER" for issue in body["exceptions"]
+    )
+
+
 # --- Bank -> draft voucher -------------------------------------------------
 
 

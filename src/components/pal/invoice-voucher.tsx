@@ -6,6 +6,7 @@
  * every other source.
  */
 
+import { useEffect, useRef } from "react";
 import { FilePlus2 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -32,6 +33,21 @@ export function InvoiceVoucherPanel({
   const { data: suggestions = [] } = useInvoiceLedgerSuggestion(companyId, invoiceId);
   const createVoucher = useCreateVoucherFromInvoice(companyId);
   const existing = vouchers[0];
+  const resuggested = useRef<Set<string>>(new Set());
+
+  // A draft built before its mapping was learned keeps an empty ledger line.
+  // Creation is idempotent and re-applies today's suggestions to those lines,
+  // so call it once per draft rather than making a reviewer pick by hand.
+  const unresolved = existing?.lines.some((line) => !line.ledgerId) ?? false;
+  useEffect(() => {
+    if (!existing || !unresolved) return;
+    if (!["DRAFT", "NEEDS_REVIEW"].includes(existing.status)) return;
+    if (createVoucher.isPending || resuggested.current.has(existing.id)) return;
+    resuggested.current.add(existing.id);
+    createVoucher.mutate({ invoiceId });
+    // The draft's unresolved state is the trigger; the mutation object is not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [existing?.id, existing?.status, unresolved, createVoucher.isPending]);
 
   const create = async () => {
     try {

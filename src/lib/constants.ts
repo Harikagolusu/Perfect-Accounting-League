@@ -30,6 +30,22 @@ export const FINANCIAL_YEARS = Array.from({ length: 3 }, (_, index) =>
 /** Current reporting month in the April-to-March sequence. */
 export const currentPeriod = (date = new Date()) => PERIODS[(date.getMonth() + 9) % 12];
 
+/**
+ * First calendar day of a reporting month, as `YYYY-MM-01`.
+ *
+ * `fy` is a label like `FY 2026-27`; `month` is a `PERIODS` name. April–December
+ * fall in the FY's start year, January–March in the next. Returns undefined if
+ * either input is unrecognised.
+ */
+export const periodMonthStart = (fy: string, month: string): string | undefined => {
+  const index = PERIODS.indexOf(month); // 0 = April … 11 = March
+  const startYear = Number(fy.match(/\d{4}/)?.[0] ?? 0);
+  if (index < 0 || !Number.isFinite(startYear) || startYear === 0) return undefined;
+  const monthNumber = index <= 8 ? index + 4 : index - 8; // Apr=4…Dec=12, Jan=1…Mar=3
+  const year = index <= 8 ? startYear : startYear + 1;
+  return `${year}-${String(monthNumber).padStart(2, "0")}-01`;
+};
+
 /** Statutory TDS sections tracked by the working. */
 export const TDS_SECTIONS: TDSSection[] = ["194C", "194J", "194I", "194H", "194Q"];
 

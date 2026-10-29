@@ -1,0 +1,378 @@
+{
+  "version": 2,
+  "id": "c59d3b3a-0d84-4d4a-be3e-d2cf3ea1384c",
+  "action": "capture",
+  "revision": {
+    "scope": "src",
+    "digest": "c27da9bd75d42e56ca3132eaf56a1f91944684f47447a3f795abd1f9635dd111",
+    "complete": true,
+    "files": 129,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/audit"
+    },
+    "finalUrl": "http://localhost:8080/audit",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "viewport",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Asterleaf"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectVisible",
+        "ok": true,
+        "expectation": {
+          "selector": "select"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/inbox",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/inbox"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Inbox"
+        },
+        "url": "http://localhost:8080/inbox",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/inbox"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Invoice"
+        },
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/vendors",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/vendors"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Vendor"
+        },
+        "url": "http://localhost:8080/vendors",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/vendors"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Review Queue"
+        },
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/reports",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/reports"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Report"
+        },
+        "url": "http://localhost:8080/reports",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/reports"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Tally"
+        },
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/audit",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/audit"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Audit"
+        },
+        "url": "http://localhost:8080/audit",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/audit"
+        }
+      },
+      {
+        "action": "expectNoHorizontalOverflow",
+        "ok": true,
+        "expectation": {
+          "tolerance": "0"
+        },
+        "url": "http://localhost:8080/audit",
+        "viewport": {
+          "width": 1280,
+          "height": 800
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/audit"
+        }
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_3.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_4.expectVisible",
+        "passed": true
+      },
+      {
+        "name": "step_6.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_8.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_10.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_12.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_14.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_16.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_18.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_19.expectNoHorizontalOverflow",
+        "passed": true
+      }
+    ]
+  }
+}

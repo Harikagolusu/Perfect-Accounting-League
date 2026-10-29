@@ -29,7 +29,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.orm import Session
 
 from app.models.bank import (
@@ -48,6 +48,7 @@ from app.schemas.bank import (
     BankStatementUpdate,
     BankTransactionCreate,
     BankTransactionMappingUpdate,
+    BankTransactionUpdate,
 )
 from app.services.bank_extraction import (
     StatementExtractionResult,
@@ -425,6 +426,30 @@ def create_transaction(
     return transaction
 
 
+def update_transaction(
+    db: Session,
+    company_id: uuid.UUID,
+    statement_id: uuid.UUID,
+    transaction_id: uuid.UUID,
+    data: BankTransactionUpdate,
+) -> BankTransaction:
+    """Correct bank-fact fields on an extracted transaction.
+
+    Re-derives transaction_type whenever amounts change.
+    """
+    transaction = get_transaction(db, company_id, statement_id, transaction_id)
+    updates = data.model_dump(exclude_unset=True)
+    for field, value in updates.items():
+        setattr(transaction, field, value)
+    if "debit_amount" in updates or "credit_amount" in updates:
+        transaction.transaction_type = derive_transaction_type(
+            transaction.debit_amount, transaction.credit_amount
+        )
+    db.commit()
+    db.refresh(transaction)
+    return transaction
+
+
 def update_transaction_mapping(
     db: Session,
     company_id: uuid.UUID,
@@ -483,20 +508,61 @@ def statement_review_issues(
     )
 
 
+def _apply_extracted_transactions(
+    db: Session,
+    statement: BankStatement,
+    transactions: tuple[dict, ...],
+) -> int:
+    """Delete existing transactions for the statement and bulk-insert extracted ones.
+
+    Returns the count of inserted rows.
+    """
+    db.execute(
+        sa_delete(BankTransaction).where(
+            BankTransaction.statement_id == statement.id
+        )
+    )
+    count = 0
+    for row in transactions:
+        txn_date = row.get("transaction_date")
+        if not txn_date:
+            continue
+        debit = row.get("debit_amount")
+        credit = row.get("credit_amount")
+        db.add(
+            BankTransaction(
+                statement_id=statement.id,
+                company_id=statement.company_id,
+                transaction_date=txn_date,
+                value_date=row.get("value_date"),
+                description=row.get("description"),
+                reference_number=row.get("reference_number"),
+                debit_amount=debit,
+                credit_amount=credit,
+                balance=row.get("balance"),
+                transaction_type=derive_transaction_type(debit, credit),
+            )
+        )
+        count += 1
+    db.commit()
+    return count
+
+
 def process_statement(
     db: Session, company_id: uuid.UUID, statement_id: uuid.UUID
 ) -> tuple[BankStatement, StatementExtractionResult]:
     """Attempt automatic parsing of a statement.
 
-    No parser is configured yet, so this says so plainly and changes nothing:
-    the statement keeps its status and no transaction is invented.
+    When no extractor is configured, reports that plainly and changes nothing.
+    When an extractor runs, applies extracted transactions and updates the
+    statement status to PROCESSED (clean) or NEEDS_REVIEW (with issues).
     """
+    from app.core.storage import resolve_storage_path
+
     statement = get_bank_statement(db, company_id, statement_id)
     extractor = get_statement_extractor()
 
     if not extractor.is_configured():
-        # No status change on purpose: nothing was parsed, so claiming
-        # PROCESSING or FAILED would misreport what happened.
         logger.info(
             "Extraction not configured; statement %s left as %s",
             statement_id,
@@ -504,18 +570,40 @@ def process_statement(
         )
         return statement, extractor.extract(statement, b"")
 
-    from app.core.storage import resolve_storage_path
-
+    document = None
     raw = b""
     if statement.document_id is not None:
         document = get_document(db, company_id, statement.document_id)
         raw = resolve_storage_path(document.file_path).read_bytes()
-    result = extractor.extract(statement, raw)
+
+    result = extractor.extract(statement, raw, document=document)
     logger.info(
-        "Extraction attempted for statement %s: configured=%s",
+        "Extraction attempted for statement %s: configured=%s transactions=%s",
         statement_id,
         result.configured,
+        result.transaction_count,
     )
+
+    if not result.configured:
+        return statement, result
+
+    # Apply extracted statement header fields (dates, balances).
+    if result.statement_updates:
+        for key, value in result.statement_updates.items():
+            setattr(statement, key, value)
+
+    if result.transactions is not None:
+        _apply_extracted_transactions(db, statement, result.transactions)
+
+    new_status = (
+        BankStatementStatus.NEEDS_REVIEW
+        if result.issues
+        else BankStatementStatus.PROCESSED
+    )
+    statement.status = new_status
+    db.commit()
+    db.refresh(statement)
+
     return statement, result
 
 
@@ -541,5 +629,6 @@ __all__ = [
     "statement_review_issues",
     "update_bank_account",
     "update_bank_statement",
+    "update_transaction",
     "update_transaction_mapping",
 ]

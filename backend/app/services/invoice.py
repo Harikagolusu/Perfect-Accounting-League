@@ -29,7 +29,7 @@ import time
 import uuid
 from dataclasses import replace
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.orm import Session
 
 from app.core.storage import StorageError, resolve_storage_path
@@ -40,8 +40,11 @@ from app.models.invoice import (
     InvoiceStatus,
     VendorMappingStatus,
 )
+from app.models.invoice_line_item import InvoiceLineItem
 from app.models.vendor import Vendor, VendorStatus
+from app.models.voucher import AccountingEntityType
 from app.schemas.invoice import InvoiceCreate, InvoiceUpdate
+from app.services.accounting_audit import record_event
 from app.services.company import get_company
 from app.services.document import get_document
 from app.services.invoice_extraction import (
@@ -59,6 +62,7 @@ from app.services.invoice_validation import (
     assert_transition_allowed,
     validate_invoice_fields,
 )
+from app.services.ledger import match_ledger_by_name
 from app.services.vendor import VendorNotFoundError, get_vendor
 from app.services.vendor_matching import (
     VendorMatchStatus,
@@ -81,6 +85,8 @@ _VALIDATED_FIELDS = (
     "sgst_amount",
     "igst_amount",
     "cess_amount",
+    "discount_amount",
+    "freight_amount",
     "round_off",
     "total_amount",
 )
@@ -95,6 +101,7 @@ _EXTRACTED_FIELDS = (
     "vendor_gstin",
     "vendor_pan",
     "buyer_gstin",
+    "place_of_supply",
     "po_number",
     "currency",
     "taxable_amount",
@@ -102,6 +109,8 @@ _EXTRACTED_FIELDS = (
     "sgst_amount",
     "igst_amount",
     "cess_amount",
+    "discount_amount",
+    "freight_amount",
     "round_off",
     "total_amount",
 )
@@ -308,7 +317,18 @@ def update_invoice(db: Session, invoice: Invoice, data: InvoiceUpdate) -> Invoic
             raise InvoiceTransitionError(
                 "Confirm or reject the vendor suggestion before approving this invoice."
             )
+        previous_status = invoice.status
         invoice.status = target_status
+        record_event(
+            db,
+            company_id=invoice.company_id,
+            entity_type=AccountingEntityType.INVOICE,
+            entity_id=invoice.id,
+            event_type=f"INVOICE_{target_status.value}",
+            previous_status=previous_status.value,
+            new_status=target_status.value,
+            reason="Invoice status changed.",
+        )
 
     for field, value in payload.items():
         setattr(invoice, field, value)
@@ -322,6 +342,15 @@ def delete_invoice(db: Session, company_id: uuid.UUID, invoice_id: uuid.UUID) ->
     """Delete an invoice. Its source document is deliberately left in place."""
     invoice = get_invoice(db, company_id, invoice_id)
     document_id = invoice.document_id
+    record_event(
+        db,
+        company_id=company_id,
+        entity_type=AccountingEntityType.INVOICE,
+        entity_id=invoice.id,
+        event_type="INVOICE_REJECTED",
+        previous_status=invoice.status.value,
+        reason="Invoice rejected; source document retained.",
+    )
     db.delete(invoice)
     db.commit()
     logger.info(
@@ -349,12 +378,17 @@ def _create_vendor_from_invoice(db: Session, invoice: Invoice) -> Vendor | None:
     if not name:
         return None
 
+    # Tally rarely spells a party exactly as the invoice prints it, so prefer
+    # the matching ledger's own name; the printed name is the fallback.
+    ledger = match_ledger_by_name(
+        db, invoice.company_id, name, parent_group=_AUTO_VENDOR_PARENT_GROUP
+    )
     vendor = Vendor(
         company_id=invoice.company_id,
         name=name,
         gstin=normalize_gstin(invoice.vendor_gstin),
         pan=normalize_pan(invoice.vendor_pan),
-        creditor_ledger=name,
+        creditor_ledger=ledger.name if ledger is not None else name,
         parent_group=_AUTO_VENDOR_PARENT_GROUP,
         status=VendorStatus.NEEDS_MAPPING,
     )
@@ -510,6 +544,20 @@ def confirm_vendor_mapping(
             # lifecycle otherwise keeps out of normal edits.
             invoice.status = InvoiceStatus.NEEDS_REVIEW
 
+    record_event(
+        db,
+        company_id=invoice.company_id,
+        entity_type=AccountingEntityType.INVOICE,
+        entity_id=invoice.id,
+        event_type=(
+            "INVOICE_VENDOR_MAPPING_REJECTED"
+            if vendor_id is None
+            else "INVOICE_VENDOR_MAPPING_CONFIRMED"
+        ),
+        new_status=invoice.vendor_mapping_status.value,
+        new_value=str(vendor_id) if vendor_id is not None else None,
+        reason="Human vendor-mapping decision.",
+    )
     db.commit()
     db.refresh(invoice)
     logger.info(
@@ -619,6 +667,7 @@ def process_invoice(
         if result.outcome is ExtractionOutcome.PROCESSED:
             if result.values:
                 _apply_extracted_values(invoice, result.values)
+                _apply_line_items(db, invoice, result.values.get("line_items") or [])  # type: ignore[arg-type]
             invoice.source = InvoiceSource.AI
             mapping_review_required = _apply_vendor_mapping(db, invoice)
 
@@ -626,6 +675,7 @@ def process_invoice(
             # Apply whatever was read; the reviewer sees the values and issues.
             if result.values:
                 _apply_extracted_values(invoice, result.values)
+                _apply_line_items(db, invoice, result.values.get("line_items") or [])  # type: ignore[arg-type]
             invoice.source = InvoiceSource.AI
             mapping_review_required = _apply_vendor_mapping(db, invoice)
     except Exception as exc:
@@ -727,6 +777,41 @@ def _apply_extracted_values(invoice: Invoice, values: dict[str, object]) -> None
         value = values.get(field)
         if value is not None:
             setattr(invoice, field, value)
+
+
+def _apply_line_items(
+    db: Session, invoice: Invoice, line_items: list[dict[str, object]]
+) -> None:
+    """Replace this invoice's line items with the newly extracted set.
+
+    Idempotent: safe to call on retry — deletes first, then inserts. Items
+    without a description are skipped (they failed the _collect_line_items check
+    upstream, so this list should already be clean, but the guard stays cheap).
+    """
+    db.execute(sa_delete(InvoiceLineItem).where(InvoiceLineItem.invoice_id == invoice.id))
+    for item in line_items:
+        desc = item.get("description")
+        if not desc:
+            continue
+        db.add(
+            InvoiceLineItem(
+                company_id=invoice.company_id,
+                invoice_id=invoice.id,
+                line_number=item["line_number"],
+                description=desc,
+                supply_type=item.get("supply_type"),
+                hsn_sac=item.get("hsn_sac"),
+                quantity=item.get("quantity"),
+                unit_rate=item.get("unit_rate"),
+                gst_rate=item.get("gst_rate"),
+                taxable_amount=item.get("taxable_amount"),
+                igst_amount=item.get("igst_amount"),
+                cgst_amount=item.get("cgst_amount"),
+                sgst_amount=item.get("sgst_amount"),
+                cess_amount=item.get("cess_amount"),
+                total_amount=item.get("total_amount"),
+            )
+        )
 
 
 def _find_extraction_invoice(

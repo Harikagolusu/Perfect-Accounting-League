@@ -60,6 +60,42 @@ def test_dates_use_their_printed_labels() -> None:
     assert [c.value for c in candidates.get("due_date")] == ["14/04/2026"]
 
 
+def test_invoice_date_is_found_under_alternate_labels() -> None:
+    for label in (
+        "Invoice Date",
+        "Bill Date",
+        "Dated",
+        "Date",
+        "Dt.",
+        "Invoice Dt.",
+        "Date of Invoice",
+        "Date of Issue",
+        "Issue Date",
+        "Billing Date",
+        "Voucher Date",
+        "InvoiceDate",
+    ):
+        candidates = _extract(f"TAX INVOICE\n{label}: 15/03/2026\n")
+        assert [c.value for c in candidates.get("invoice_date")] == [
+            "15/03/2026"
+        ], label
+
+
+def test_one_line_holding_both_dates_yields_both() -> None:
+    candidates = _extract(
+        "TAX INVOICE\nInvoice Date: 15/03/2026   Due Date: 14/04/2026\n"
+    )
+
+    assert [c.value for c in candidates.get("invoice_date")] == ["15/03/2026"]
+    assert [c.value for c in candidates.get("due_date")] == ["14/04/2026"]
+
+
+def test_a_date_label_inside_a_longer_word_is_not_a_label() -> None:
+    candidates = _extract("TAX INVOICE\nLast Updated 15/03/2026\n")
+
+    assert candidates.get("invoice_date") == ()
+
+
 def test_amounts_are_kept_separate_and_rates_are_not_amounts() -> None:
     candidates = _extract()
 

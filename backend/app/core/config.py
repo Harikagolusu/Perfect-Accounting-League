@@ -8,6 +8,7 @@ local `.env` file (see `.env.example`).
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -56,6 +57,14 @@ class Settings(BaseSettings):
     # Hard cap on PDF pages sent to the vision model. A document above this
     # limit is rejected for review rather than silently truncated.
     invoice_max_pages: int = 10
+
+    # --- TallyPrime integration (read-only POC) -------------------------
+    # The URL is server-side configuration only. It is never accepted from a
+    # request, so a caller cannot turn PAL into an open proxy. TallyPrime's
+    # XML-over-HTTP server normally listens on port 9000.
+    tally_base_url: str = "http://localhost:9000"
+    # Bounded so a dead TallyPrime cannot hold a PAL request open indefinitely.
+    tally_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
 
     @property
     def document_storage_dir(self) -> Path:

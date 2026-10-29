@@ -1,0 +1,123 @@
+{
+  "version": 2,
+  "id": "de861e59-196d-4772-89d9-d2793e8d3716",
+  "action": "Browser flow",
+  "revision": {
+    "scope": ".",
+    "digest": "5f0227946feeda225fabeeba1959a182afc9b608e478c9586e8dffb3a65678ad",
+    "complete": true,
+    "files": 363,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/"
+    },
+    "finalUrl": "http://localhost:8080/",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectVisible",
+        "ok": true,
+        "expectation": {
+          "selector": "select[aria-label=\"Company\"]"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectEnabled",
+        "ok": true,
+        "expectation": {
+          "selector": "select[aria-label=\"Company\"]"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "label": "company-switcher",
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/2b244378-4739-488a-93b9-b9f85c678a03/1.jpg"
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectVisible",
+        "passed": true
+      },
+      {
+        "name": "step_3.expectEnabled",
+        "passed": true
+      }
+    ]
+  }
+}

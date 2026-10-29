@@ -22,6 +22,7 @@ from app.models.document import Document, DocumentStatus, DocumentType
 from app.models.invoice import Invoice, InvoiceDirection, InvoiceSource, InvoiceStatus
 from app.models.invoice_line_item import InvoiceLineItem
 from app.models.ledger import Ledger, LedgerSource
+from app.models.tally_sync import TallySyncLog
 from app.models.vendor import Vendor, VendorStatus
 from app.models.voucher import (
     AccountingAuditEvent,
@@ -56,6 +57,7 @@ __all__ = [
     "InvoiceStatus",
     "Ledger",
     "LedgerSource",
+    "TallySyncLog",
     "TransactionType",
     "Vendor",
     "VendorStatus",

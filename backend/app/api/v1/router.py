@@ -20,6 +20,7 @@ from app.api.v1.companies.router import router as companies_router
 from app.api.v1.documents.router import router as documents_router
 from app.api.v1.invoices.router import router as invoices_router
 from app.api.v1.ledgers.router import router as ledgers_router
+from app.api.v1.tally.router import router as tally_router
 from app.api.v1.vendors.router import router as vendors_router
 from app.api.v1.vouchers.router import router as vouchers_router
 from app.core.config import get_settings
@@ -82,6 +83,10 @@ api_router.include_router(
 # AI Provider - top-level, not company-scoped (configuration is global)
 api_router.include_router(ai_router, prefix="/ai", tags=["ai"])
 
+# TallyPrime - top-level, read-only POC. The Tally URL is server-side
+# configuration only; no request can choose it.
+api_router.include_router(tally_router, prefix="/tally", tags=["tally"])
+
 
 # ---------------------------------------------------------------------------
 # Future modules - all company-scoped, all mounted under /companies/{company_id}.
@@ -91,8 +96,7 @@ api_router.include_router(ai_router, prefix="/ai", tags=["ai"])
 #   api_router.include_router(reconciliation.router,  prefix="/companies/{company_id}/reconciliation",  tags=["reconciliation"])
 #
 # Integration modules are company-wide rather than company-owned, so they stay
-# at the top level:
+# at the top level. Tally is implemented above; Zoho remains future work:
 #
-#   api_router.include_router(tally.router,           prefix="/companies/{company_id}/tally",           tags=["tally"])
 #   api_router.include_router(zoho.router,            prefix="/companies/{company_id}/zoho",            tags=["zoho"])
 # ---------------------------------------------------------------------------

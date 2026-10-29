@@ -103,6 +103,122 @@ def _line_from_suggestion(
     )
 
 
+def _invoice_line_plan(
+    invoice: Invoice, *, is_sales: bool, main_purpose: str
+) -> list[tuple[str, VoucherSide, Decimal, str]]:
+    """The ordered (purpose, side, amount, line_type) a voucher gets.
+
+    Shared by the builder and by `refresh_invoice_voucher_ledgers`, so a repair
+    maps an existing line back to the purpose that created it instead of
+    re-guessing from the amount — CGST and SGST are routinely equal.
+    Zero and missing amounts produce no line, exactly as the builder does.
+    """
+    tax_side = VoucherSide.CR if is_sales else VoucherSide.DR
+    plan: list[tuple[str, VoucherSide, Decimal | None, str]] = []
+    if is_sales:
+        plan.append(("PARTY", VoucherSide.DR, invoice.total_amount, "LEDGER"))
+        plan.append((main_purpose, VoucherSide.CR, invoice.taxable_amount, "LEDGER"))
+    else:
+        plan.append((main_purpose, VoucherSide.DR, invoice.taxable_amount, "LEDGER"))
+
+    for purpose, amount in (
+        ("CGST", invoice.cgst_amount),
+        ("SGST", invoice.sgst_amount),
+        ("IGST", invoice.igst_amount),
+        ("CESS", invoice.cess_amount),
+    ):
+        plan.append((purpose, tax_side, amount, "TAX"))
+
+    if invoice.round_off is not None and invoice.round_off != ZERO:
+        if is_sales:
+            side = VoucherSide.CR if invoice.round_off > ZERO else VoucherSide.DR
+        else:
+            side = VoucherSide.DR if invoice.round_off > ZERO else VoucherSide.CR
+        plan.append(("ROUND_OFF", side, abs(invoice.round_off), "LEDGER"))
+
+    if not is_sales:
+        plan.append(("PARTY", VoucherSide.CR, invoice.total_amount, "LEDGER"))
+
+    return [
+        (purpose, side, amount, line_type)
+        for purpose, side, amount, line_type in plan
+        if amount is not None and amount != ZERO
+    ]
+
+
+def refresh_invoice_voucher_ledgers(
+    db: Session, company_id: uuid.UUID, voucher: Voucher
+) -> int:
+    """Fill a draft's unresolved ledger lines from today's suggestions.
+
+    A voucher built before its mapping existed keeps an empty ledger line
+    forever, because creation is idempotent and returns the existing draft.
+    This fills only lines with no ledger, so a reviewer's own choice is never
+    replaced, and only while the voucher is still editable. Amounts and sides
+    are untouched: no line is added, removed or rebalanced. Returns the number
+    of lines filled.
+    """
+    if voucher.status not in (VoucherStatus.DRAFT, VoucherStatus.NEEDS_REVIEW):
+        return 0
+    if not any(line.ledger_id is None for line in voucher.lines):
+        return 0
+
+    invoice = db.get(Invoice, voucher.source_id)
+    if invoice is None or invoice.company_id != company_id:
+        return 0
+
+    is_sales = invoice.direction is InvoiceDirection.SALES
+    main_purpose = "SALES" if is_sales else "EXPENSE"
+    plan = _invoice_line_plan(invoice, is_sales=is_sales, main_purpose=main_purpose)
+    lines = sorted(voucher.lines, key=lambda line: line.line_number)
+    # A hand-edited voucher no longer matches the plan; leave it alone.
+    if len(plan) != len(lines):
+        return 0
+
+    response = suggest_for_invoice(db, company_id, invoice.id)
+    suggestions = _suggestion_map(response)
+
+    filled = 0
+    for (purpose, side, amount, line_type), line in zip(plan, lines):
+        if line.ledger_id is not None:
+            continue
+        if line.side is not side or line.amount != amount or line.line_type != line_type:
+            return 0
+        suggestion = suggestions.get(purpose)
+        if suggestion is None or suggestion.ledger_id is None:
+            continue
+        line.ledger_id = suggestion.ledger_id
+        line.ledger_name = suggestion.ledger_name or ""
+        filled += 1
+
+    if not filled:
+        return 0
+
+    db.flush()
+    issues = persist_validation(db, voucher, extra=_issues_from_response(response))
+    # Re-derived from the filled lines: a voucher whose only complaint was the
+    # missing ledger returns to DRAFT, one that still fails stays in review.
+    voucher.status = VoucherStatus.NEEDS_REVIEW if issues else VoucherStatus.DRAFT
+    record_event(
+        db,
+        company_id=company_id,
+        entity_type=AccountingEntityType.VOUCHER,
+        entity_id=voucher.id,
+        voucher_id=voucher.id,
+        event_type="VOUCHER_LEDGERS_RESUGGESTED",
+        actor="local-user",
+        previous_status=VoucherStatus.NEEDS_REVIEW.value,
+        new_status=voucher.status.value,
+        metadata={
+            "lines_filled": filled,
+            "issues": issues_as_dicts(issues),
+        },
+    )
+    db.commit()
+    db.refresh(voucher)
+    return filled
+
+
 def _existing_source_voucher(
     db: Session,
     company_id: uuid.UUID,
@@ -189,6 +305,9 @@ def create_voucher_from_invoice(
         db, company_id, VoucherSourceType.INVOICE, invoice.id
     )
     if existing is not None:
+        # Creation is idempotent, so this is also the moment to pick up a
+        # mapping that was learned after the draft was first built.
+        refresh_invoice_voucher_ledgers(db, company_id, existing)
         return existing
     if invoice.invoice_date is None:
         raise VoucherValidationError(
@@ -279,20 +398,11 @@ def create_voucher_from_invoice(
             )
         )
 
-    if is_sales:
-        add(party_purpose, VoucherSide.DR, invoice.total_amount)
-        add(main_purpose, VoucherSide.CR, invoice.taxable_amount, item=item_for_line)
-    else:
-        add(main_purpose, VoucherSide.DR, invoice.taxable_amount, item=item_for_line)
-
-    for purpose, amount in (
-        ("CGST", invoice.cgst_amount),
-        ("SGST", invoice.sgst_amount),
-        ("IGST", invoice.igst_amount),
-        ("CESS", invoice.cess_amount),
+    for purpose, side, amount, line_type in _invoice_line_plan(
+        invoice, is_sales=is_sales, main_purpose=main_purpose
     ):
-        if amount is not None and amount != ZERO:
-            if purpose not in suggestions:
+        if purpose not in suggestions:
+            if line_type == "TAX":
                 issues.append(
                     VoucherIssue(
                         "MISSING_TAX_DATA",
@@ -300,25 +410,22 @@ def create_voucher_from_invoice(
                         f"{purpose} Ledger",
                     )
                 )
-            add(purpose, VoucherSide.CR if is_sales else VoucherSide.DR, amount, line_type="TAX")
-
-    if invoice.round_off is not None and invoice.round_off != ZERO:
-        if "ROUND_OFF" not in suggestions:
-            issues.append(
-                VoucherIssue(
-                    "MISSING_LEDGER",
-                    "The invoice has a round-off amount but no round-off ledger is configured.",
-                    "Round Off Ledger",
+            elif purpose == "ROUND_OFF":
+                issues.append(
+                    VoucherIssue(
+                        "MISSING_LEDGER",
+                        "The invoice has a round-off amount but no round-off ledger is configured.",
+                        "Round Off Ledger",
+                    )
                 )
-            )
-        if is_sales:
-            side = VoucherSide.CR if invoice.round_off > ZERO else VoucherSide.DR
-        else:
-            side = VoucherSide.DR if invoice.round_off > ZERO else VoucherSide.CR
-        add("ROUND_OFF", side, abs(invoice.round_off))
-
-    if not is_sales:
-        add(party_purpose, VoucherSide.CR, invoice.total_amount)
+        add(
+            purpose,
+            side,
+            amount,
+            line_type=line_type,
+            # Item fields belong to the taxable line only.
+            item=item_for_line if purpose == main_purpose else None,
+        )
     if not any(line for line in lines if line.line_type != "TAX" and line.side is VoucherSide.CR) and not is_sales:
         issues.append(
             VoucherIssue(
@@ -561,4 +668,5 @@ def create_voucher_from_bank_transaction(
 __all__ = [
     "create_voucher_from_bank_transaction",
     "create_voucher_from_invoice",
+    "refresh_invoice_voucher_ledgers",
 ]

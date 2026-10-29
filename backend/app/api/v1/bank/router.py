@@ -31,6 +31,7 @@ from app.schemas.bank import (
     BankTransactionCreate,
     BankTransactionMappingUpdate,
     BankTransactionResponse,
+    BankTransactionUpdate,
     ProcessStatementResponse,
 )
 from app.schemas.exports import ExportPreviewResponse
@@ -54,6 +55,7 @@ from app.services.bank import (
     statement_review_issues,
     update_bank_account,
     update_bank_statement,
+    update_transaction,
     update_transaction_mapping,
 )
 from app.services.bank_validation import (
@@ -316,8 +318,12 @@ def process_bank_statement(
     company_id: UUID = Path(description="Owning company id."),
     db: Session = Depends(get_db),
 ) -> ProcessStatementResponse:
-    """No parser is configured yet, so this reports that plainly, invents no
-    transactions, and leaves the status untouched."""
+    """Run AI extraction on the statement document and persist the results.
+
+    When no AI provider is configured, reports that plainly and changes nothing.
+    On success, sets the statement to PROCESSED or NEEDS_REVIEW and returns
+    the transaction count and any review issues.
+    """
     try:
         statement, result = process_statement(db, company_id, statement_id)
     except BankStatementNotFoundError:
@@ -331,6 +337,7 @@ def process_bank_statement(
         reason=result.reason,
         message=result.message or "",
         issues=issues,
+        transaction_count=result.transaction_count,
     )
 
 
@@ -419,6 +426,26 @@ def get_transaction_ledger_suggestion(
     return suggest_for_bank_transaction(
         db, company_id, statement_id, transaction_id
     )
+
+
+@router.patch(
+    "/bank-statements/{statement_id}/transactions/{transaction_id}",
+    response_model=BankTransactionResponse,
+    summary="Correct bank-fact fields on a transaction",
+)
+def patch_transaction(
+    payload: BankTransactionUpdate,
+    statement_id: UUID = Path(description="Statement id, scoped to this company."),
+    company_id: UUID = Path(description="Owning company id."),
+    transaction_id: UUID = Path(description="Transaction id."),
+    db: Session = Depends(get_db),
+) -> BankTransactionResponse:
+    try:
+        return update_transaction(db, company_id, statement_id, transaction_id, payload)
+    except BankTransactionNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found"
+        ) from None
 
 
 @router.patch(

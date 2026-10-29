@@ -310,6 +310,19 @@ export const bankStatementsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  updateTransaction: (
+    companyId: string,
+    statementId: string,
+    transactionId: string,
+    body: Partial<BankTransactionWriteDto>,
+  ) =>
+    apiFetch<BankTransactionDto>(
+      `${base(companyId)}/${statementId}/transactions/${transactionId}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(body),
+      },
+    ),
   updateTransactionMapping: (
     companyId: string,
     statementId: string,

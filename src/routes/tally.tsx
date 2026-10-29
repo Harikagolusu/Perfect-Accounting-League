@@ -1,6 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { CircleDashed, FileCode, FileSpreadsheet, CheckCircle2, XCircle } from "lucide-react";
+import {
+  CircleDashed,
+  FileCode,
+  FileSpreadsheet,
+  CheckCircle2,
+  RefreshCw,
+  XCircle,
+} from "lucide-react";
 import {
   PageHeader,
   Section,
@@ -15,7 +22,15 @@ import { ApprovedVoucherExport } from "@/components/pal/approved-voucher-export"
 import { CompanyAccountingDefaults, LedgerMaster } from "@/components/pal/ledger-master";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { useCompany, useScoped, useStore } from "@/lib/store";
+import { useCompany, useStore } from "@/lib/store";
+import type { LedgerMapping } from "@/lib/types";
+import {
+  useTallyBankSync,
+  useTallyLatestSync,
+  useTallyMappingSync,
+  useTallyStatus,
+  useTallySync,
+} from "@/lib/queries/tally";
 import { PERIODS } from "@/lib/constants";
 import { exportFile } from "@/lib/export";
 import { seo } from "@/lib/seo";
@@ -35,7 +50,21 @@ const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm
 function TallyPage() {
   const s = useStore();
   const company = useCompany();
-  const mappings = useScoped(s.mappings);
+  // Vendor ledger mappings are persisted via the accounting-mappings API and
+  // shown in the Ledger Master panel below. This legacy export block has no
+  // session source, so it stays empty until it is wired to that API.
+  const mappings: LedgerMapping[] = [];
+  const {
+    data: tallyStatus,
+    isLoading: statusLoading,
+    isFetching: statusFetching,
+    isError: statusError,
+    refetch: refetchStatus,
+  } = useTallyStatus();
+  const syncMutation = useTallySync();
+  const bankSyncMutation = useTallyBankSync();
+  const mappingSyncMutation = useTallyMappingSync();
+  const { data: latestSync } = useTallyLatestSync(company?.id);
   const [cfg, setCfg] = useState({
     voucherType: "Purchase",
     tallyCompany: company?.legalName ?? "",
@@ -97,13 +126,6 @@ function TallyPage() {
       status: "Generated",
       target: "Tally",
     });
-    s.log({
-      module: "Tally Integration",
-      action: "Exported",
-      recordId: `${format}-${period}`,
-      previous: "—",
-      next: `${n} records`,
-    });
     toast.success(`${format} file downloaded (${n} records)`, {
       description:
         format === "XML"
@@ -119,18 +141,43 @@ function TallyPage() {
         description="Tally Prime configuration and voucher exports."
       />
       <InfoNotice>
-        No live Tally connection exists. The Tally import settings below are kept in this browser
-        session only. The Ledger Master, company ledger defaults and approved voucher export are
-        real backend records scoped to the active company.
+        {tallyStatus
+          ? tallyStatus.connected
+            ? `Live TallyPrime connection verified at ${tallyStatus.url}. The import settings below remain browser-session only.`
+            : "TallyPrime is not reachable. The import settings below remain browser-session only; this screen never changes Tally data."
+          : statusError
+            ? "The PAL backend could not be reached to check TallyPrime. The import settings below remain browser-session only."
+            : "Checking the TallyPrime connection. The import settings below remain browser-session only."}
       </InfoNotice>
       <div className="grid gap-4 lg:grid-cols-3">
         <Section title="Connection Status">
           <div className="mb-3 flex items-center gap-2 text-sm">
-            <CircleDashed className="h-4 w-4 text-muted-foreground" />{" "}
-            <StatusBadge status="Not connected" />
+            {tallyStatus?.connected ? (
+              <CheckCircle2 className="h-4 w-4 text-success" />
+            ) : (
+              <CircleDashed className="h-4 w-4 text-muted-foreground" />
+            )}
+            <StatusBadge status={tallyStatus?.connected ? "Connected" : "Not connected"} />
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => refetchStatus()}
+              disabled={statusFetching}
+            >
+              <RefreshCw className={statusFetching ? "animate-spin" : undefined} />
+              {statusFetching ? "Checking" : "Refresh"}
+            </Button>
           </div>
+          <KV k="Tally URL" v={tallyStatus?.url ?? "—"} />
           <KV k="Tally company" v={cfg.tallyCompany} />
           <KV k="Last synchronization" v="Never" />
+          <KV
+            k="Message"
+            v={
+              tallyStatus?.message ??
+              (statusLoading ? "Checking..." : statusError ? "Status unavailable" : "No status")
+            }
+          />
           <KV
             k="Configuration"
             v={<StatusBadge status={checks.every((c) => c.ok) ? "Approved" : "Pending"} />}
@@ -198,6 +245,194 @@ function TallyPage() {
               {c.label}
             </div>
           ))}
+        </Section>
+        <Section title="Sync from TallyPrime">
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Fetch ledgers from TallyPrime and add them to this company's ledger master. Existing
+              PAL data is never deleted.
+            </p>
+            <Button
+              onClick={() => {
+                if (!cfg.tallyCompany.trim())
+                  return toast.error("Enter a Tally company name first.");
+                syncMutation.mutate(
+                  { companyId: company.id, tallyCompanyName: cfg.tallyCompany },
+                  {
+                    onSuccess: (data) => {
+                      if (data.success) {
+                        toast.success(
+                          `Sync complete — ${data.ledgers_created} created, ${data.ledgers_updated} updated`,
+                        );
+                      } else {
+                        toast.error(`Sync failed: ${data.error_message}`);
+                      }
+                    },
+                    onError: (err) => toast.error(err.message),
+                  },
+                );
+              }}
+              disabled={syncMutation.isPending}
+            >
+              <RefreshCw className={syncMutation.isPending ? "animate-spin" : undefined} />
+              {syncMutation.isPending ? "Syncing…" : "Sync Ledgers"}
+            </Button>
+            {(syncMutation.data ?? latestSync?.sync) &&
+              (() => {
+                const r = syncMutation.data ?? latestSync?.sync!;
+                return (
+                  <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-1">
+                    <div className="flex items-center gap-2">
+                      {r.success ? (
+                        <CheckCircle2 className="h-4 w-4 text-success" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-destructive" />
+                      )}
+                      <span className="font-medium">
+                        {r.success ? "Last sync succeeded" : "Last sync failed"}
+                      </span>
+                      <span className="text-muted-foreground">
+                        {new Date(r.synced_at).toLocaleString()}
+                      </span>
+                    </div>
+                    {r.success ? (
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <KV k="Fetched" v={String(r.ledgers_fetched)} />
+                        <KV k="Created" v={String(r.ledgers_created)} />
+                        <KV k="Updated" v={String(r.ledgers_updated)} />
+                      </div>
+                    ) : (
+                      <p className="text-destructive text-xs">{r.error_message}</p>
+                    )}
+                  </div>
+                );
+              })()}
+          </div>
+        </Section>
+        <Section title="Learn Ledger Mappings from Tally History">
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Reads TallyPrime's existing purchase and sales vouchers and records which expense head
+              each party is already booked to, so new invoices map themselves instead of reporting
+              no history. Sync the ledger master first. A party booked to several heads with no
+              clear majority is left for a reviewer.
+            </p>
+            <Button
+              onClick={() => {
+                if (!cfg.tallyCompany.trim())
+                  return toast.error("Enter a Tally company name first.");
+                mappingSyncMutation.mutate(
+                  { companyId: company.id, tallyCompanyName: cfg.tallyCompany },
+                  {
+                    onSuccess: (data) => {
+                      if (data.success) {
+                        toast.success(
+                          `Learned ${data.mappings_created} new and updated ${data.mappings_updated} mapping(s) from ${data.vouchers_used} voucher(s)`,
+                        );
+                      } else {
+                        toast.error(`Mapping sync failed: ${data.error_message}`);
+                      }
+                    },
+                    onError: (err) => toast.error(err.message),
+                  },
+                );
+              }}
+              disabled={mappingSyncMutation.isPending}
+            >
+              <RefreshCw className={mappingSyncMutation.isPending ? "animate-spin" : undefined} />
+              {mappingSyncMutation.isPending ? "Reading history…" : "Learn from Tally History"}
+            </Button>
+            {mappingSyncMutation.data &&
+              (() => {
+                const r = mappingSyncMutation.data;
+                return (
+                  <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-2">
+                    <div className="flex items-center gap-2">
+                      {r.success ? (
+                        <CheckCircle2 className="h-4 w-4 text-success" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-destructive" />
+                      )}
+                      <span className="font-medium">
+                        {r.success ? "History read" : "Mapping sync failed"}
+                      </span>
+                    </div>
+                    {r.success ? (
+                      <div className="grid grid-cols-2 gap-2 text-center text-xs sm:grid-cols-5">
+                        <KV k="Vouchers used" v={`${r.vouchers_used} / ${r.vouchers_fetched}`} />
+                        <KV k="Parties" v={String(r.parties_seen)} />
+                        <KV k="Mapped" v={`${r.mappings_created}c / ${r.mappings_updated}u`} />
+                        <KV k="Left for review" v={String(r.mappings_skipped)} />
+                        <KV k="Your mappings kept" v={String(r.mappings_preserved)} />
+                      </div>
+                    ) : (
+                      <p className="text-xs text-destructive">{r.error_message}</p>
+                    )}
+                  </div>
+                );
+              })()}
+          </div>
+        </Section>
+        <Section title="Sync Bank Accounts from TallyPrime">
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              Import bank-account ledgers (group: Bank Accounts / Bank OD Account) from TallyPrime.
+              Newly created accounts use a placeholder account number — update the real number in
+              Bank Accounts after import.
+            </p>
+            <Button
+              onClick={() => {
+                if (!cfg.tallyCompany.trim())
+                  return toast.error("Enter a Tally company name first.");
+                bankSyncMutation.mutate(
+                  { companyId: company.id, tallyCompanyName: cfg.tallyCompany },
+                  {
+                    onSuccess: (data) => {
+                      if (data.success) {
+                        toast.success(
+                          `Bank sync complete — ${data.accounts_created} created, ${data.accounts_updated} updated`,
+                        );
+                      } else {
+                        toast.error(`Bank sync failed: ${data.error_message}`);
+                      }
+                    },
+                    onError: (err) => toast.error(err.message),
+                  },
+                );
+              }}
+              disabled={bankSyncMutation.isPending}
+            >
+              <RefreshCw className={bankSyncMutation.isPending ? "animate-spin" : undefined} />
+              {bankSyncMutation.isPending ? "Syncing…" : "Sync Bank Accounts"}
+            </Button>
+            {bankSyncMutation.data &&
+              (() => {
+                const r = bankSyncMutation.data;
+                return (
+                  <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-1">
+                    <div className="flex items-center gap-2">
+                      {r.success ? (
+                        <CheckCircle2 className="h-4 w-4 text-success" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-destructive" />
+                      )}
+                      <span className="font-medium">
+                        {r.success ? "Bank sync succeeded" : "Bank sync failed"}
+                      </span>
+                    </div>
+                    {r.success ? (
+                      <div className="grid grid-cols-3 gap-2 text-center">
+                        <KV k="Fetched" v={String(r.accounts_fetched)} />
+                        <KV k="Created" v={String(r.accounts_created)} />
+                        <KV k="Updated" v={String(r.accounts_updated)} />
+                      </div>
+                    ) : (
+                      <p className="text-destructive text-xs">{r.error_message}</p>
+                    )}
+                  </div>
+                );
+              })()}
+          </div>
         </Section>
         <Section title="Export Configuration">
           <div className="grid gap-3">

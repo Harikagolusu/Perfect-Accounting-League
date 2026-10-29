@@ -14,6 +14,7 @@ import {
   type DocumentStatus,
   type DocumentType,
 } from "@/lib/api/documents";
+import { auditKeys } from "@/lib/queries/accountingAudit";
 import type { InboxDocument } from "@/lib/types";
 
 export const documentKeys = {
@@ -45,7 +46,10 @@ export function useDocuments(
 function useInvalidateCompany(companyId: string | undefined) {
   const queryClient = useQueryClient();
   return () => {
-    if (companyId) queryClient.invalidateQueries({ queryKey: documentKeys.list(companyId) });
+    if (!companyId) return;
+    queryClient.invalidateQueries({ queryKey: documentKeys.list(companyId) });
+    // Upload and delete record audit events; refresh the activity views.
+    queryClient.invalidateQueries({ queryKey: auditKeys.list(companyId) });
   };
 }
 

@@ -36,7 +36,7 @@ Rules:
 """
 
 INVOICE_EXTRACTION_PROMPT = """\
-Extract the invoice header data from the supplied image(s).
+Extract the invoice data from the supplied image(s).
 
 Return one JSON object with exactly these keys:
 
@@ -49,6 +49,7 @@ Return one JSON object with exactly these keys:
   "vendor_gstin": null,
   "vendor_pan": null,
   "buyer_gstin": null,
+  "place_of_supply": null,
   "po_number": null,
   "currency": null,
   "taxable_amount": null,
@@ -56,16 +57,51 @@ Return one JSON object with exactly these keys:
   "sgst_amount": null,
   "igst_amount": null,
   "cess_amount": null,
+  "discount_amount": null,
+  "freight_amount": null,
   "round_off": null,
-  "total_amount": null
+  "total_amount": null,
+  "line_items": [
+    {
+      "line_number": 1,
+      "description": null,
+      "supply_type": null,
+      "hsn_sac": null,
+      "quantity": null,
+      "unit_rate": null,
+      "gst_rate": null,
+      "taxable_amount": null,
+      "cgst_amount": null,
+      "sgst_amount": null,
+      "igst_amount": null,
+      "cess_amount": null,
+      "total_amount": null
+    }
+  ]
 }
 
 Field notes:
 - is_invoice: true only when the document is actually an invoice. Otherwise
   false, with all data fields null.
+- invoice_date: the date the invoice was issued, whatever label it is printed
+  under. It may be labelled "Invoice Date", "Bill Date", "Dated", "Date",
+  "Dt.", "Invoice Dt.", "Date of Invoice", "Date of Issue", "Issue Date",
+  "Billing Date", "Voucher Date" or be printed beside the invoice number with
+  no label at all. Read it from whichever of these the document uses. Never
+  take it from a due/payment date, delivery or challan date, e-way bill date,
+  PO date, acknowledgement date, GSTIN registration date, or a date inside the
+  line-item table. If two or more dates could be the issue date and none is
+  distinguishable, return null.
 - currency: the ISO code printed on the invoice (for example "INR"), or null.
 - taxable_amount: the taxable/base value before tax, as printed.
 - total_amount: the invoice total, exactly as printed.
+- place_of_supply: the GST place of supply as printed (state name or code), or null.
+- discount_amount: a header-level discount printed separately from the line items, or null.
+- freight_amount: freight or other charges printed as a header-level addition, or null.
+- line_items: every line in the invoice table. Return [] if no table is visible.
+  For each line: description is the item name as printed; supply_type is "GOODS"
+  or "SERVICE" if labelled, else null; unit_rate is the printed rate per unit;
+  gst_rate is the GST percentage (e.g. 18.00), not an amount.
 - Invoice numbers and PO numbers: return the identifier as printed, with its
   own slashes, dashes and spacing preserved.
 - Do not add keys. Do not add explanations.
@@ -104,7 +140,7 @@ Rules:
 """
 
 INVOICE_TEXT_PROMPT = """\
-Extract the invoice header data from the document text below.
+Extract the invoice data from the document text below.
 
 Return one JSON object with exactly these keys:
 
@@ -117,6 +153,7 @@ Return one JSON object with exactly these keys:
   "vendor_gstin": null,
   "vendor_pan": null,
   "buyer_gstin": null,
+  "place_of_supply": null,
   "po_number": null,
   "currency": null,
   "taxable_amount": null,
@@ -124,16 +161,51 @@ Return one JSON object with exactly these keys:
   "sgst_amount": null,
   "igst_amount": null,
   "cess_amount": null,
+  "discount_amount": null,
+  "freight_amount": null,
   "round_off": null,
-  "total_amount": null
+  "total_amount": null,
+  "line_items": [
+    {
+      "line_number": 1,
+      "description": null,
+      "supply_type": null,
+      "hsn_sac": null,
+      "quantity": null,
+      "unit_rate": null,
+      "gst_rate": null,
+      "taxable_amount": null,
+      "cgst_amount": null,
+      "sgst_amount": null,
+      "igst_amount": null,
+      "cess_amount": null,
+      "total_amount": null
+    }
+  ]
 }
 
 Field notes:
 - is_invoice: true only when the document is actually an invoice. Otherwise
   false, with all data fields null.
+- invoice_date: the date the invoice was issued, whatever label it is printed
+  under. It may be labelled "Invoice Date", "Bill Date", "Dated", "Date",
+  "Dt.", "Invoice Dt.", "Date of Invoice", "Date of Issue", "Issue Date",
+  "Billing Date", "Voucher Date" or be printed beside the invoice number with
+  no label at all. Read it from whichever of these the document uses. Never
+  take it from a due/payment date, delivery or challan date, e-way bill date,
+  PO date, acknowledgement date, GSTIN registration date, or a date inside the
+  line-item table. If two or more dates could be the issue date and none is
+  distinguishable, return null.
 - currency: the ISO code printed on the invoice (for example "INR"), or null.
 - taxable_amount: the taxable/base value before tax, as printed.
 - total_amount: the invoice total, exactly as printed.
+- place_of_supply: the GST place of supply as printed (state name or code), or null.
+- discount_amount: a header-level discount printed separately from the line items, or null.
+- freight_amount: freight or other charges printed as a header-level addition, or null.
+- line_items: every line in the invoice table. Return [] if no table is visible.
+  For each line: description is the item name as printed; supply_type is "GOODS"
+  or "SERVICE" if labelled, else null; unit_rate is the printed rate per unit;
+  gst_rate is the GST percentage (e.g. 18.00), not an amount.
 - Invoice numbers and PO numbers: return the identifier as printed, with its
   own slashes, dashes and spacing preserved.
 - The candidate block is generated by simple pattern matching. It is not

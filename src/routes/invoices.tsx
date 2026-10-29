@@ -1,15 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import {
-  Check,
-  CheckCheck,
-  Download,
-  FileCode,
-  FileSpreadsheet,
-  Save,
-  Send,
-  X,
-} from "lucide-react";
+import { Check, Save, X } from "lucide-react";
 import {
   PageHeader,
   Section,
@@ -21,12 +12,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCompany, useStore } from "@/lib/store";
+import { useCompany } from "@/lib/store";
 import { useDocuments } from "@/lib/queries/documents";
 import { documentsApi } from "@/lib/api/documents";
 import {
-  canApproveData,
   invoiceToForm,
+  lineItemsSummary,
   mappingNeedsReview,
   toInvoicePayload,
   type InvoiceFormValues,
@@ -35,6 +26,7 @@ import {
   useConfirmVendorMapping,
   useCreateInvoice,
   useDeleteInvoice,
+  useInvoiceLineItems,
   useInvoices,
   useProcessInvoice,
   useUpdateInvoice,
@@ -43,8 +35,7 @@ import {
 import { useVendors } from "@/lib/queries/vendors";
 import { VendorMappingPanel } from "@/components/pal/vendor-mapping";
 import { InvoiceVoucherPanel } from "@/components/pal/invoice-voucher";
-import { downloadBlob, exportFile } from "@/lib/export";
-import { exportsApi, firstExportError } from "@/lib/api/exports";
+import { InvoiceLineItemsPanel } from "@/components/pal/invoice-line-items";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -62,7 +53,6 @@ export const Route = createFileRoute("/invoices")({
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 
 function InvoicePage() {
-  const s = useStore();
   const navigate = useNavigate();
   const { inv } = Route.useSearch();
   const company = useCompany();
@@ -85,9 +75,9 @@ function InvoicePage() {
     invoice?.id,
     invoice?.vendorMappingStatus === "AMBIGUOUS",
   );
+  const lineItems = useInvoiceLineItems(companyId, invoice?.id);
   const [form, setForm] = useState<InvoiceFormValues | null>(null);
   const [dirty, setDirty] = useState(false);
-  const [exportingClient, setExportingClient] = useState(false);
 
   useEffect(() => {
     setForm(invoice ? invoiceToForm(invoice) : null);
@@ -193,7 +183,7 @@ function InvoicePage() {
     );
   }
 
-  if (!invoices.length || !invoice || !form) {
+  if (!invoices.length || !inv || !invoice || !form) {
     const unlinked = (documents ?? []).filter((d) => !invoices.some((i) => i.documentId === d.id));
     return (
       <>
@@ -202,17 +192,23 @@ function InvoicePage() {
           Create a draft from a document and its blank fields are read automatically. Values are
           stored as read or typed; missing fields stay blank and nothing is inferred or corrected.
         </InfoNotice>
-        <div className="rounded-md border bg-card p-4">
-          <EmptyState
-            title="No invoices for this company"
-            hint={
-              unlinked.length
+        <div className="mb-4 rounded-md border bg-card p-4">
+          <div className="flex flex-col items-center justify-center gap-2 py-4 text-center">
+            <p className="text-sm font-medium text-foreground">
+              {!invoices.length
+                ? "No invoices for this company"
+                : invoices.every((i) => i.status === "PROCESSED")
+                  ? "All invoices processed"
+                  : "Select an invoice"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              {unlinked.length
                 ? "Choose a document below to start entering invoice data."
-                : "Upload a document in the Document Inbox first."
-            }
-          />
+                : "Upload a document in the Document Inbox first."}
+            </p>
+          </div>
           {unlinked.length > 0 && (
-            <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
               <span className="text-sm text-muted-foreground">Create an invoice from</span>
               <select
                 aria-label="Select document"
@@ -241,6 +237,41 @@ function InvoicePage() {
             </div>
           )}
         </div>
+        {invoices.length > 0 && (
+          <div className="mb-4 rounded-md border bg-card">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-left text-xs text-muted-foreground">
+                  <th className="px-4 py-2">Invoice</th>
+                  <th className="px-4 py-2">Vendor</th>
+                  <th className="px-4 py-2">Status</th>
+                  <th className="px-4 py-2"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {invoices.map((i) => (
+                  <tr key={i.id} className="border-b last:border-0 hover:bg-muted/40">
+                    <td className="px-4 py-2 font-medium">{i.invoiceNumber || "Unnumbered"}</td>
+                    <td className="px-4 py-2 text-muted-foreground">{i.vendorName || "—"}</td>
+                    <td className="px-4 py-2">
+                      <StatusBadge status={i.status.replace("_", " ")} />
+                    </td>
+                    <td className="px-4 py-2 text-right">
+                      {i.status !== "PROCESSED" && (
+                        <button
+                          className="text-xs text-primary underline"
+                          onClick={() => navigate({ to: "/invoices", search: { inv: i.id } })}
+                        >
+                          Open
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </>
     );
   }
@@ -249,6 +280,7 @@ function InvoicePage() {
     try {
       await deleteInvoice.mutateAsync(invoice.id);
       toast.success("Invoice rejected. The source document is still in the inbox.");
+      navigate({ to: "/invoices", search: {} });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not reject invoice");
     }
@@ -262,9 +294,6 @@ function InvoicePage() {
       toast.error(e instanceof Error ? e.message : "Could not update vendor mapping");
     }
   };
-
-  const assignedVendor = vendors?.find((vendor) => vendor.id === invoice.vendorId);
-  const fileRef = (form.invoiceNumber || invoice.id).replace(/[^a-zA-Z0-9._-]+/g, "_");
 
   const saveForm = async () => {
     await updateInvoice.mutateAsync({ id: invoice.id, body: toInvoicePayload(form) });
@@ -281,8 +310,12 @@ function InvoicePage() {
   };
 
   const approveData = async () => {
+    if (invoice.status === "PROCESSED") {
+      toast.warning("This invoice is already approved.");
+      return;
+    }
     if (mappingNeedsReview(invoice.vendorMappingStatus)) {
-      toast.error("Confirm or reject the vendor suggestion before approving the invoice data.");
+      toast.warning("Confirm or reject the vendor suggestion before approving the invoice data.");
       return;
     }
     try {
@@ -293,54 +326,10 @@ function InvoicePage() {
         await updateInvoice.mutateAsync({ id: invoice.id, body: { status: "PROCESSING" } });
       }
       await updateInvoice.mutateAsync({ id: invoice.id, body: { status: "PROCESSED" } });
-      s.log({
-        module: "Invoice Processing",
-        action: "Approved",
-        recordId: invoice.invoiceNumber ?? invoice.id,
-        previous: invoice.status,
-        next: "PROCESSED",
-      });
       toast.success("Invoice data approved");
+      navigate({ to: "/invoices", search: {} });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not approve invoice data");
-    }
-  };
-
-  const sendToReview = async () => {
-    try {
-      await saveForm();
-      await updateInvoice.mutateAsync({ id: invoice.id, body: { status: "NEEDS_REVIEW" } });
-      s.log({
-        module: "Invoice Processing",
-        action: "Sent to review",
-        recordId: invoice.invoiceNumber ?? invoice.id,
-        previous: invoice.status,
-        next: "NEEDS_REVIEW",
-      });
-      toast.success("Invoice sent to review");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not send invoice to review");
-    }
-  };
-
-  const approveLedgerMapping = async () => {
-    const vendorId = invoice.vendorId ?? invoice.suggestedVendorId;
-    if (!vendorId) {
-      toast.error("Choose a vendor in the Vendor Mapping section first.");
-      return;
-    }
-    try {
-      await confirmMapping.mutateAsync({ id: invoice.id, vendorId });
-      s.log({
-        module: "Invoice Processing",
-        action: "Ledger mapping approved",
-        recordId: invoice.invoiceNumber ?? invoice.id,
-        previous: invoice.vendorMappingStatus,
-        next: "CONFIRMED",
-      });
-      toast.success("Ledger mapping approved");
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not approve ledger mapping");
     }
   };
 
@@ -351,150 +340,6 @@ function InvoicePage() {
       return;
     }
     await remove();
-  };
-
-  const invoiceExportRow = {
-    VOUCHERDATE: form.invoiceDate,
-    VOUCHERTYPE: "Purchase",
-    VOUCHERNUMBER: form.invoiceNumber,
-    PARTYLEDGER: form.vendorName,
-    PARTYGSTIN: form.vendorGstin,
-    PURCHASELEDGER: assignedVendor?.defaultExpenseLedger ?? "",
-    TAXABLEVALUE: form.taxableAmount,
-    CGST: form.cgstAmount,
-    SGST: form.sgstAmount,
-    IGST: form.igstAmount,
-    CESS: form.cessAmount,
-    ROUNDOFF: form.roundOff,
-    INVOICETOTAL: form.totalAmount,
-  };
-
-  const exportTally = () => {
-    if (!form.invoiceNumber && !form.vendorName) {
-      toast.error("Enter invoice details before exporting.");
-      return;
-    }
-    const n = exportFile("XML", `Tally_Invoice_${fileRef}`, [invoiceExportRow]);
-    if (n == null) {
-      toast.error("Tally XML export is not available.");
-      return;
-    }
-    s.addExport({
-      name: `Invoice ${form.invoiceNumber || invoice.id}`,
-      type: "Invoices",
-      format: "XML",
-      records: n,
-      status: "Generated",
-      target: "Tally",
-    });
-    s.log({
-      module: "Invoice Processing",
-      action: "Exported for Tally",
-      recordId: invoice.invoiceNumber ?? invoice.id,
-      previous: invoice.status,
-      next: "XML",
-    });
-    toast.success("Tally XML downloaded");
-  };
-
-  const exportZoho = () => {
-    if (!form.invoiceNumber && !form.vendorName) {
-      toast.error("Enter invoice details before exporting.");
-      return;
-    }
-    const columns = [
-      "Bill Date",
-      "Bill Number",
-      "Vendor Name",
-      "GST Identification Number (GSTIN)",
-      "Account",
-      "Item Total",
-      "CGST",
-      "SGST",
-      "IGST",
-      "Cess",
-      "Round Off",
-      "Total",
-    ];
-    const row = {
-      "Bill Date": form.invoiceDate,
-      "Bill Number": form.invoiceNumber,
-      "Vendor Name": form.vendorName,
-      "GST Identification Number (GSTIN)": form.vendorGstin,
-      Account: assignedVendor?.defaultExpenseLedger ?? "",
-      "Item Total": form.taxableAmount,
-      CGST: form.cgstAmount,
-      SGST: form.sgstAmount,
-      IGST: form.igstAmount,
-      Cess: form.cessAmount,
-      "Round Off": form.roundOff,
-      Total: form.totalAmount,
-    };
-    const n = exportFile("CSV", `Zoho_Invoice_${fileRef}`, [row], columns);
-    if (n == null) {
-      toast.error("Zoho CSV export is not available.");
-      return;
-    }
-    s.addExport({
-      name: `Invoice ${form.invoiceNumber || invoice.id}`,
-      type: "Invoices",
-      format: "CSV",
-      records: n,
-      status: "Generated",
-      target: "Zoho Books",
-    });
-    s.log({
-      module: "Invoice Processing",
-      action: "Exported for Zoho",
-      recordId: invoice.invoiceNumber ?? invoice.id,
-      previous: invoice.status,
-      next: "CSV",
-    });
-    toast.success("Zoho CSV downloaded");
-  };
-
-  const exportClientFormat = async () => {
-    setExportingClient(true);
-    try {
-      const preview = await exportsApi.invoicePreview(companyId, invoice.id);
-      const blocking = preview.rows === 0 ? firstExportError(preview) : null;
-      if (blocking) {
-        toast.error(blocking);
-        return;
-      }
-      const file = await exportsApi.invoiceFile(companyId, invoice.id);
-      downloadBlob(file.filename, file.blob);
-      s.addExport({
-        name: `Invoice ${form.invoiceNumber || invoice.id}`,
-        type: "Invoices",
-        format: "XLSX",
-        records: preview.rows,
-        status: "Generated",
-        target: "Report",
-      });
-      s.log({
-        module: "Invoice Processing",
-        action: "Exported client invoice workbook",
-        recordId: invoice.invoiceNumber ?? invoice.id,
-        previous: invoice.status,
-        next: "XLSX",
-      });
-      if (preview.exceptions.length) {
-        toast.warning(
-          `Downloaded ${preview.rows} row(s); ${preview.exceptions.length} exception(s) were excluded.`,
-        );
-      } else if (preview.warnings.length) {
-        toast.warning(
-          `Downloaded ${preview.rows} row(s) with ${preview.warnings.length} warning(s).`,
-        );
-      } else {
-        toast.success(`Client invoice workbook downloaded (${preview.rows} row(s))`);
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not export the client workbook");
-    } finally {
-      setExportingClient(false);
-    }
   };
 
   return (
@@ -526,6 +371,19 @@ function InvoicePage() {
         Review status: <StatusBadge status={invoice.status.replace("_", " ")} /> Source:{" "}
         <StatusBadge status={invoice.source === "MANUAL" ? "Manual entry" : invoice.source} />
       </div>
+
+      {invoice.validationIssues.length > 0 && (
+        <div className="mb-3 rounded-md border border-warning/40 bg-warning/5 p-3">
+          <p className="text-xs font-semibold text-foreground">
+            Extraction needs review — figures are shown exactly as read, not corrected
+          </p>
+          <ul className="mt-1 space-y-1 text-xs text-muted-foreground">
+            {invoice.validationIssues.map((issue) => (
+              <li key={issue}>{issue}</li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-[minmax(320px,2fr)_3fr]">
         <Section title="Source Document" className="self-start xl:sticky xl:top-4">
@@ -694,12 +552,11 @@ function InvoicePage() {
             </p>
           </Section>
 
-          <Section title="Line Items">
-            <EmptyState
-              title="Line items are not captured yet"
-              hint="They arrive with a later step; this invoice currently holds header amounts only."
-            />
-          </Section>
+          <InvoiceLineItemsPanel
+            key={`lines-${invoice.id}`}
+            companyId={companyId}
+            invoiceId={invoice.id}
+          />
 
           <Section title="Vendor Mapping">
             <VendorMappingPanel
@@ -716,6 +573,7 @@ function InvoicePage() {
               onMap={mapVendor}
               pending={confirmMapping.isPending}
               error={confirmMapping.error instanceof Error ? confirmMapping.error.message : null}
+              particulars={lineItemsSummary(lineItems.data ?? [])}
             />
           </Section>
 
@@ -726,74 +584,21 @@ function InvoicePage() {
           />
 
           <div className="sticky bottom-0 flex flex-col gap-2 rounded-md border bg-card p-3">
-            <div className="flex flex-wrap gap-2">
+            {/* Approve Data leads; Reject sits apart so it is never a misclick. */}
+            <div className="flex flex-wrap items-center gap-2">
               <Button
-                variant="outline"
-                onClick={saveDraft}
-                disabled={!dirty || updateInvoice.isPending || processInvoice.isPending}
-              >
-                <Save />
-                Save Draft
-              </Button>
-              <Button
+                size="sm"
+                className="flex-1"
                 onClick={approveData}
-                disabled={
-                  updateInvoice.isPending || processInvoice.isPending || !canApproveData(invoice)
-                }
+                disabled={updateInvoice.isPending || processInvoice.isPending}
               >
                 <Check />
                 Approve Data
               </Button>
               <Button
-                variant="secondary"
-                onClick={approveLedgerMapping}
-                disabled={
-                  confirmMapping.isPending ||
-                  processInvoice.isPending ||
-                  invoice.vendorMappingStatus === "CONFIRMED" ||
-                  !(invoice.vendorId ?? invoice.suggestedVendorId)
-                }
-              >
-                <CheckCheck />
-                Approve Ledger Mapping
-              </Button>
-              <Button
-                variant="outline"
-                onClick={sendToReview}
-                disabled={
-                  updateInvoice.isPending ||
-                  processInvoice.isPending ||
-                  invoice.status === "PROCESSED"
-                }
-              >
-                <Send />
-                Send to Review
-              </Button>
-            </div>
-            {mappingNeedsReview(invoice.vendorMappingStatus) && (
-              <p className="text-xs text-muted-foreground">
-                Confirm or reject the vendor suggestion before approving the invoice data.
-              </p>
-            )}
-            <div className="flex flex-wrap gap-2">
-              <Button variant="outline" onClick={exportTally} disabled={processInvoice.isPending}>
-                <FileCode />
-                Export for Tally
-              </Button>
-              <Button variant="outline" onClick={exportZoho} disabled={processInvoice.isPending}>
-                <FileSpreadsheet />
-                Export for Zoho
-              </Button>
-              <Button
-                variant="outline"
-                onClick={exportClientFormat}
-                disabled={processInvoice.isPending || exportingClient}
-              >
-                <Download />
-                Client Excel
-              </Button>
-              <Button
+                size="sm"
                 variant="destructive"
+                className="flex-1"
                 onClick={rejectInvoice}
                 disabled={deleteInvoice.isPending || processInvoice.isPending}
               >
@@ -801,6 +606,23 @@ function InvoicePage() {
                 Reject
               </Button>
             </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                className="flex-1"
+                onClick={saveDraft}
+                disabled={!dirty || updateInvoice.isPending || processInvoice.isPending}
+              >
+                <Save />
+                Save Draft
+              </Button>
+            </div>
+            {mappingNeedsReview(invoice.vendorMappingStatus) && (
+              <p className="text-xs text-muted-foreground">
+                Confirm or reject the vendor suggestion before approving the invoice data.
+              </p>
+            )}
           </div>
         </div>
       </div>

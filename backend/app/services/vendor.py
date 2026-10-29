@@ -16,7 +16,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.vendor import Vendor, VendorStatus
+from app.models.voucher import AccountingEntityType
 from app.schemas.vendor import VendorCreate, VendorUpdate
+from app.services.accounting_audit import record_event
 from app.services.company import get_company
 
 
@@ -62,6 +64,15 @@ def create_vendor(
     get_company(db, company_id)
     vendor = Vendor(company_id=company_id, **data.model_dump())
     db.add(vendor)
+    record_event(
+        db,
+        company_id=company_id,
+        entity_type=AccountingEntityType.VENDOR,
+        entity_id=vendor.id,
+        event_type="VENDOR_CREATED",
+        new_value=vendor.name,
+        reason="Vendor added to the Vendor Master.",
+    )
     db.commit()
     db.refresh(vendor)
     return vendor
@@ -69,8 +80,24 @@ def create_vendor(
 
 def update_vendor(db: Session, vendor: Vendor, data: VendorUpdate) -> Vendor:
     """Apply only the fields the client actually sent."""
+    changed = [
+        field
+        for field, value in data.model_dump(exclude_unset=True).items()
+        if getattr(vendor, field) != value
+    ]
     for field, value in data.model_dump(exclude_unset=True).items():
         setattr(vendor, field, value)
+    if changed:
+        record_event(
+            db,
+            company_id=vendor.company_id,
+            entity_type=AccountingEntityType.VENDOR,
+            entity_id=vendor.id,
+            event_type="VENDOR_UPDATED",
+            new_value=vendor.name,
+            reason="Vendor Master edited.",
+            metadata={"fields": changed},
+        )
     db.commit()
     db.refresh(vendor)
     return vendor
@@ -79,6 +106,16 @@ def update_vendor(db: Session, vendor: Vendor, data: VendorUpdate) -> Vendor:
 def deactivate_vendor(db: Session, vendor: Vendor) -> Vendor:
     """Soft delete: set status to INACTIVE, keeping the record for audit."""
     vendor.status = VendorStatus.INACTIVE
+    record_event(
+        db,
+        company_id=vendor.company_id,
+        entity_type=AccountingEntityType.VENDOR,
+        entity_id=vendor.id,
+        event_type="VENDOR_DEACTIVATED",
+        new_status=VendorStatus.INACTIVE.value,
+        new_value=vendor.name,
+        reason="Vendor deactivated.",
+    )
     db.commit()
     db.refresh(vendor)
     return vendor

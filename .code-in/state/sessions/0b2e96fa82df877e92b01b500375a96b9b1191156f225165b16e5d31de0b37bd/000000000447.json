@@ -1,0 +1,1 @@
+{"id":"e2008b55-db5d-4faf-afc8-a1dcf2df0915","change":{"type":"verification","change":{"action":"verify","expectedRevision":78,"scopes":["static"],"evidence":{"tool":"run_tests","callId":"call_abdfcbe0a2f94e198c03f3fa"}}},"previous":"3ffef1551e23f01bfafd46021eaedae501512e22020d7008f98674d08547f95f","hash":"be0c8d2db9a47eadd6f321ccc50c599512a1f00c8db7389774837db2e9827c72"}

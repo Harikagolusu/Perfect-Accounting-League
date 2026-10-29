@@ -26,9 +26,19 @@ interface VendorMappingPanelProps {
   onMap: (vendorId: string) => void;
   pending?: boolean;
   error?: string | null;
+  /** What this invoice is for, from its line items. Shown when the vendor has no expense ledger. */
+  particulars?: string;
 }
 
-function Grouping({ vendor, pending }: { vendor: Vendor; pending?: boolean }) {
+function Grouping({
+  vendor,
+  pending,
+  particulars,
+}: {
+  vendor: Vendor;
+  pending?: boolean;
+  particulars?: string;
+}) {
   return (
     <div className="mt-3 grid gap-2 text-sm md:grid-cols-3">
       <div>
@@ -36,8 +46,10 @@ function Grouping({ vendor, pending }: { vendor: Vendor; pending?: boolean }) {
         <div>{vendor.parentGroup || "Not configured"}</div>
       </div>
       <div>
-        <div className="text-xs text-muted-foreground">Default Expense Ledger</div>
-        <div>{vendor.defaultExpenseLedger || "Not configured"}</div>
+        <div className="text-xs text-muted-foreground">Particulars</div>
+        <div title={particulars || undefined}>
+          {vendor.defaultExpenseLedger || particulars || "Not configured"}
+        </div>
       </div>
       <div>
         <div className="text-xs text-muted-foreground">Sundry Creditor Ledger</div>
@@ -73,6 +85,7 @@ export function VendorMappingPanel({
   onMap,
   pending = false,
   error = null,
+  particulars = "",
 }: VendorMappingPanelProps) {
   const [choice, setChoice] = useState("");
 
@@ -104,7 +117,7 @@ export function VendorMappingPanel({
               Previously mapped to {previous.name}.
             </p>
           )}
-          <Grouping vendor={assigned} />
+          <Grouping vendor={assigned} particulars={particulars} />
         </div>
       ) : assignedMissing ? (
         <p className="text-sm text-muted-foreground">
@@ -122,7 +135,7 @@ export function VendorMappingPanel({
               ledger in the Vendor Master after confirming the identity.
             </p>
           )}
-          <Grouping vendor={suggested} pending />
+          <Grouping vendor={suggested} pending particulars={particulars} />
           <div className="mt-3 flex flex-wrap gap-2">
             <Button
               size="sm"

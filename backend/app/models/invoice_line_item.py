@@ -80,6 +80,7 @@ class InvoiceLineItem(Base):
     supply_type: Mapped[str | None] = mapped_column(String(16))
     hsn_sac: Mapped[str | None] = mapped_column(String(16))
     quantity: Mapped[Decimal | None] = mapped_column(QUANTITY)
+    unit_rate: Mapped[Decimal | None] = mapped_column(MONEY)
     gst_rate: Mapped[Decimal | None] = mapped_column(GST_RATE)
 
     taxable_amount: Mapped[Decimal | None] = mapped_column(MONEY)

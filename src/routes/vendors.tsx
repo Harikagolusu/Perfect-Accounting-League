@@ -14,7 +14,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { useCompany, useStore } from "@/lib/store";
+import { useCompany } from "@/lib/store";
+import { useAccountingAudit } from "@/lib/queries/accountingAudit";
 import { fmtDate, GSTIN_RE, PAN_RE } from "@/lib/format";
 import {
   useCreateVendor,
@@ -37,7 +38,6 @@ const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm
 const lastUsed = (vendor: Vendor) => (vendor.lastUsed ? fmtDate(vendor.lastUsed) : "—");
 
 function VendorDialog({ initial, onClose }: { initial: Vendor | null; onClose: () => void }) {
-  const s = useStore();
   const company = useCompany();
   const createVendor = useCreateVendor(company?.id);
   const updateVendor = useUpdateVendor(company?.id);
@@ -73,13 +73,6 @@ function VendorDialog({ initial, onClose }: { initial: Vendor | null; onClose: (
     try {
       if (wasExisting) await updateVendor.mutateAsync(v);
       else await createVendor.mutateAsync({ ...v, id: "" });
-      s.log({
-        module: "Vendor Master",
-        action: wasExisting ? "Updated" : "Created",
-        recordId: f.gstin || f.name,
-        previous: "—",
-        next: v.defaultExpenseLedger || v.name,
-      });
       toast.success(wasExisting ? "Vendor updated" : "Vendor added");
       onClose();
     } catch (e2) {
@@ -160,10 +153,11 @@ function VendorDialog({ initial, onClose }: { initial: Vendor | null; onClose: (
 }
 
 function VendorsPage() {
-  const s = useStore();
   const company = useCompany();
   const companyId = company?.id;
   const { data, isPending, isError, error, refetch } = useVendors(companyId);
+  const { data: audit = [] } = useAccountingAudit(companyId);
+  const vendorActivity = audit.filter((a) => a.module === "Vendor Master");
   const deactivate = useDeactivateVendor(companyId);
   const [status, setStatus] = useState("All");
   const [editing, setEditing] = useState<Vendor | null | undefined>(undefined);
@@ -175,13 +169,6 @@ function VendorsPage() {
     try {
       await deactivate.mutateAsync(row.id);
       toast.success(`${row.name} deactivated`);
-      s.log({
-        module: "Vendor Master",
-        action: "Deactivated",
-        recordId: row.gstin || row.name,
-        previous: row.status,
-        next: "Inactive",
-      });
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not deactivate vendor");
     }
@@ -333,17 +320,13 @@ function VendorsPage() {
                 <KV k="Transactions" v={history.transactions} />
                 <KV k="Last used" v={lastUsed(history)} />
               </div>
-              <h3 className="font-semibold">Session activity</h3>
-              {s.audit
-                .filter((a) => a.companyId === s.companyId && a.module === "Vendor Master")
-                .slice(0, 4)
-                .map((a) => (
-                  <div key={a.id} className="text-xs text-muted-foreground">
-                    {a.timestamp} — {a.user} {a.action.toLowerCase()} {a.recordId}
-                  </div>
-                ))}
-              {!s.audit.filter((a) => a.companyId === s.companyId && a.module === "Vendor Master")
-                .length && <EmptyState title="No activity in this session" />}
+              <h3 className="font-semibold">Recent activity</h3>
+              {vendorActivity.slice(0, 4).map((a) => (
+                <div key={a.id} className="text-xs text-muted-foreground">
+                  {a.timestamp} — {a.user} {a.action.toLowerCase()} {a.recordId}
+                </div>
+              ))}
+              {!vendorActivity.length && <EmptyState title="No vendor activity yet" />}
             </div>
           )}
         </SheetContent>

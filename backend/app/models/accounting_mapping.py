@@ -52,6 +52,11 @@ class AccountingMappingMatchType(str, enum.Enum):
     RULE = "RULE"
 
 
+#: `transaction_context` value stamped on a mapping learned from TallyPrime's
+#: own voucher history. Anything else is a mapping a person set up, which takes
+#: priority and is never rewritten by a sync.
+TALLY_HISTORY_CONTEXT = "TALLY_HISTORY"
+
 MAPPING_SOURCE_TYPE_ENUM = SAEnum(
     AccountingMappingSourceType,
     name="accounting_mapping_source_type",
@@ -133,4 +138,5 @@ __all__ = [
     "AccountingMappingSourceType",
     "MAPPING_MATCH_TYPE_ENUM",
     "MAPPING_SOURCE_TYPE_ENUM",
+    "TALLY_HISTORY_CONTEXT",
 ]

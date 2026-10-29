@@ -1,0 +1,139 @@
+{
+  "version": 2,
+  "id": "4ccd4694-3a1e-4f0d-9eb7-4706bd24d176",
+  "action": "Browser flow",
+  "revision": {
+    "scope": ".",
+    "digest": "f7ed6277e8d1ba67afa3c6e5e4d377e96521d9c74f030522b9d093732171ca23",
+    "complete": true,
+    "files": 360,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/tally"
+    },
+    "finalUrl": "http://localhost:8080/tally",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectVisible",
+        "ok": true,
+        "expectation": {
+          "selector": "body"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "label": "dashboard-loads",
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/be7b7b1a-090e-4b41-83d4-ce47dc072cc2/1.jpg"
+      },
+      {
+        "label": "tally-page",
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/be7b7b1a-090e-4b41-83d4-ce47dc072cc2/2.jpg"
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectVisible",
+        "passed": true
+      }
+    ]
+  }
+}

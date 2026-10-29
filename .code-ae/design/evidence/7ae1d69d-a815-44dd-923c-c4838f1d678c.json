@@ -1,0 +1,148 @@
+{
+  "version": 2,
+  "id": "7ae1d69d-a815-44dd-923c-c4838f1d678c",
+  "action": "capture",
+  "revision": {
+    "scope": "src",
+    "digest": "5bce1ba87b10dcf2704d8ff1c80ab5d587853dd8b12cfa8920e36fa870aa5c58",
+    "complete": true,
+    "files": 127,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": false,
+    "url": "http://localhost:8080/invoices",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/review"
+    },
+    "finalUrl": "http://localhost:8080/review",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Invoice"
+        },
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/bank",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/bank"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Bank"
+        },
+        "url": "http://localhost:8080/bank",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/bank"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": false,
+        "expectation": {
+          "text": "oucher"
+        },
+        "detail": "page.waitForFunction: Timeout 45000ms exceeded.",
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow FAILED. Read the failing step, application console/page errors and unexpected HTTP failures — those are observed browser failures. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_4.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_6.expectText",
+        "passed": false
+      }
+    ]
+  }
+}

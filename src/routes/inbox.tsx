@@ -77,13 +77,6 @@ function InboxPage() {
     try {
       await remove.mutateAsync(doc.id);
       toast.success(`${doc.name} deleted`);
-      s.log({
-        module: "Document Inbox",
-        action: "Deleted",
-        recordId: doc.name,
-        previous: doc.status,
-        next: "—",
-      });
       if (preview?.id === doc.id) setPreview(null);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not delete document");

@@ -18,6 +18,7 @@ from app.schemas.voucher import (
     VoucherExportRequest,
     VoucherFromBankRequest,
     VoucherFromInvoiceRequest,
+    VoucherPostResponse,
     VoucherResponse,
     VoucherUpdate,
 )
@@ -44,6 +45,7 @@ from app.services.voucher import (
     verify_posting,
 )
 from app.services.voucher_export import voucher_export_file, voucher_export_preview
+from app.services.voucher_posting import post_voucher_to_tally
 from app.services.voucher_factory import (
     create_voucher_from_bank_transaction,
     create_voucher_from_invoice,
@@ -219,6 +221,7 @@ def get_export_preview(
     company_id: UUID = Path(description="Owning company id."),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
+    posting_month: date | None = Query(default=None),
     db: Session = Depends(get_db),
     _company=Depends(company_or_404),
 ):
@@ -227,6 +230,7 @@ def get_export_preview(
         company_id,
         date_from=date_from,
         date_to=date_to,
+        posting_month=posting_month,
     )
 
 
@@ -244,6 +248,7 @@ def post_export(
         voucher_ids=body.voucher_ids,
         date_from=body.date_from,
         date_to=body.date_to,
+        posting_month=body.posting_month,
         actor=body.actor or actor,
     )
     return _download_response(result.content, result.filename)
@@ -405,9 +410,64 @@ def post_export_one(
         db,
         voucher.company_id,
         voucher_ids=[voucher.id],
+        posting_month=(body.posting_month if body else None),
         actor=(body.actor if body else actor),
     )
     return _download_response(result.content, result.filename)
+
+
+@router.post(
+    "/{voucher_id}/post-to-tally",
+    response_model=VoucherPostResponse,
+    summary="Post one approved voucher directly into TallyPrime",
+)
+def post_voucher_to_tally_endpoint(
+    body: VoucherActionRequest | None = None,
+    voucher: Voucher = Depends(voucher_or_404),
+    db: Session = Depends(get_db),
+    actor: str = Depends(get_actor),
+) -> VoucherPostResponse:
+    """Build the voucher's Tally XML and send it to the connected instance.
+
+    No file is produced: XML is the transport only. Only an APPROVED voucher
+    posts, and a POSTING_FAILED one may be retried. A voucher already POSTED
+    returns its stored reference without contacting Tally, so repeated clicks
+    cannot create a duplicate in Tally.
+
+    A Tally rejection or a connectivity failure answers HTTP 200 with
+    success=false so the UI can show the reason and offer a retry; the voucher
+    is left in POSTING_FAILED and is never marked POSTED.
+    """
+    try:
+        result = post_voucher_to_tally(
+            db,
+            voucher.company_id,
+            voucher.id,
+            actor=(body.actor if body else actor),
+            posting_month=(body.posting_month if body else None),
+        )
+    except VoucherTransitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "APPROVAL_REQUIRED",
+                "message": str(exc),
+                "issues": [],
+            },
+        )
+    except VoucherValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": exc.code, "message": exc.message, "issues": []},
+        )
+    return VoucherPostResponse(
+        success=result.success,
+        voucher_id=result.voucher_id,
+        status=result.status,
+        tally_reference=result.tally_reference,
+        already_posted=result.already_posted,
+        message=result.message,
+    )
 
 
 @router.post(

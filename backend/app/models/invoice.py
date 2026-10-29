@@ -213,6 +213,8 @@ class Invoice(Base):
     sgst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     igst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     cess_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    discount_amount: Mapped[Decimal | None] = mapped_column(MONEY)
+    freight_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     round_off: Mapped[Decimal | None] = mapped_column(MONEY)
     total_amount: Mapped[Decimal | None] = mapped_column(MONEY)
 

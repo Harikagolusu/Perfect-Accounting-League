@@ -273,6 +273,29 @@ class BankTransactionResponse(TimestampedResponse):
     transaction_type: TransactionType
 
 
+class BankTransactionUpdate(BaseModel):
+    """Payload for PATCH on a transaction's bank-fact fields.
+
+    Only supplied fields are applied. Counterparty/mapping fields are handled
+    by the separate mapping endpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    transaction_date: date | None = None
+    value_date: date | None = None
+    description: str | None = None
+    reference_number: str | None = Field(default=None, max_length=128)
+    debit_amount: Money | None = None
+    credit_amount: Money | None = None
+    balance: Money | None = None
+
+    @field_validator("description", "reference_number", mode="before")
+    @classmethod
+    def _clean(cls, value: Any) -> str | None:
+        return clean_optional(value)
+
+
 class ProcessStatementResponse(BaseModel):
     """Result of asking the system to parse a statement automatically."""
 
@@ -294,6 +317,7 @@ __all__ = [
     "BankTransactionCreate",
     "BankTransactionMappingUpdate",
     "BankTransactionResponse",
+    "BankTransactionUpdate",
     "ProcessStatementResponse",
     "mask_account_number",
 ]

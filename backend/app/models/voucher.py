@@ -85,6 +85,9 @@ class AccountingEntityType(str, enum.Enum):
     VOUCHER = "VOUCHER"
     LEDGER = "LEDGER"
     MAPPING = "MAPPING"
+    INVOICE = "INVOICE"
+    VENDOR = "VENDOR"
+    DOCUMENT = "DOCUMENT"
 
 
 VOUCHER_STATUS_ENUM = SAEnum(

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
-import { Download, Plus, Save, Sparkles, Trash2 } from "lucide-react";
+import { Download, Plus, RefreshCw, Save, Sparkles, Trash2 } from "lucide-react";
 import {
   PageHeader,
   StatusBadge,
@@ -16,10 +16,19 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useCompany } from "@/lib/store";
+import { useTallyBankDataSync } from "@/lib/queries/tally";
 import { fmtDate, fmtMoney, compareMoney } from "@/lib/format";
 import { downloadBlob, exportFile } from "@/lib/export";
 import { BankVoucherPanel } from "@/components/pal/bank-voucher";
+import { cn } from "@/lib/utils";
 import { exportsApi, firstExportError } from "@/lib/api/exports";
 import {
   bankAccountLabel,
@@ -46,6 +55,7 @@ import {
   useCreateBankTransaction,
   useDeleteBankStatement,
   useProcessBankStatement,
+  useUpdateBankTransaction,
 } from "@/lib/queries/bankStatements";
 import { useDocuments, useUploadDocuments } from "@/lib/queries/documents";
 import { seo } from "@/lib/seo";
@@ -62,6 +72,24 @@ export const Route = createFileRoute("/bank")({
 
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 const dash = (v: string | null | undefined) => (v ? v : "—");
+/** Indian-grouped amount with a rupee sign; blank stays blank. */
+const inr = (v: string | null | undefined) => {
+  const grouped = fmtMoney(v);
+  return grouped === "—" ? "—" : `₹${grouped}`;
+};
+
+/**
+ * A readable narration derived from the identified counterparty and the
+ * direction the bank recorded. No AI, no stored "cleaned" field: it is the
+ * confirmed counterparty phrased for a human. `known` is false when the
+ * extractor has not identified a counterparty yet.
+ */
+const cleanedNarration = (t: UiBankTransaction): { text: string; known: boolean } => {
+  const name = t.counterpartyName || t.counterpartyLedger;
+  if (!name) return { text: "— counterparty unknown", known: false };
+  const isCredit = t.creditAmount !== "0.00";
+  return { text: `${isCredit ? "Receipt from" : "Payment to"} ${name}`, known: true };
+};
 
 const emptyAccountForm: BankAccountFormValues = {
   bankName: "",
@@ -109,6 +137,14 @@ function BankPage() {
   const createTransaction = useCreateBankTransaction(companyId);
   const deleteStatement = useDeleteBankStatement(companyId);
   const processStatement = useProcessBankStatement(companyId);
+  const updateTransaction = useUpdateBankTransaction(companyId);
+
+  const tallySyncMutation = useTallyBankDataSync();
+  const [tallyCfg, setTallyCfg] = useState({
+    tallyCompany: company?.legalName ?? "",
+    fromDate: "",
+    toDate: "",
+  });
 
   const accounts = useMemo(() => accountsQuery.data ?? [], [accountsQuery.data]);
   const statements = useMemo(() => statementsQuery.data ?? [], [statementsQuery.data]);
@@ -124,13 +160,32 @@ function BankPage() {
   const [dFrom, setDFrom] = useState("");
   const [dTo, setDTo] = useState("");
   const [open, setOpen] = useState<UiBankTransaction | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editForm, setEditForm] = useState<TransactionFormValues>(emptyTransactionForm);
+  const [showAddForm, setShowAddForm] = useState(false);
   const [exportingClient, setExportingClient] = useState(false);
+  const [tallyOpen, setTallyOpen] = useState(false);
+  const [accountsOpen, setAccountsOpen] = useState(false);
 
   // Follow the company: a switch must not leave another company's selection.
   useEffect(() => {
     setStatementId("");
     setStatementForm((f) => ({ ...f, bankAccountId: "" }));
-  }, [companyId]);
+    setTallyCfg((c) => ({ ...c, tallyCompany: company?.legalName ?? "" }));
+  }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Pre-fill Tally company name from the loaded company record.
+  useEffect(() => {
+    if (company?.legalName)
+      setTallyCfg((c) => (c.tallyCompany ? c : { ...c, tallyCompany: company.legalName }));
+  }, [company?.legalName]);
+
+  // Auto-select the bank account when there is exactly one active account.
+  useEffect(() => {
+    const active = accounts.filter((a) => a.isActive);
+    if (active.length === 1)
+      setStatementForm((f) => (f.bankAccountId ? f : { ...f, bankAccountId: active[0].id }));
+  }, [accounts]);
 
   // Keep a valid selection as statements come and go.
   useEffect(() => {
@@ -152,8 +207,7 @@ function BankPage() {
     return type === "All" ? rows : rows.filter((t) => t.transactionType === type.toUpperCase());
   }, [transactionsQuery.data, type]);
 
-  const loading =
-    accountsQuery.isPending || statementsQuery.isPending || transactionsQuery.isPending;
+  const loading = accountsQuery.isPending || statementsQuery.isPending;
   const failed = accountsQuery.isError || statementsQuery.isError || transactionsQuery.isError;
 
   const setAccountField = (k: keyof BankAccountFormValues, v: string) =>
@@ -206,9 +260,14 @@ function BankPage() {
       setFile(null);
       setStatementId(created.id);
       setStatementForm(emptyStatementForm);
-      toast.success("Statement uploaded", {
-        description: "Stored as a document. No parser has read it — add transactions by hand.",
-      });
+      toast.success("Statement uploaded — extracting transactions…");
+      try {
+        const result = await processStatement.mutateAsync(created.id);
+        toast[result.configured ? "success" : "info"](result.message);
+        for (const issue of result.issues) toast.warning(issue);
+      } catch {
+        toast.warning("Extraction failed. Use the Extract button to retry.");
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not upload statement");
     }
@@ -253,6 +312,51 @@ function BankPage() {
     }
   };
 
+  const openEdit = (txn: UiBankTransaction) => {
+    setEditForm({
+      transactionDate: txn.transactionDate,
+      valueDate: txn.valueDate ?? "",
+      description: txn.description ?? "",
+      referenceNumber: txn.referenceNumber ?? "",
+      debitAmount: txn.debitAmount !== "0.00" ? txn.debitAmount : "",
+      creditAmount: txn.creditAmount !== "0.00" ? txn.creditAmount : "",
+      balance: txn.balance ?? "",
+      counterpartyName: txn.counterpartyName ?? "",
+      counterpartyLedger: txn.counterpartyLedger ?? "",
+      counterpartyAddress: txn.counterpartyAddress ?? "",
+      counterpartyPincode: txn.counterpartyPincode ?? "",
+      counterpartyGstin: txn.counterpartyGstin ?? "",
+      isInterAccountTransfer: txn.isInterAccountTransfer,
+    });
+    setEditing(true);
+  };
+
+  const saveEdit = async () => {
+    if (!open || !statement) return;
+    if (!editForm.transactionDate) return toast.error("Transaction date is required.");
+    try {
+      const body: Record<string, unknown> = {
+        transaction_date: editForm.transactionDate || undefined,
+        value_date: editForm.valueDate || undefined,
+        description: editForm.description || undefined,
+        reference_number: editForm.referenceNumber || undefined,
+        debit_amount: editForm.debitAmount || undefined,
+        credit_amount: editForm.creditAmount || undefined,
+        balance: editForm.balance || undefined,
+      };
+      const updated = await updateTransaction.mutateAsync({
+        statementId: statement.id,
+        transactionId: open.id,
+        body,
+      });
+      setOpen(updated);
+      setEditing(false);
+      toast.success("Transaction updated");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not update transaction");
+    }
+  };
+
   const runExtraction = async () => {
     if (!statement) return;
     try {
@@ -265,14 +369,15 @@ function BankPage() {
     }
   };
 
-  const exportCsv = () => {
+  const exportRows = (rows: UiBankTransaction[]) => {
     const n = exportFile(
       "CSV",
       `bank_transactions_${statement?.id ?? "none"}`,
-      transactions.map((t) => ({
+      rows.map((t) => ({
         Date: t.transactionDate,
         ValueDate: t.valueDate ?? "",
-        Narration: t.description ?? "",
+        RawNarration: t.description ?? "",
+        CleanedNarration: t.counterpartyName ?? t.counterpartyLedger ?? "",
         Reference: t.referenceNumber ?? "",
         Debit: t.debitAmount,
         Credit: t.creditAmount,
@@ -282,6 +387,8 @@ function BankPage() {
     );
     toast.success(`Exported ${n} transactions`);
   };
+
+  const exportCsv = () => exportRows(transactions);
 
   const exportClientBank = async () => {
     if (!companyId) return;
@@ -321,57 +428,81 @@ function BankPage() {
   };
 
   const columns: Column<UiBankTransaction>[] = [
-    { key: "transactionDate", header: "Txn Date", cell: (r) => fmtDate(r.transactionDate) },
+    {
+      key: "transactionDate",
+      header: "Txn Date",
+      className: "num text-xs text-muted-foreground",
+      cell: (r) => fmtDate(r.transactionDate),
+    },
     {
       key: "valueDate",
-      header: "Value Date",
+      header: "Value",
+      className: "num text-xs text-muted-foreground",
       cell: (r) => (r.valueDate ? fmtDate(r.valueDate) : "—"),
     },
     {
       key: "description",
-      header: "Narration",
+      header: "Raw Narration",
       cell: (r) =>
         r.description ? (
-          <span className="num block max-w-72 truncate text-xs" title={r.description}>
+          <span className="num block min-w-[13rem] max-w-sm truncate text-xs" title={r.description}>
             {r.description}
           </span>
         ) : (
-          "—"
+          <span className="text-xs text-muted-foreground">—</span>
         ),
+    },
+    {
+      key: "counterparty",
+      header: "Cleaned Narration",
+      sortValue: (r) => cleanedNarration(r).text,
+      cell: (r) => {
+        const { text, known } = cleanedNarration(r);
+        return (
+          <span
+            className={cn(
+              "block min-w-[12rem] max-w-sm truncate",
+              !known && "text-muted-foreground",
+            )}
+            title={text}
+          >
+            {text}
+          </span>
+        );
+      },
     },
     {
       key: "referenceNumber",
       header: "Ref No.",
-      cell: (r) => <span className="num text-xs">{dash(r.referenceNumber)}</span>,
+      className: "num text-xs text-muted-foreground",
+      cell: (r) => dash(r.referenceNumber),
     },
     {
       key: "debitAmount",
       header: "Debit",
       align: "right",
+      className: "tabular-nums",
       sortValue: (r) => r.debitAmount,
       sortCompare: (a, b) => compareMoney(a.debitAmount, b.debitAmount),
-      cell: (r) => (r.debitAmount === "0.00" ? "" : fmtMoney(r.debitAmount)),
+      cell: (r) => (r.debitAmount === "0.00" ? "" : inr(r.debitAmount)),
     },
     {
       key: "creditAmount",
       header: "Credit",
       align: "right",
+      className: "tabular-nums text-success",
       sortValue: (r) => r.creditAmount,
       sortCompare: (a, b) => compareMoney(a.creditAmount, b.creditAmount),
-      cell: (r) => (r.creditAmount === "0.00" ? "" : fmtMoney(r.creditAmount)),
+      cell: (r) => (r.creditAmount === "0.00" ? "" : inr(r.creditAmount)),
     },
     {
       key: "balance",
       header: "Balance",
       align: "right",
+      className: "tabular-nums font-medium",
       sortValue: (r) => r.balance ?? "",
       sortCompare: (a, b) => compareMoney(a.balance, b.balance),
-      cell: (r) => fmtMoney(r.balance),
-    },
-    {
-      key: "transactionType",
-      header: "Type",
-      cell: (r) => <StatusBadge status={r.transactionType === "DEBIT" ? "Debit" : "Credit"} />,
+      cell: (r) => inr(r.balance),
     },
   ];
 
@@ -450,7 +581,7 @@ function BankPage() {
     <>
       <PageHeader
         title="Bank Statements"
-        description="Record bank accounts, statement periods and the transactions inside them."
+        description="Clean narrations, identify counterparties and map transactions to ledgers."
         actions={
           <div className="flex flex-wrap gap-2">
             <Button variant="outline" onClick={exportCsv} disabled={transactions.length === 0}>
@@ -469,14 +600,27 @@ function BankPage() {
         }
       />
       <InfoNotice>
-        Automatic parsing is not configured. Statements are stored against their source document and
-        every transaction is entered by hand — nothing here is read from the file, cleaned, or
-        mapped to a ledger.
+        Upload a PDF or Excel statement — transactions are extracted automatically. Review and map
+        each to a ledger before exporting.
       </InfoNotice>
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(320px,2fr)_3fr]">
-        <div className="flex flex-col gap-4">
-          <Section title="Upload Statement">
+      <div className="flex flex-col gap-4">
+        {/* Upload / create a statement */}
+        <Section
+          title="Upload Statement"
+          actions={
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAccountsOpen(true)}>
+                Bank accounts
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => setTallyOpen(true)}>
+                <RefreshCw />
+                Sync from Tally
+              </Button>
+            </div>
+          }
+        >
+          <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
             <div className="grid gap-3 sm:grid-cols-2">
               <Field label="Bank Account">
                 <select
@@ -523,7 +667,7 @@ function BankPage() {
                   onChange={(e) => setStatementField("statementEndDate", e.target.value)}
                 />
               </Field>
-              <Field label="Opening Balance">
+              <Field label="Opening Balance (optional)">
                 <Input
                   className="num"
                   inputMode="decimal"
@@ -532,7 +676,7 @@ function BankPage() {
                   onChange={(e) => setStatementField("openingBalance", e.target.value)}
                 />
               </Field>
-              <Field label="Closing Balance">
+              <Field label="Closing Balance (optional)">
                 <Input
                   className="num"
                   inputMode="decimal"
@@ -542,119 +686,55 @@ function BankPage() {
                 />
               </Field>
             </div>
-            <div className="mt-3 flex flex-col gap-2">
+            <div className="flex flex-col">
               <FileUploadDropzone
                 multiple={false}
                 accept=".pdf,.xlsx,.xls,.csv"
                 hint="PDF or Excel statement"
                 onFiles={(f) => setFile(f[0])}
               />
-              {file && <p className="text-xs text-muted-foreground">Selected: {file.name}</p>}
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={uploadStatement} disabled={!file || uploadDocuments.isPending}>
-                  Upload statement
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={createStatementManually}
-                  disabled={createStatement.isPending}
-                >
-                  <Plus />
-                  Create without a file
-                </Button>
-              </div>
+              {file && (
+                <p className="mt-2 truncate text-xs text-muted-foreground">Selected: {file.name}</p>
+              )}
             </div>
-          </Section>
-
-          <Section title="Bank Accounts">
-            {accounts.length === 0 ? (
-              <EmptyState
-                title="No bank accounts yet"
-                hint="A statement belongs to a bank account, so add one first."
-              />
-            ) : (
-              <ul className="space-y-2">
-                {accounts.map((a) => (
-                  <li
-                    key={a.id}
-                    className="flex items-center justify-between gap-2 rounded border px-3 py-2"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">
-                        {a.bankName}
-                        {a.accountName ? ` · ${a.accountName}` : ""}
-                      </p>
-                      <p className="num text-xs text-muted-foreground">
-                        {a.maskedAccountNumber} · {a.currency}
-                        {a.isActive ? "" : " · inactive"}
-                      </p>
-                    </div>
-                    {a.isActive && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        className="h-7"
-                        onClick={() => deactivate(a.id)}
-                      >
-                        Deactivate
-                      </Button>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <div className="mt-3 grid gap-2 sm:grid-cols-2">
-              <Field label="Bank Name">
-                <Input
-                  value={accountForm.bankName}
-                  onChange={(e) => setAccountField("bankName", e.target.value)}
-                />
-              </Field>
-              <Field label="Account Name (optional)">
-                <Input
-                  value={accountForm.accountName}
-                  onChange={(e) => setAccountField("accountName", e.target.value)}
-                />
-              </Field>
-              <Field label="Account Number">
-                <Input
-                  className="num"
-                  value={accountForm.accountNumber}
-                  onChange={(e) => setAccountField("accountNumber", e.target.value)}
-                />
-              </Field>
-              <Field label="Currency">
-                <Input
-                  maxLength={3}
-                  value={accountForm.currency}
-                  onChange={(e) => setAccountField("currency", e.target.value.toUpperCase())}
-                />
-              </Field>
-            </div>
-            <Button className="mt-3" onClick={saveAccount} disabled={createAccount.isPending}>
-              <Plus />
-              Add bank account
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button
+              className="flex-1 sm:flex-none"
+              onClick={uploadStatement}
+              disabled={!file || uploadDocuments.isPending}
+            >
+              Upload statement
             </Button>
-            <p className="mt-2 text-xs text-muted-foreground">
-              The account number is sent once when the account is created. After that it is only
-              ever shown masked.
-            </p>
-          </Section>
-        </div>
+            <Button
+              variant="outline"
+              onClick={createStatementManually}
+              disabled={createStatement.isPending}
+            >
+              <Plus />
+              Create without a file
+            </Button>
+          </div>
+        </Section>
 
-        <div className="flex flex-col gap-4">
+        {/* Statement context bar */}
+        <div>
           <Section title="Statement">
             {statements.length === 0 ? (
               <EmptyState
-                title="No bank statements for this company"
-                hint="Upload a statement or create one by hand to start recording transactions."
+                title="No bank statements yet"
+                hint={
+                  accounts.length === 0
+                    ? "Add a bank account (Bank accounts), then upload a statement above."
+                    : "Upload a statement above, enter one by hand, or sync from Tally."
+                }
               />
             ) : statement ? (
               <>
                 <div className="flex flex-wrap items-center gap-2">
                   <select
                     aria-label="Select statement"
-                    className={selectCls}
+                    className={selectCls + " min-w-64 flex-1"}
                     value={statementId}
                     onChange={(e) => setStatementId(e.target.value)}
                   >
@@ -673,9 +753,26 @@ function BankPage() {
                     })}
                   </select>
                   <StatusBadge status={statusToUiLabel(statement.status)} />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={runExtraction}
+                    disabled={processStatement.isPending}
+                  >
+                    <Sparkles />
+                    Extract
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={remove}
+                    disabled={deleteStatement.isPending}
+                  >
+                    <Trash2 />
+                    Delete
+                  </Button>
                 </div>
-
-                <div className="mt-3 grid gap-x-6 sm:grid-cols-2">
+                <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
                   <KV k="Opening balance" v={fmtMoney(statement.openingBalance)} />
                   <KV k="Closing balance" v={fmtMoney(statement.closingBalance)} />
                   <KV
@@ -699,156 +796,36 @@ function BankPage() {
                     }
                   />
                 </div>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button
-                    variant="outline"
-                    onClick={runExtraction}
-                    disabled={processStatement.isPending}
-                  >
-                    <Sparkles />
-                    Try automatic extraction
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    onClick={remove}
-                    disabled={deleteStatement.isPending}
-                  >
-                    <Trash2 />
-                    Delete statement
-                  </Button>
-                </div>
-                <p className="mt-2 text-xs text-muted-foreground">
-                  Deleting removes the statement and its transactions. The source document and the
-                  bank account are kept.
-                </p>
               </>
             ) : null}
           </Section>
+        </div>
 
-          <Section title="Add Transaction">
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Field label="Transaction Date">
-                <Input
-                  type="date"
-                  value={transactionForm.transactionDate}
-                  onChange={(e) => setTransactionField("transactionDate", e.target.value)}
-                />
-              </Field>
-              <Field label="Value Date (optional)">
-                <Input
-                  type="date"
-                  value={transactionForm.valueDate}
-                  onChange={(e) => setTransactionField("valueDate", e.target.value)}
-                />
-              </Field>
-              <Field label="Reference (optional)">
-                <Input
-                  className="num"
-                  value={transactionForm.referenceNumber}
-                  onChange={(e) => setTransactionField("referenceNumber", e.target.value)}
-                />
-              </Field>
-              <Field label="Narration (optional)">
-                <Input
-                  value={transactionForm.description}
-                  onChange={(e) => setTransactionField("description", e.target.value)}
-                />
-              </Field>
-              <Field label="Debit">
-                <Input
-                  className="num"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={transactionForm.debitAmount}
-                  onChange={(e) => setTransactionField("debitAmount", e.target.value)}
-                />
-              </Field>
-              <Field label="Credit">
-                <Input
-                  className="num"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={transactionForm.creditAmount}
-                  onChange={(e) => setTransactionField("creditAmount", e.target.value)}
-                />
-              </Field>
-              <Field label="Balance (optional)">
-                <Input
-                  className="num"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={transactionForm.balance}
-                  onChange={(e) => setTransactionField("balance", e.target.value)}
-                />
-              </Field>
-              <Field label="Counterparty name (optional)">
-                <Input
-                  value={transactionForm.counterpartyName}
-                  onChange={(e) => setTransactionField("counterpartyName", e.target.value)}
-                />
-              </Field>
-              <Field label="Counterparty ledger (optional)">
-                <Input
-                  value={transactionForm.counterpartyLedger}
-                  onChange={(e) => setTransactionField("counterpartyLedger", e.target.value)}
-                  placeholder="Must exist in Ledger Master"
-                />
-              </Field>
-              <Field label="Counterparty GSTIN (optional)">
-                <Input
-                  className="num"
-                  value={transactionForm.counterpartyGstin}
-                  onChange={(e) =>
-                    setTransactionField("counterpartyGstin", e.target.value.toUpperCase())
-                  }
-                />
-              </Field>
-              <Field label="Counterparty address (optional)">
-                <Input
-                  value={transactionForm.counterpartyAddress}
-                  onChange={(e) => setTransactionField("counterpartyAddress", e.target.value)}
-                />
-              </Field>
-              <Field label="Counterparty pincode (optional)">
-                <Input
-                  value={transactionForm.counterpartyPincode}
-                  onChange={(e) => setTransactionField("counterpartyPincode", e.target.value)}
-                />
-              </Field>
-              <label className="flex items-center gap-2 self-end text-xs text-muted-foreground">
-                <input
-                  type="checkbox"
-                  checked={transactionForm.isInterAccountTransfer}
-                  onChange={(e) =>
-                    setTransactionForm((current) => ({
-                      ...current,
-                      isInterAccountTransfer: e.target.checked,
-                    }))
-                  }
-                />
-                Inter-account transfer (reviewer-confirmed)
-              </label>
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Enter a debit or a credit, not both. A transaction with neither is rejected. The
-              inter-account flag is never inferred from the narration.
-            </p>
-            <Button
-              className="mt-3"
-              onClick={addTransaction}
-              disabled={!statement || createTransaction.isPending}
-            >
-              <Save />
-              Add transaction
-            </Button>
-          </Section>
-
+        {/* Transactions (full width) */}
+        <div className="flex flex-col gap-4">
           <div>
             <DataTable
               rows={transactions}
               rowKey={(r) => r.id}
-              pageSize={12}
-              searchKeys={(r) => `${r.description ?? ""} ${r.referenceNumber ?? ""}`}
+              pageSize={20}
+              selectable
+              bulkActions={(ids, clear) => (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7"
+                  onClick={() => {
+                    exportRows(transactions.filter((t) => ids.includes(t.id)));
+                    clear();
+                  }}
+                >
+                  <Download />
+                  Export selected
+                </Button>
+              )}
+              searchKeys={(r) =>
+                `${r.description ?? ""} ${r.counterpartyName ?? ""} ${r.referenceNumber ?? ""}`
+              }
               onRowClick={setOpen}
               toolbar={
                 <>
@@ -882,14 +859,322 @@ function BankPage() {
             </p>
           </div>
 
-          <Section title="Narration Cleaning & Ledger Mapping">
-            <EmptyState
-              title="Not connected yet"
-              hint="Cleaning narrations, identifying counterparties, scoring confidence and mapping transactions to ledgers are all later steps."
-            />
+          <Section title="Add Missing Transaction">
+            <Button
+              variant="outline"
+              size="sm"
+              className="mb-3"
+              onClick={() => setShowAddForm((v) => !v)}
+            >
+              {showAddForm ? "Hide form" : "Add a transaction manually"}
+            </Button>
+            {!showAddForm ? null : (
+              <>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <Field label="Transaction Date">
+                    <Input
+                      type="date"
+                      value={transactionForm.transactionDate}
+                      onChange={(e) => setTransactionField("transactionDate", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Value Date (optional)">
+                    <Input
+                      type="date"
+                      value={transactionForm.valueDate}
+                      onChange={(e) => setTransactionField("valueDate", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Reference (optional)">
+                    <Input
+                      className="num"
+                      value={transactionForm.referenceNumber}
+                      onChange={(e) => setTransactionField("referenceNumber", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Narration (optional)">
+                    <Input
+                      value={transactionForm.description}
+                      onChange={(e) => setTransactionField("description", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Debit">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={transactionForm.debitAmount}
+                      onChange={(e) => setTransactionField("debitAmount", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Credit">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={transactionForm.creditAmount}
+                      onChange={(e) => setTransactionField("creditAmount", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Balance (optional)">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={transactionForm.balance}
+                      onChange={(e) => setTransactionField("balance", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Counterparty name (optional)">
+                    <Input
+                      value={transactionForm.counterpartyName}
+                      onChange={(e) => setTransactionField("counterpartyName", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Counterparty ledger (optional)">
+                    <Input
+                      value={transactionForm.counterpartyLedger}
+                      onChange={(e) => setTransactionField("counterpartyLedger", e.target.value)}
+                      placeholder="Must exist in Ledger Master"
+                    />
+                  </Field>
+                  <Field label="Counterparty GSTIN (optional)">
+                    <Input
+                      className="num"
+                      value={transactionForm.counterpartyGstin}
+                      onChange={(e) =>
+                        setTransactionField("counterpartyGstin", e.target.value.toUpperCase())
+                      }
+                    />
+                  </Field>
+                  <Field label="Counterparty address (optional)">
+                    <Input
+                      value={transactionForm.counterpartyAddress}
+                      onChange={(e) => setTransactionField("counterpartyAddress", e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Counterparty pincode (optional)">
+                    <Input
+                      value={transactionForm.counterpartyPincode}
+                      onChange={(e) => setTransactionField("counterpartyPincode", e.target.value)}
+                    />
+                  </Field>
+                  <label className="flex items-center gap-2 self-end text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={transactionForm.isInterAccountTransfer}
+                      onChange={(e) =>
+                        setTransactionForm((current) => ({
+                          ...current,
+                          isInterAccountTransfer: e.target.checked,
+                        }))
+                      }
+                    />
+                    Inter-account transfer (reviewer-confirmed)
+                  </label>
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  Enter a debit or a credit, not both. A transaction with neither is rejected. The
+                  inter-account flag is never inferred from the narration.
+                </p>
+                <Button
+                  className="mt-3"
+                  onClick={addTransaction}
+                  disabled={!statement || createTransaction.isPending}
+                >
+                  <Save />
+                  Add transaction
+                </Button>
+              </>
+            )}
           </Section>
         </div>
       </div>
+
+      <Dialog open={tallyOpen} onOpenChange={setTallyOpen}>
+        <DialogContent className="max-h-[90vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Sync from TallyPrime</DialogTitle>
+            <DialogDescription>
+              Import bank accounts and voucher transactions from TallyPrime.
+            </DialogDescription>
+          </DialogHeader>
+          <div>
+            <div>
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Import bank accounts and voucher transactions from TallyPrime. Omit dates to sync
+                  the current financial year. Existing transactions are never duplicated.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <Field label="Tally Company Name">
+                    <Input
+                      value={tallyCfg.tallyCompany}
+                      onChange={(e) => setTallyCfg((c) => ({ ...c, tallyCompany: e.target.value }))}
+                      placeholder={company?.legalName ?? ""}
+                    />
+                  </Field>
+                  <Field label="From Date (optional)">
+                    <Input
+                      type="date"
+                      value={tallyCfg.fromDate}
+                      onChange={(e) => setTallyCfg((c) => ({ ...c, fromDate: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="To Date (optional)">
+                    <Input
+                      type="date"
+                      value={tallyCfg.toDate}
+                      onChange={(e) => setTallyCfg((c) => ({ ...c, toDate: e.target.value }))}
+                    />
+                  </Field>
+                </div>
+                <Button
+                  onClick={() => {
+                    if (!tallyCfg.tallyCompany.trim())
+                      return toast.error("Enter a Tally company name first.");
+                    if (!companyId) return;
+                    tallySyncMutation.mutate(
+                      {
+                        companyId,
+                        tallyCompanyName: tallyCfg.tallyCompany,
+                        fromDate: tallyCfg.fromDate || undefined,
+                        toDate: tallyCfg.toDate || undefined,
+                      },
+                      {
+                        onSuccess: (data) => {
+                          if (data.success) {
+                            toast.success(
+                              `Tally sync complete — ${data.transactions_created} transactions, ${data.accounts_created} new accounts`,
+                            );
+                          } else {
+                            toast.error(`Tally sync failed: ${data.error_message}`);
+                          }
+                        },
+                        onError: (err) => toast.error(err.message),
+                      },
+                    );
+                  }}
+                  disabled={tallySyncMutation.isPending}
+                >
+                  <RefreshCw className={tallySyncMutation.isPending ? "animate-spin" : undefined} />
+                  {tallySyncMutation.isPending ? "Syncing…" : "Sync Bank Data"}
+                </Button>
+                {tallySyncMutation.data &&
+                  (() => {
+                    const r = tallySyncMutation.data;
+                    return (
+                      <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-2">
+                        <p className={r.success ? "font-medium" : "font-medium text-destructive"}>
+                          {r.success ? "Sync succeeded" : "Sync failed"}
+                          {r.success && ` · ${r.from_date} to ${r.to_date}`}
+                        </p>
+                        {r.success ? (
+                          <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                            <KV
+                              k="Accounts"
+                              v={`${r.accounts_created}c / ${r.accounts_updated}u`}
+                            />
+                            <KV k="Vouchers matched" v={String(r.vouchers_matched)} />
+                            <KV
+                              k="Transactions"
+                              v={`${r.transactions_created}c / ${r.transactions_skipped}s`}
+                            />
+                          </div>
+                        ) : (
+                          <p className="text-destructive text-xs">{r.error_message}</p>
+                        )}
+                      </div>
+                    );
+                  })()}
+              </div>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={accountsOpen} onOpenChange={setAccountsOpen}>
+        <DialogContent className="max-h-[90vh] max-w-xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Bank accounts</DialogTitle>
+            <DialogDescription>
+              A statement belongs to a bank account. Add accounts here before adding statements.
+            </DialogDescription>
+          </DialogHeader>
+          {accounts.length === 0 ? (
+            <EmptyState
+              title="No bank accounts yet"
+              hint="A statement belongs to a bank account, so add one first."
+            />
+          ) : (
+            <ul className="space-y-2">
+              {accounts.map((a) => (
+                <li
+                  key={a.id}
+                  className="flex items-center justify-between gap-2 rounded border px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">
+                      {a.bankName}
+                      {a.accountName ? ` · ${a.accountName}` : ""}
+                    </p>
+                    <p className="num text-xs text-muted-foreground">
+                      {a.maskedAccountNumber} · {a.currency}
+                      {a.isActive ? "" : " · inactive"}
+                    </p>
+                  </div>
+                  {a.isActive && (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7"
+                      onClick={() => deactivate(a.id)}
+                    >
+                      Deactivate
+                    </Button>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <Field label="Bank Name">
+              <Input
+                value={accountForm.bankName}
+                onChange={(e) => setAccountField("bankName", e.target.value)}
+              />
+            </Field>
+            <Field label="Account Name (optional)">
+              <Input
+                value={accountForm.accountName}
+                onChange={(e) => setAccountField("accountName", e.target.value)}
+              />
+            </Field>
+            <Field label="Account Number">
+              <Input
+                className="num"
+                value={accountForm.accountNumber}
+                onChange={(e) => setAccountField("accountNumber", e.target.value)}
+              />
+            </Field>
+            <Field label="Currency">
+              <Input
+                maxLength={3}
+                value={accountForm.currency}
+                onChange={(e) => setAccountField("currency", e.target.value.toUpperCase())}
+              />
+            </Field>
+          </div>
+          <Button className="mt-3" onClick={saveAccount} disabled={createAccount.isPending}>
+            <Plus />
+            Add bank account
+          </Button>
+          <p className="mt-2 text-xs text-muted-foreground">
+            The account number is sent once when the account is created. After that it is only ever
+            shown masked.
+          </p>
+        </DialogContent>
+      </Dialog>
 
       <Sheet open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
         <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
@@ -898,34 +1183,111 @@ function BankPage() {
           </SheetHeader>
           {open && (
             <div className="mt-4 space-y-4">
-              <div>
-                <KV k="Date" v={fmtDate(open.transactionDate)} />
-                <KV k="Value date" v={open.valueDate ? fmtDate(open.valueDate) : "—"} />
-                <KV k="Reference" v={dash(open.referenceNumber)} />
-                <KV
-                  k="Amount"
-                  v={
-                    open.debitAmount !== "0.00"
-                      ? `Dr ${fmtMoney(open.debitAmount)}`
-                      : `Cr ${fmtMoney(open.creditAmount)}`
-                  }
-                />
-                <KV k="Running balance" v={fmtMoney(open.balance)} />
-                <KV k="Counterparty" v={dash(open.counterpartyName)} />
-                <KV k="Counterparty ledger" v={dash(open.counterpartyLedger)} />
-                <KV
-                  k="Inter-account transfer"
-                  v={open.isInterAccountTransfer ? "Reviewer-confirmed" : "No"}
-                />
-              </div>
-              <Field label="Narration as printed by the bank">
-                <div className="num rounded border bg-muted p-2 text-xs">
-                  {dash(open.description)}
+              {editing ? (
+                <div className="space-y-3">
+                  <Field label="Transaction Date">
+                    <Input
+                      type="date"
+                      value={editForm.transactionDate}
+                      onChange={(e) =>
+                        setEditForm((f) => ({ ...f, transactionDate: e.target.value }))
+                      }
+                    />
+                  </Field>
+                  <Field label="Value Date (optional)">
+                    <Input
+                      type="date"
+                      value={editForm.valueDate}
+                      onChange={(e) => setEditForm((f) => ({ ...f, valueDate: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Reference (optional)">
+                    <Input
+                      className="num"
+                      value={editForm.referenceNumber}
+                      onChange={(e) =>
+                        setEditForm((f) => ({ ...f, referenceNumber: e.target.value }))
+                      }
+                    />
+                  </Field>
+                  <Field label="Narration">
+                    <Input
+                      value={editForm.description}
+                      onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Debit">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={editForm.debitAmount}
+                      onChange={(e) => setEditForm((f) => ({ ...f, debitAmount: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Credit">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={editForm.creditAmount}
+                      onChange={(e) => setEditForm((f) => ({ ...f, creditAmount: e.target.value }))}
+                    />
+                  </Field>
+                  <Field label="Balance (optional)">
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="0.00"
+                      value={editForm.balance}
+                      onChange={(e) => setEditForm((f) => ({ ...f, balance: e.target.value }))}
+                    />
+                  </Field>
+                  <div className="flex gap-2">
+                    <Button onClick={saveEdit} disabled={updateTransaction.isPending}>
+                      <Save /> Save
+                    </Button>
+                    <Button variant="outline" onClick={() => setEditing(false)}>
+                      Cancel
+                    </Button>
+                  </div>
                 </div>
-              </Field>
-              <p className="text-xs text-muted-foreground">
-                Stored exactly as entered. Nothing has been cleaned, categorised or reinterpreted.
-              </p>
+              ) : (
+                <>
+                  <div>
+                    <KV k="Date" v={fmtDate(open.transactionDate)} />
+                    <KV k="Value date" v={open.valueDate ? fmtDate(open.valueDate) : "—"} />
+                    <KV k="Reference" v={dash(open.referenceNumber)} />
+                    <KV
+                      k="Amount"
+                      v={
+                        open.debitAmount !== "0.00"
+                          ? `Dr ${fmtMoney(open.debitAmount)}`
+                          : `Cr ${fmtMoney(open.creditAmount)}`
+                      }
+                    />
+                    <KV k="Running balance" v={fmtMoney(open.balance)} />
+                    <KV k="Counterparty" v={dash(open.counterpartyName)} />
+                    <KV k="Counterparty ledger" v={dash(open.counterpartyLedger)} />
+                    <KV
+                      k="Inter-account transfer"
+                      v={open.isInterAccountTransfer ? "Reviewer-confirmed" : "No"}
+                    />
+                  </div>
+                  <Field label="Narration as printed by the bank">
+                    <div className="num rounded border bg-muted p-2 text-xs">
+                      {dash(open.description)}
+                    </div>
+                  </Field>
+                  <Button variant="outline" size="sm" onClick={() => openEdit(open)}>
+                    Edit transaction
+                  </Button>
+                  <p className="text-xs text-muted-foreground">
+                    Stored exactly as entered. Nothing has been cleaned, categorised or
+                    reinterpreted.
+                  </p>
+                </>
+              )}
               <BankVoucherPanel
                 companyId={companyId}
                 statementId={statement?.id ?? ""}

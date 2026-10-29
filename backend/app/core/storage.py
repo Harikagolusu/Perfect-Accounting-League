@@ -39,6 +39,7 @@ ALLOWED_TYPES: dict[str, str] = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".xls": "application/vnd.ms-excel",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".csv": "text/csv",
 }
 
 # Leading bytes that identify each format on disk.
@@ -53,6 +54,8 @@ CONTENT_SIGNATURES: dict[str, bytes] = {
     ".xls": b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1",
     # DOCX is also a zip container; the extension disambiguates it from XLSX.
     ".docx": b"PK\x03\x04",
+    # CSV is plain text with no magic bytes; the extension and MIME check suffice.
+    ".csv": b"",
 }
 
 SUPPORTED_EXTENSIONS: tuple[str, ...] = tuple(sorted(ALLOWED_TYPES))

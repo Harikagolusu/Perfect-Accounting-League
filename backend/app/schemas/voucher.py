@@ -190,6 +190,9 @@ class VoucherActionRequest(BaseModel):
     reason: str | None = Field(default=None, max_length=2000)
     external_reference: str | None = Field(default=None, max_length=255)
     verified: bool | None = None
+    #: Any day of the period being posted. An invoice dated earlier posts to
+    #: Tally on the first of this month; same-month or later keeps its own date.
+    posting_month: date | None = None
 
     @field_validator("actor", mode="before")
     @classmethod
@@ -204,6 +207,9 @@ class VoucherExportRequest(BaseModel):
     voucher_ids: list[uuid.UUID] | None = None
     date_from: date | None = None
     date_to: date | None = None
+    #: Any day of the period being posted; earlier-dated vouchers export on its
+    #: first. See VoucherActionRequest.posting_month.
+    posting_month: date | None = None
     actor: str = Field(default="local-user", max_length=255)
 
 
@@ -230,6 +236,22 @@ class LedgerSuggestion(BaseModel):
     source: str
     reason: str
     code: str | None = None
+
+
+class VoucherPostResponse(BaseModel):
+    """Result of posting one voucher into TallyPrime.
+
+    `success` is false for a Tally rejection or a connectivity failure; the
+    voucher is then POSTING_FAILED and may be retried. `already_posted` marks
+    the idempotent answer, where Tally was not contacted at all.
+    """
+
+    success: bool
+    voucher_id: uuid.UUID
+    status: str
+    tally_reference: str | None = None
+    already_posted: bool = False
+    message: str
 
 
 class LedgerSuggestionResponse(BaseModel):

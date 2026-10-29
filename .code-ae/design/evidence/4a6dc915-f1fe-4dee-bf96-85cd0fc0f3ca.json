@@ -1,0 +1,113 @@
+{
+  "version": 2,
+  "id": "4a6dc915-f1fe-4dee-bf96-85cd0fc0f3ca",
+  "action": "Browser flow",
+  "revision": {
+    "scope": ".",
+    "digest": "af94a61005fb70dcd90802bcb0e2f84a7a0b2e92ab7a04577f969441b5d074e5",
+    "complete": true,
+    "files": 363,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": false,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/inbox"
+    },
+    "finalUrl": "http://localhost:8080/inbox",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Asterleaf"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/inbox",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/inbox"
+        }
+      },
+      {
+        "action": "expectVisible",
+        "ok": false,
+        "expectation": {
+          "selector": "aside"
+        },
+        "detail": "locator.waitFor: Timeout 45000ms exceeded.\nCall log:\n\u001b[2m  - waiting for locator('aside').first() to be visible\u001b[22m\n",
+        "url": "http://localhost:8080/inbox",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/inbox"
+        }
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow FAILED. Read the failing step, application console/page errors and unexpected HTTP failures — those are observed browser failures. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_4.expectVisible",
+        "passed": false
+      }
+    ]
+  }
+}

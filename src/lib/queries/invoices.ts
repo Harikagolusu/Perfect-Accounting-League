@@ -11,6 +11,8 @@ import {
   invoicesApi,
   toInvoice,
   toVendorMatch,
+  type InvoiceLineItemDto,
+  type InvoiceLineItemWrite,
   type InvoiceStatus,
   type InvoiceWriteDto,
   type ProcessResult,
@@ -18,6 +20,7 @@ import {
   type VendorMatch,
 } from "@/lib/api/invoices";
 import { vendorKeys } from "@/lib/queries/vendors";
+import { auditKeys } from "@/lib/queries/accountingAudit";
 
 export const invoiceKeys = {
   all: ["invoices"] as const,
@@ -25,6 +28,8 @@ export const invoiceKeys = {
   detail: (companyId: string, invoiceId: string) => ["invoices", companyId, invoiceId] as const,
   match: (companyId: string, invoiceId: string) =>
     ["invoices", companyId, invoiceId, "vendor-match"] as const,
+  lineItems: (companyId: string, invoiceId: string) =>
+    ["invoices", companyId, invoiceId, "line-items"] as const,
 };
 
 /**
@@ -73,11 +78,61 @@ export function useVendorMatch(
   });
 }
 
+export function useInvoiceLineItems(companyId: string | undefined, invoiceId: string | undefined) {
+  return useQuery<InvoiceLineItemDto[]>({
+    queryKey: invoiceKeys.lineItems(companyId ?? "unknown", invoiceId ?? "unknown"),
+    queryFn: () => invoicesApi.lineItems(companyId as string, invoiceId as string),
+    enabled: isBrowser && Boolean(companyId) && Boolean(invoiceId),
+  });
+}
+
+/** Line-item writes refresh the item list and the invoice totals. */
+function useInvalidateLineItems(companyId: string | undefined, invoiceId: string | undefined) {
+  const queryClient = useQueryClient();
+  return () => {
+    if (!companyId || !invoiceId) return;
+    queryClient.invalidateQueries({ queryKey: invoiceKeys.lineItems(companyId, invoiceId) });
+    queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+  };
+}
+
+export function useCreateLineItem(companyId: string | undefined, invoiceId: string | undefined) {
+  const invalidate = useInvalidateLineItems(companyId, invoiceId);
+  return useMutation({
+    mutationFn: (body: InvoiceLineItemWrite) =>
+      invoicesApi.createLineItem(companyId as string, invoiceId as string, body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useUpdateLineItem(companyId: string | undefined, invoiceId: string | undefined) {
+  const invalidate = useInvalidateLineItems(companyId, invoiceId);
+  return useMutation({
+    mutationFn: (input: { id: string; body: InvoiceLineItemWrite }) =>
+      invoicesApi.updateLineItem(companyId as string, invoiceId as string, input.id, input.body),
+    onSuccess: invalidate,
+  });
+}
+
+export function useDeleteLineItem(companyId: string | undefined, invoiceId: string | undefined) {
+  const invalidate = useInvalidateLineItems(companyId, invoiceId);
+  return useMutation({
+    mutationFn: async (id: string) => {
+      await invoicesApi.deleteLineItem(companyId as string, invoiceId as string, id);
+      return id;
+    },
+    onSuccess: invalidate,
+  });
+}
+
 /** Invalidation is scoped to the company whose invoices changed. */
 function useInvalidateCompany(companyId: string | undefined) {
   const queryClient = useQueryClient();
   return () => {
-    if (companyId) queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+    if (!companyId) return;
+    queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+    // Status, mapping and delete all record audit events; refresh activity.
+    queryClient.invalidateQueries({ queryKey: auditKeys.list(companyId) });
   };
 }
 

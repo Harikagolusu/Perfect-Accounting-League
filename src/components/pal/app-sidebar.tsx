@@ -1,7 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import {
   Sidebar, SidebarContent, SidebarFooter, SidebarGroup, SidebarGroupContent, SidebarGroupLabel,
-  SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar,
+  SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem, SidebarRail, useSidebar,
 } from "@/components/ui/sidebar";
 import { NAV } from "./nav";
 import { useStore } from "@/lib/store";
@@ -75,6 +75,7 @@ export function AppSidebar() {
           <ShieldCheck className="mx-auto h-4 w-4 text-sidebar-foreground/70" />
         )}
       </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
   );
 }

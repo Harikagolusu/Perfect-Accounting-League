@@ -1,0 +1,77 @@
+{
+  "version": 2,
+  "id": "500c2929-4742-4b05-a693-66d1547af76d",
+  "action": "Browser flow",
+  "revision": {
+    "scope": ".",
+    "digest": "e0d2d412eb3d66090c7c1210eaf7cbab03cb351382f4c38758b7217a0898e7be",
+    "complete": true,
+    "files": 363,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/reports",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/reports"
+    },
+    "finalUrl": "http://localhost:8080/reports",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/reports",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/reports"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Perfect Accounting League"
+        },
+        "url": "http://localhost:8080/reports",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/reports"
+        }
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectText",
+        "passed": true
+      }
+    ]
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "version": 2,
+  "id": "7c2d4d73-3ae5-4ee4-8a87-e648b19354d1",
+  "action": "capture",
+  "revision": {
+    "scope": "src",
+    "digest": "1efae3528dead6a746b582e3356be6fb2e544ed51c6162523b4db34ff286fca6",
+    "complete": true,
+    "files": 128,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": false,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/review",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/review"
+    },
+    "finalUrl": "http://localhost:8080/review",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "PAL"
+        },
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/review"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "label": "review-page-state",
+        "url": "http://localhost:8080/review",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/055ae352-a853-4552-a84b-3c8fb04e580e/1.jpg"
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_3.expectText",
+        "passed": true
+      }
+    ]
+  }
+}

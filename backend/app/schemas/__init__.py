@@ -28,6 +28,13 @@ from app.schemas.invoice_line_item import (
     InvoiceLineItemResponse,
     InvoiceLineItemUpdate,
 )
+from app.schemas.tally import (
+    TallyCompaniesResponse,
+    TallyCompanyResponse,
+    TallyLedgerResponse,
+    TallyLedgersResponse,
+    TallyStatusResponse,
+)
 from app.schemas.vendor import VendorCreate, VendorResponse, VendorUpdate
 
 
@@ -63,6 +70,11 @@ __all__ = [
     "InvoiceUpdate",
     "ProcessInvoiceResponse",
     "ProcessStatementResponse",
+    "TallyCompaniesResponse",
+    "TallyCompanyResponse",
+    "TallyLedgerResponse",
+    "TallyLedgersResponse",
+    "TallyStatusResponse",
     "VendorCreate",
     "VendorResponse",
     "VendorUpdate",

@@ -40,11 +40,39 @@ from app.services.invoice_prompt import (
 from app.services.text_quality import PageText
 from app.services.invoice_extraction_validation import (
     InvalidExtractionOutput,
+    _parse_date,
     parse_extraction_payload,
     validate_extraction,
 )
 
 COMPANIES_URL = "/api/v1/companies"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("2024-06-05", date(2024, 6, 5)),
+        ("2024/06/05", date(2024, 6, 5)),
+        ("05/06/2024", date(2024, 6, 5)),
+        ("05/06/24", date(2024, 6, 5)),  # 2-digit year, not year 0024
+        ("05-06-24", date(2024, 6, 5)),
+        ("05.06.2024", date(2024, 6, 5)),
+        ("05-Jan-2024", date(2024, 1, 5)),
+        ("05-Jan-24", date(2024, 1, 5)),  # common Tally/India format
+        ("5 Jan 2024", date(2024, 1, 5)),
+        ("Jan 5, 2024", date(2024, 1, 5)),
+    ],
+)
+def test_parse_date_reads_common_printed_formats(raw: str, expected: date) -> None:
+    parsed, issue = _parse_date(raw, "Invoice date")
+    assert parsed == expected
+    assert issue is None
+
+
+def test_parse_date_reports_unreadable_value() -> None:
+    parsed, issue = _parse_date("not a date", "Invoice date")
+    assert parsed is None
+    assert issue is not None
 
 SAMPLE_INVOICE: dict[str, Any] = {
     "is_invoice": True,
@@ -1917,3 +1945,363 @@ def test_process_response_reflects_the_applied_invoice(
     assert body["document_id"] == document["id"]
     assert body["invoice_id"]
     assert uuid.UUID(body["invoice_id"])
+
+
+# ---------------------------------------------------------------------------
+# New extraction scenarios
+# ---------------------------------------------------------------------------
+
+
+def test_igst_only_invoice_extracts_igst_and_leaves_cgst_sgst_null(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """An inter-state invoice has IGST; CGST and SGST must be null, not zero."""
+    igst_invoice = {
+        "is_invoice": True,
+        "invoice_number": "IGST/2026/001",
+        "invoice_date": "2026-03-15",
+        "vendor_name": "Delhi Distributors",
+        "vendor_gstin": "07AABCD1234E1Z1",
+        "buyer_gstin": "27AAJCS4821K1Z5",
+        "place_of_supply": "Maharashtra",
+        "currency": "INR",
+        "taxable_amount": "1000.00",
+        "cgst_amount": None,
+        "sgst_amount": None,
+        "igst_amount": "180.00",
+        "cess_amount": None,
+        "round_off": None,
+        "total_amount": "1180.00",
+    }
+    company = _company(client)
+    # Seed vendor so extraction lands on PROCESSED, not mapping review.
+    client.post(
+        f"{COMPANIES_URL}/{company['id']}/vendors",
+        json={"name": "Delhi Distributors", "gstin": "07AABCD1234E1Z1"},
+    )
+    fake_ai.text = json.dumps(igst_invoice)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PROCESSED"
+
+    invoice_id = response.json()["invoice_id"]
+    invoice = _get_invoice(client, company["id"], invoice_id)
+    assert invoice["igst_amount"] == "180.00"
+    assert invoice["cgst_amount"] is None
+    assert invoice["sgst_amount"] is None
+    assert invoice["place_of_supply"] == "Maharashtra"
+
+
+def test_place_of_supply_extracted_from_cgst_sgst_invoice(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """place_of_supply is persisted for intra-state invoices too."""
+    invoice_with_pos = {
+        **SAMPLE_INVOICE,
+        "place_of_supply": "27 - Maharashtra",
+    }
+    company = _company(client)
+    fake_ai.text = json.dumps(invoice_with_pos)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200
+    invoice_id = response.json()["invoice_id"]
+    invoice = _get_invoice(client, company["id"], invoice_id)
+    assert invoice["place_of_supply"] == "27 - Maharashtra"
+
+
+def test_place_of_supply_regex_candidate_found_in_pdf_text() -> None:
+    """RegexExtractor picks up 'Place of Supply: Maharashtra' from text."""
+    from app.services.regex_extraction import RegexExtractor
+    from app.services.text_quality import PageText
+
+    pages = [
+        PageText(
+            page_number=1,
+            text=(
+                "TAX INVOICE\n"
+                "Invoice No: TEST-001\n"
+                "Place of Supply: Maharashtra (27)\n"
+                "Taxable Amount: 1000.00\n"
+                "CGST: 90.00\n"
+                "SGST: 90.00\n"
+                "Grand Total: 1180.00\n"
+            ),
+        )
+    ]
+    candidates = RegexExtractor().extract(pages)
+    pos = candidates.get("place_of_supply")
+    assert pos, "Expected at least one place_of_supply candidate"
+    assert "Maharashtra" in pos[0].value
+
+
+def test_multi_line_invoice_extracts_and_persists_line_items(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """AI-returned line_items are stored as InvoiceLineItem rows."""
+    multi_line = {
+        **SAMPLE_INVOICE,
+        "line_items": [
+            {
+                "line_number": 1,
+                "description": "Freight Service Mumbai–Pune",
+                "supply_type": "SERVICE",
+                "hsn_sac": "9965",
+                "quantity": "1.000",
+                "unit_rate": "600.00",
+                "gst_rate": "18.00",
+                "taxable_amount": "600.00",
+                "cgst_amount": "54.00",
+                "sgst_amount": "54.00",
+                "igst_amount": None,
+                "cess_amount": None,
+                "total_amount": "708.00",
+            },
+            {
+                "line_number": 2,
+                "description": "Handling charges",
+                "supply_type": "SERVICE",
+                "hsn_sac": "9965",
+                "quantity": "1.000",
+                "unit_rate": "400.00",
+                "gst_rate": "18.00",
+                "taxable_amount": "400.00",
+                "cgst_amount": "36.00",
+                "sgst_amount": "36.00",
+                "igst_amount": None,
+                "cess_amount": None,
+                "total_amount": "472.00",
+            },
+        ],
+    }
+    company = _company(client)
+    fake_ai.text = json.dumps(multi_line)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200
+    invoice_id = response.json()["invoice_id"]
+
+    # Confirm line items were stored.
+    line_items_response = client.get(
+        f"{COMPANIES_URL}/{company['id']}/invoices/{invoice_id}/line-items"
+    )
+    assert line_items_response.status_code == 200
+    items = line_items_response.json()
+    assert len(items) == 2
+    descs = {item["description"] for item in items}
+    assert "Freight Service Mumbai–Pune" in descs
+    assert "Handling charges" in descs
+    first = next(i for i in items if i["line_number"] == 1)
+    assert first["unit_rate"] == "600.00"
+    assert first["hsn_sac"] == "9965"
+    assert first["supply_type"] == "SERVICE"
+
+
+def test_line_items_cleared_and_rewritten_on_retry(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """A second extraction (after NEEDS_REVIEW) replaces, not appends, line items."""
+    # First pass: total mismatch forces NEEDS_REVIEW so a retry is possible.
+    needs_review_payload = {
+        **SAMPLE_INVOICE,
+        "total_amount": "9999.00",  # wrong — triggers total-mismatch issue
+        "line_items": [
+            {
+                "line_number": 1,
+                "description": "Original item",
+                "quantity": "1.000",
+                "unit_rate": "1000.00",
+                "taxable_amount": "1000.00",
+                "total_amount": "1180.00",
+            }
+        ],
+    }
+    two_lines = {
+        **SAMPLE_INVOICE,
+        "line_items": [
+            {
+                "line_number": 1,
+                "description": "Item A",
+                "quantity": "1.000",
+                "unit_rate": "600.00",
+                "taxable_amount": "600.00",
+            },
+            {
+                "line_number": 2,
+                "description": "Item B",
+                "quantity": "1.000",
+                "unit_rate": "400.00",
+                "taxable_amount": "400.00",
+            },
+        ],
+    }
+    company = _company(client)
+    fake_ai.text = json.dumps(needs_review_payload)
+    document = _pdf_document(client, company["id"])
+    first_response = _process_document(client, company["id"], document["id"])
+    assert first_response.status_code == 200
+    assert first_response.json()["status"] == "NEEDS_REVIEW"
+    invoice_id = first_response.json()["invoice_id"]
+
+    # Retry from NEEDS_REVIEW — the process-document endpoint handles this.
+    fake_ai.text = json.dumps(two_lines)
+    second_response = _process_document(client, company["id"], document["id"])
+    assert second_response.status_code == 200
+
+    items_response = client.get(
+        f"{COMPANIES_URL}/{company['id']}/invoices/{invoice_id}/line-items"
+    )
+    items = items_response.json()
+    assert len(items) == 2
+    descs = {i["description"] for i in items}
+    assert "Original item" not in descs
+    assert "Item A" in descs
+    assert "Item B" in descs
+
+
+def test_discount_and_freight_invoice_passes_total_check(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """Header-level discount and freight are factored into the total check."""
+    # total = 1000 + 180 (18% igst) - 50 (discount) + 100 (freight) = 1230
+    discount_freight = {
+        "is_invoice": True,
+        "invoice_number": "DF/2026/099",
+        "invoice_date": "2026-03-15",
+        "vendor_name": "Deccan Freight Carriers",
+        "vendor_gstin": "27AACCD1234F1Z2",
+        "vendor_pan": "AACCD1234F",
+        "buyer_gstin": "27AAJCS4821K1Z5",
+        "currency": "INR",
+        "taxable_amount": "1000.00",
+        "cgst_amount": "90.00",
+        "sgst_amount": "90.00",
+        "igst_amount": None,
+        "cess_amount": None,
+        "discount_amount": "50.00",
+        "freight_amount": "100.00",
+        "round_off": None,
+        "total_amount": "1230.00",
+    }
+    company = _company(client)
+    fake_ai.text = json.dumps(discount_freight)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200
+    body = response.json()
+    # No total-mismatch issue — if the formula is wrong, status is NEEDS_REVIEW.
+    assert body["status"] == "PROCESSED"
+    invoice_id = body["invoice_id"]
+    invoice = _get_invoice(client, company["id"], invoice_id)
+    assert invoice["discount_amount"] == "50.00"
+    assert invoice["freight_amount"] == "100.00"
+
+
+def test_discount_without_freight_passes_total_check() -> None:
+    """validate_invoice_fields handles discount-only adjustments correctly."""
+    from app.services.invoice_validation import validate_invoice_fields
+
+    result = validate_invoice_fields(
+        taxable_amount=Decimal("1000.00"),
+        cgst_amount=Decimal("90.00"),
+        sgst_amount=Decimal("90.00"),
+        discount_amount=Decimal("50.00"),
+        total_amount=Decimal("1130.00"),
+    )
+    assert result.is_valid, result.issues
+
+
+def test_freight_without_discount_passes_total_check() -> None:
+    """validate_invoice_fields handles freight-only adjustments correctly."""
+    from app.services.invoice_validation import validate_invoice_fields
+
+    result = validate_invoice_fields(
+        taxable_amount=Decimal("1000.00"),
+        igst_amount=Decimal("180.00"),
+        freight_amount=Decimal("100.00"),
+        total_amount=Decimal("1280.00"),
+    )
+    assert result.is_valid, result.issues
+
+
+def test_total_mismatch_still_flagged_with_discount_and_freight() -> None:
+    """A wrong total is still caught even when discount/freight are present."""
+    from app.services.invoice_validation import validate_invoice_fields
+
+    result = validate_invoice_fields(
+        taxable_amount=Decimal("1000.00"),
+        cgst_amount=Decimal("90.00"),
+        sgst_amount=Decimal("90.00"),
+        discount_amount=Decimal("50.00"),
+        freight_amount=Decimal("100.00"),
+        total_amount=Decimal("9999.00"),  # wrong
+    )
+    assert not result.is_valid
+    assert any("Total amount does not match" in issue for issue in result.issues)
+
+
+def test_line_items_with_null_description_are_skipped() -> None:
+    """_collect_line_items silently drops items without a description."""
+    from app.services.invoice_extraction_validation import (
+        ExtractedLineItem,
+        _collect_line_items,
+    )
+
+    items = [
+        ExtractedLineItem(line_number=1, description="Valid item", unit_rate=Decimal("100.00")),
+        ExtractedLineItem(line_number=2, description=None),
+        ExtractedLineItem(line_number=3, description="  ", unit_rate=Decimal("50.00")),
+    ]
+    # description=" " is cleaned to None by the field_validator, but test
+    # the case where it genuinely arrives as None.
+    result = _collect_line_items(items)
+    assert len(result) == 1
+    assert result[0]["description"] == "Valid item"
+
+
+def test_different_vendor_layout_two_column_header(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """Invoice with seller/buyer side-by-side (common in PDF exports) still extracts correctly."""
+    two_col_layout = {
+        "is_invoice": True,
+        "invoice_number": "2COL/001",
+        "invoice_date": "2026-03-15",
+        "vendor_name": "ABC Supplies Pvt Ltd",
+        "vendor_gstin": "29AAABC1234D1Z3",
+        "buyer_gstin": "27AAJCS4821K1Z5",
+        "currency": "INR",
+        "taxable_amount": "5000.00",
+        "igst_amount": "900.00",
+        "cgst_amount": None,
+        "sgst_amount": None,
+        "cess_amount": None,
+        "round_off": None,
+        "total_amount": "5900.00",
+    }
+    company = _company(client)
+    client.post(
+        f"{COMPANIES_URL}/{company['id']}/vendors",
+        json={"name": "ABC Supplies Pvt Ltd", "gstin": "29AAABC1234D1Z3"},
+    )
+    fake_ai.text = json.dumps(two_col_layout)
+    document = _pdf_document(client, company["id"])
+
+    response = _process_document(client, company["id"], document["id"])
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PROCESSED"
+    invoice_id = response.json()["invoice_id"]
+    invoice = _get_invoice(client, company["id"], invoice_id)
+    assert invoice["vendor_name"] == "ABC Supplies Pvt Ltd"
+    assert invoice["igst_amount"] == "900.00"
+    assert invoice["cgst_amount"] is None

@@ -38,6 +38,7 @@ import { FileUploadDropzone } from "@/components/pal/dropzone";
 import { useCompany, useScoped, useStore } from "@/lib/store";
 import { useDocuments, useUploadDocuments } from "@/lib/queries/documents";
 import { useVendors } from "@/lib/queries/vendors";
+import { useAccountingAudit } from "@/lib/queries/accountingAudit";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -59,7 +60,7 @@ function Dashboard() {
   const uploadDocuments = useUploadDocuments(company?.id);
   const reco = useScoped(s.reco);
   const reviews = useScoped(s.reviews);
-  const audit = useScoped(s.audit);
+  const { data: audit = [] } = useAccountingAudit(company?.id);
   const [upload, setUpload] = useState(false);
 
   const activity = useMemo(() => {
@@ -366,8 +367,8 @@ function Dashboard() {
             </div>
           ) : (
             <EmptyState
-              title="No activity in this session"
-              hint="Actions you take here are recorded locally."
+              title="No activity yet"
+              hint="Actions you take are recorded and persist across sessions."
             />
           )}
         </Section>

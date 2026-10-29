@@ -1,0 +1,168 @@
+{
+  "version": 2,
+  "id": "a407856c-a92c-40db-8d61-e7d438c064ec",
+  "action": "Browser flow",
+  "revision": {
+    "scope": ".",
+    "digest": "af94a61005fb70dcd90802bcb0e2f84a7a0b2e92ab7a04577f969441b5d074e5",
+    "complete": true,
+    "files": 363,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": false,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/invoices"
+    },
+    "finalUrl": "http://localhost:8080/invoices",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectVisible",
+        "ok": true,
+        "expectation": {
+          "selector": "body"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/companies",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/companies"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/companies",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/companies"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": false,
+        "detail": "At most two screenshots per flow; use focused flows for additional routes.",
+        "url": "http://localhost:8080/invoices",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/invoices"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "label": "dashboard",
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/769f6658-1199-4a41-b769-55c8d4de7815/1.jpg"
+      },
+      {
+        "label": "companies",
+        "url": "http://localhost:8080/companies",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/769f6658-1199-4a41-b769-55c8d4de7815/2.jpg"
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow FAILED. Read the failing step, application console/page errors and unexpected HTTP failures — those are observed browser failures. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectVisible",
+        "passed": true
+      }
+    ]
+  }
+}

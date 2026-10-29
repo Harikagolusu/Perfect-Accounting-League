@@ -1,0 +1,160 @@
+{
+  "version": 2,
+  "id": "b9cb2934-224c-45bc-a7d0-c0121e045287",
+  "action": "capture",
+  "revision": {
+    "scope": "src",
+    "digest": "5bce1ba87b10dcf2704d8ff1c80ab5d587853dd8b12cfa8920e36fa870aa5c58",
+    "complete": true,
+    "files": 127,
+    "contracts": {
+      "digest": "56744e416f96068ae5663d5910d6ab66767568e1ab68350ca71a25d7a77b1759",
+      "complete": true,
+      "count": 0
+    }
+  },
+  "sourceStableDuringRun": true,
+  "result": {
+    "ok": true,
+    "url": "http://localhost:8080/",
+    "boundary": {
+      "kind": "local",
+      "origin": "http://localhost:8080",
+      "path": "/tally"
+    },
+    "finalUrl": "http://localhost:8080/tally",
+    "browserAvailable": true,
+    "cleanup": "closed",
+    "renderedApp": true,
+    "httpStatus": 200,
+    "steps": [
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Asterleaf"
+        },
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/"
+        }
+      },
+      {
+        "action": "goto",
+        "ok": true,
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      },
+      {
+        "action": "expectText",
+        "ok": true,
+        "expectation": {
+          "text": "Tally"
+        },
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      },
+      {
+        "action": "screenshot",
+        "ok": true,
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "boundary": {
+          "kind": "local",
+          "origin": "http://localhost:8080",
+          "path": "/tally"
+        }
+      }
+    ],
+    "screenshots": [
+      {
+        "label": "dashboard-with-live-db",
+        "url": "http://localhost:8080/",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/3c108808-8dcf-4588-95bd-f5377cabec44/1.jpg"
+      },
+      {
+        "label": "tally-with-live-db",
+        "url": "http://localhost:8080/tally",
+        "viewport": {
+          "width": 1280,
+          "height": 720
+        },
+        "path": ".code-ae/design/captures/3c108808-8dcf-4588-95bd-f5377cabec44/2.jpg"
+      }
+    ],
+    "consoleErrors": [],
+    "unexpectedConsoleErrors": [],
+    "pageErrors": [],
+    "failedRequests": [],
+    "expectedFailedRequests": [],
+    "unexpectedFailedRequests": [],
+    "note": "The flow completed and every assertion passed against the real running app. Console/page errors and failed requests are captured above. This verifies only the supplied steps, not all routes or visual design quality.",
+    "checks": [
+      {
+        "name": "step_2.expectText",
+        "passed": true
+      },
+      {
+        "name": "step_5.expectText",
+        "passed": true
+      }
+    ]
+  }
+}

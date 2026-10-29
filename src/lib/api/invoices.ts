@@ -70,10 +70,48 @@ export interface VendorMatch {
   candidates: VendorMatchCandidate[];
 }
 
+/** Mirrors `InvoiceLineItemResponse` in backend/app/schemas/invoice_line_item.py. */
+export interface InvoiceLineItemDto {
+  id: string;
+  line_number: number;
+  description: string;
+  hsn_sac: string | null;
+  quantity: string | null;
+  unit_rate: string | null;
+  gst_rate: string | null;
+  taxable_amount: string | null;
+  total_amount: string | null;
+}
+
+/** Write payload for a line item. Amounts are decimal text or omitted. */
+export interface InvoiceLineItemWrite {
+  description?: string;
+  hsn_sac?: string | null;
+  quantity?: string | null;
+  unit_rate?: string | null;
+  gst_rate?: string | null;
+  taxable_amount?: string | null;
+  total_amount?: string | null;
+}
+
+/**
+ * One short line naming what an invoice is for, built from its line item
+ * descriptions. Used where a vendor has no configured expense ledger.
+ */
+export function lineItemsSummary(items: InvoiceLineItemDto[]): string {
+  const parts = items.map((i) => i.description.trim()).filter(Boolean);
+  if (!parts.length) return "";
+  const head = parts.slice(0, 2).join(", ");
+  const rest = parts.length - 2;
+  return rest > 0 ? `${head} +${rest} more` : head;
+}
+
 export interface InvoiceDto {
   id: string;
   company_id: string;
   document_id: string;
+  /** Derived server-side from the stored figures; recomputed on every read. */
+  validation_issues?: string[];
   vendor_id: string | null;
   suggested_vendor_id: string | null;
   previous_vendor_id: string | null;
@@ -175,6 +213,7 @@ export const toInvoice = (dto: InvoiceDto) => ({
   previousVendorId: dto.previous_vendor_id,
   vendorMappingStatus: dto.vendor_mapping_status,
   vendorMatchMethod: dto.vendor_match_method,
+  validationIssues: dto.validation_issues ?? [],
   invoiceNumber: dto.invoice_number,
   invoiceDate: dto.invoice_date,
   dueDate: dto.due_date,
@@ -378,6 +417,27 @@ export const invoicesApi = {
   /** Preview the current deterministic match and its candidates. */
   match: (companyId: string, invoiceId: string) =>
     apiFetch<VendorMatchDto>(`${base(companyId)}/${invoiceId}/vendor-match`),
+  lineItems: (companyId: string, invoiceId: string) =>
+    apiFetch<InvoiceLineItemDto[]>(`${base(companyId)}/${invoiceId}/line-items`),
+  createLineItem: (companyId: string, invoiceId: string, body: InvoiceLineItemWrite) =>
+    apiFetch<InvoiceLineItemDto>(`${base(companyId)}/${invoiceId}/line-items`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateLineItem: (
+    companyId: string,
+    invoiceId: string,
+    lineItemId: string,
+    body: InvoiceLineItemWrite,
+  ) =>
+    apiFetch<InvoiceLineItemDto>(`${base(companyId)}/${invoiceId}/line-items/${lineItemId}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteLineItem: (companyId: string, invoiceId: string, lineItemId: string) =>
+    apiFetch<void>(`${base(companyId)}/${invoiceId}/line-items/${lineItemId}`, {
+      method: "DELETE",
+    }),
   /**
    * Confirm a suggested vendor, assign one manually, or reject a suggestion
    * with `vendorId: null`. The backend verifies company ownership.

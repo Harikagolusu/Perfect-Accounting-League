@@ -32,6 +32,8 @@ from app.core.storage import (
     write_document,
 )
 from app.models.document import Document, DocumentStatus, DocumentType
+from app.models.voucher import AccountingEntityType
+from app.services.accounting_audit import record_event
 from app.services.company import get_company
 
 logger = logging.getLogger(__name__)
@@ -106,6 +108,15 @@ def create_document(
     )
     try:
         db.add(document)
+        record_event(
+            db,
+            company_id=company_id,
+            entity_type=AccountingEntityType.DOCUMENT,
+            entity_id=document.id,
+            event_type="DOCUMENT_UPLOADED",
+            new_value=document.original_filename,
+            reason="Document uploaded to the inbox.",
+        )
         db.commit()
     except Exception:
         db.rollback()
@@ -142,6 +153,15 @@ def delete_document(db: Session, company_id: uuid.UUID, document_id: uuid.UUID) 
         # orphaned file that the logs already point at.
         logger.exception("Could not remove stored file for document %s", document_id)
 
+    record_event(
+        db,
+        company_id=company_id,
+        entity_type=AccountingEntityType.DOCUMENT,
+        entity_id=document.id,
+        event_type="DOCUMENT_DELETED",
+        new_value=document.original_filename,
+        reason="Document removed from the inbox.",
+    )
     db.delete(document)
     db.commit()
 

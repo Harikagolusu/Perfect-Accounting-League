@@ -35,6 +35,7 @@ from app.services.exports.common.models import (
 from app.services.exports.common.workbook import download_filename
 from app.services.exports.service import ExportFile
 from app.services.voucher import list_vouchers, mark_vouchers_exported
+from app.services.posting_period import resolve_tally_posting_date
 from app.services.voucher_validation import validate_voucher
 
 _VOUCHER_TYPE_LABEL = {
@@ -149,7 +150,7 @@ def _party_side(voucher: VoucherModel) -> VoucherSide:
 
 
 def _to_export_voucher(
-    db: Session, voucher: VoucherModel
+    db: Session, voucher: VoucherModel, posting_month: date | None = None
 ) -> tuple[ExportVoucher | None, list[ExportIssue]]:
     issues: list[ExportIssue] = []
     validation = validate_voucher(db, voucher)
@@ -201,7 +202,7 @@ def _to_export_voucher(
         )
     )
     export = ExportVoucher(
-        voucher_date=voucher.voucher_date,
+        voucher_date=resolve_tally_posting_date(voucher.voucher_date, posting_month),
         voucher_type=_VOUCHER_TYPE_LABEL[voucher.voucher_type],
         change_mode=(
             "Accounting Invoice"
@@ -248,6 +249,7 @@ def voucher_export_preview(
     voucher_ids: Sequence[uuid.UUID] | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    posting_month: date | None = None,
 ) -> ExportPreviewResponse:
     get_company(db, company_id)
     selected = _select_vouchers(
@@ -260,7 +262,7 @@ def voucher_export_preview(
     exports: list[ExportVoucher] = []
     issues: list[ExportIssue] = []
     for voucher in selected:
-        export, voucher_issues = _to_export_voucher(db, voucher)
+        export, voucher_issues = _to_export_voucher(db, voucher, posting_month)
         issues.extend(voucher_issues)
         if export is not None:
             exports.append(export)
@@ -278,6 +280,7 @@ def voucher_export_file(
     voucher_ids: Sequence[uuid.UUID] | None = None,
     date_from: date | None = None,
     date_to: date | None = None,
+    posting_month: date | None = None,
     actor: str = "local-user",
 ) -> ExportFile:
     company = get_company(db, company_id)
@@ -292,7 +295,7 @@ def voucher_export_file(
     included: list[VoucherModel] = []
     issues: list[ExportIssue] = []
     for voucher in selected:
-        export, voucher_issues = _to_export_voucher(db, voucher)
+        export, voucher_issues = _to_export_voucher(db, voucher, posting_month)
         issues.extend(voucher_issues)
         if export is not None:
             exports.append(export)

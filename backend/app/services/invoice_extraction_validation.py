@@ -36,9 +36,21 @@ _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 #: ISO is tried first because the prompt asks for it.
 _DATE_FORMATS = (
     "%Y-%m-%d",
+    "%Y/%m/%d",
+    # 2-digit-year variants come before their 4-digit counterparts: strptime's
+    # %y never matches a 4-digit year, but %Y would read "24" as year 24, so a
+    # "dd/mm/yy" date must be tried first.
+    "%d/%m/%y",
     "%d/%m/%Y",
+    "%d-%m-%y",
     "%d-%m-%Y",
+    "%d.%m.%y",
     "%d.%m.%Y",
+    "%d-%b-%y",
+    "%d-%b-%Y",
+    "%d/%b/%y",
+    "%d/%b/%Y",
+    "%d %b %y",
     "%d %b %Y",
     "%d %B %Y",
     "%b %d, %Y",
@@ -50,6 +62,42 @@ class InvalidExtractionOutput(Exception):
     """The provider response could not be read as an extraction payload."""
 
     message = "The AI response could not be read as structured invoice data."
+
+    def __init__(self, reason: str = "unreadable") -> None:
+        super().__init__(self.message)
+        self.reason = reason
+
+
+class ExtractedLineItem(BaseModel):
+    """One line item from the AI extraction, before deterministic validation."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    line_number: int | None = None
+    description: str | None = Field(default=None, max_length=500)
+    supply_type: str | None = Field(default=None, max_length=16)
+    hsn_sac: str | None = Field(default=None, max_length=16)
+    quantity: Decimal | None = None
+    # unit_rate can have >2 dp when the AI back-calculates it from totals.
+    unit_rate: Decimal | None = None
+    gst_rate: Decimal | None = None
+
+    taxable_amount: ExtractedMoney | None = None
+    igst_amount: ExtractedMoney | None = None
+    cgst_amount: ExtractedMoney | None = None
+    sgst_amount: ExtractedMoney | None = None
+    cess_amount: ExtractedMoney | None = None
+    total_amount: ExtractedMoney | None = None
+
+    @field_validator("description", "supply_type", "hsn_sac", mode="before")
+    @classmethod
+    def _clean_text(cls, value: Any) -> str | None:
+        return clean_optional(value)
+
+    @field_validator("supply_type", "hsn_sac", mode="after")
+    @classmethod
+    def _upper_codes(cls, value: str | None) -> str | None:
+        return value.upper() if value else None
 
 
 class ExtractedInvoice(BaseModel):
@@ -72,6 +120,7 @@ class ExtractedInvoice(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=64)
     vendor_pan: str | None = Field(default=None, max_length=64)
     buyer_gstin: str | None = Field(default=None, max_length=64)
+    place_of_supply: str | None = Field(default=None, max_length=128)
     po_number: str | None = Field(default=None, max_length=128)
 
     currency: str | None = Field(default=None, max_length=16)
@@ -81,8 +130,12 @@ class ExtractedInvoice(BaseModel):
     sgst_amount: ExtractedMoney | None = None
     igst_amount: ExtractedMoney | None = None
     cess_amount: ExtractedMoney | None = None
+    discount_amount: ExtractedMoney | None = None
+    freight_amount: ExtractedMoney | None = None
     round_off: ExtractedMoney | None = None
     total_amount: ExtractedMoney | None = None
+
+    line_items: list[ExtractedLineItem] | None = Field(default_factory=list)
 
     @field_validator(
         "invoice_number",
@@ -92,6 +145,7 @@ class ExtractedInvoice(BaseModel):
         "vendor_gstin",
         "vendor_pan",
         "buyer_gstin",
+        "place_of_supply",
         "po_number",
         "currency",
         mode="before",
@@ -131,7 +185,7 @@ def parse_extraction_payload(text: str) -> ExtractedInvoice:
     safe, fixed message is exposed.
     """
     if not text or not text.strip():
-        raise InvalidExtractionOutput(InvalidExtractionOutput.message)
+        raise InvalidExtractionOutput("empty_response")
 
     cleaned = _strip_optional_fence(text.strip())
     try:
@@ -141,17 +195,17 @@ def parse_extraction_payload(text: str) -> ExtractedInvoice:
             parse_constant=_reject_json_constant,
         )
     except (json.JSONDecodeError, ValueError):
-        raise InvalidExtractionOutput(InvalidExtractionOutput.message) from None
+        raise InvalidExtractionOutput("invalid_json") from None
 
     if not isinstance(data, dict):
-        raise InvalidExtractionOutput(InvalidExtractionOutput.message)
+        raise InvalidExtractionOutput("not_an_object")
 
     try:
         return ExtractedInvoice.model_validate(data)
     except ValidationError:
         # Pydantic's details include input values; keep them out of the
         # client-facing message and the log.
-        raise InvalidExtractionOutput(InvalidExtractionOutput.message) from None
+        raise InvalidExtractionOutput("schema_mismatch") from None
 
 
 def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
@@ -205,6 +259,8 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         sgst_amount=payload.sgst_amount,
         igst_amount=payload.igst_amount,
         cess_amount=payload.cess_amount,
+        discount_amount=payload.discount_amount,
+        freight_amount=payload.freight_amount,
         round_off=payload.round_off,
         total_amount=payload.total_amount,
     )
@@ -229,6 +285,7 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         "vendor_gstin": vendor_gstin,
         "vendor_pan": vendor_pan,
         "buyer_gstin": buyer_gstin,
+        "place_of_supply": payload.place_of_supply,
         "po_number": payload.po_number,
         "currency": currency,
         "taxable_amount": payload.taxable_amount,
@@ -236,11 +293,40 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         "sgst_amount": payload.sgst_amount,
         "igst_amount": payload.igst_amount,
         "cess_amount": payload.cess_amount,
+        "discount_amount": payload.discount_amount,
+        "freight_amount": payload.freight_amount,
         "round_off": payload.round_off,
         "total_amount": payload.total_amount,
+        "line_items": _collect_line_items(payload.line_items or []),
     }
 
     return ValidatedExtraction(values=values, issues=tuple(issues))
+
+
+def _collect_line_items(items: list[ExtractedLineItem]) -> list[dict[str, object]]:
+    """Convert extracted line items to plain dicts, skipping any without a description."""
+    result: list[dict[str, object]] = []
+    for i, item in enumerate(items, 1):
+        if not item.description:
+            continue
+        result.append(
+            {
+                "line_number": item.line_number or i,
+                "description": item.description,
+                "supply_type": item.supply_type,
+                "hsn_sac": item.hsn_sac,
+                "quantity": item.quantity,
+                "unit_rate": item.unit_rate,
+                "gst_rate": item.gst_rate,
+                "taxable_amount": item.taxable_amount,
+                "igst_amount": item.igst_amount,
+                "cgst_amount": item.cgst_amount,
+                "sgst_amount": item.sgst_amount,
+                "cess_amount": item.cess_amount,
+                "total_amount": item.total_amount,
+            }
+        )
+    return result
 
 
 def _bounded_identifier(
@@ -310,6 +396,7 @@ def _reject_json_constant(value: str) -> Any:
 
 __all__ = [
     "ExtractedInvoice",
+    "ExtractedLineItem",
     "InvalidExtractionOutput",
     "ValidatedExtraction",
     "parse_extraction_payload",

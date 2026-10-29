@@ -9,6 +9,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { toVendor, toVendorPayload, vendorsApi } from "@/lib/api/vendors";
+import { auditKeys } from "@/lib/queries/accountingAudit";
 import type { Vendor } from "@/lib/types";
 
 export const vendorKeys = {
@@ -45,7 +46,10 @@ export function useVendor(companyId: string | undefined, vendorId: string | unde
 function useInvalidateCompany(companyId: string | undefined) {
   const queryClient = useQueryClient();
   return () => {
-    if (companyId) queryClient.invalidateQueries({ queryKey: vendorKeys.list(companyId) });
+    if (!companyId) return;
+    queryClient.invalidateQueries({ queryKey: vendorKeys.list(companyId) });
+    // A vendor change records an audit event; refresh the activity views.
+    queryClient.invalidateQueries({ queryKey: auditKeys.list(companyId) });
   };
 }
 

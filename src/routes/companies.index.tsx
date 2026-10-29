@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { Plus, Pencil, Eye, Trash2 } from "lucide-react";
+import { Plus, Pencil, Eye, RefreshCw, Trash2 } from "lucide-react";
 import { PageHeader, StatusBadge, Field, EmptyState } from "@/components/pal/common";
 import { DataTable, FilterSelect } from "@/components/pal/data-table";
 import { Button } from "@/components/ui/button";
@@ -14,7 +14,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useStore } from "@/lib/store";
 import { FINANCIAL_YEARS } from "@/lib/constants";
 import { EMAIL_RE, GSTIN_RE, PAN_RE } from "@/lib/format";
 import {
@@ -23,6 +22,7 @@ import {
   useDeactivateCompany,
   useUpdateCompany,
 } from "@/lib/queries/companies";
+import { useTallyCompanySync } from "@/lib/queries/tally";
 import type { Company } from "@/lib/types";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
@@ -65,7 +65,6 @@ export function CompanyDialog({
   open: boolean;
   onOpenChange: (o: boolean) => void;
 }) {
-  const s = useStore();
   const [f, setF] = useState<Company>(initial ?? blank);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const createCompany = useCreateCompany();
@@ -90,13 +89,6 @@ export function CompanyDialog({
       if (wasExisting) await updateCompany.mutateAsync(f);
       else await createCompany.mutateAsync({ ...f, id: "" });
       toast.success(wasExisting ? "Company updated" : "Company added");
-      s.log({
-        module: "Companies",
-        action: wasExisting ? "Updated" : "Created",
-        recordId: f.gstin,
-        previous: "—",
-        next: f.displayName,
-      });
       onOpenChange(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not save company");
@@ -184,26 +176,41 @@ export function CompanyDialog({
 }
 
 function CompaniesPage() {
-  const s = useStore();
   const [status, setStatus] = useState("All");
   const [editing, setEditing] = useState<Company | null>(null);
   const [open, setOpen] = useState(false);
   // include_inactive so every status the filter offers is present.
   const { data, isPending, isError, error, refetch } = useCompanies(true);
   const deactivate = useDeactivateCompany();
-  const rows = (data ?? []).filter((c) => status === "All" || c.status === status);
+  const tallyCompanySync = useTallyCompanySync();
+  // "All" means every live company. Archived (INACTIVE) companies are only
+  // shown when the user explicitly selects the Inactive filter, so deleting a
+  // company removes it from the default list instead of leaving a dead row.
+  const rows = (data ?? []).filter((c) => {
+    if (status === "Inactive") return c.status === "Inactive";
+    if (c.status === "Inactive") return false;
+    return status === "All" || c.status === status;
+  });
+
+  const onSyncCompanies = async () => {
+    try {
+      const result = await tallyCompanySync.mutateAsync();
+      if (!result.success) {
+        toast.error(result.error_message ?? "Could not sync companies from TallyPrime");
+        return;
+      }
+      toast.success(`Synced ${result.companies_fetched} Tally companies`, {
+        description: `${result.companies_created} created, ${result.companies_updated} updated, ${result.companies_unchanged} unchanged`,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not sync companies from TallyPrime");
+    }
+  };
 
   const onDeactivate = async (row: Company) => {
     try {
       await deactivate.mutateAsync(row.id);
-      toast.success(`${row.displayName} deactivated`);
-      s.log({
-        module: "Companies",
-        action: "Deactivated",
-        recordId: row.gstin,
-        previous: row.status,
-        next: "Inactive",
-      });
+      toast.success(`${row.displayName} removed from active companies`);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not deactivate company");
     }
@@ -215,15 +222,25 @@ function CompaniesPage() {
         title="Companies & Clients"
         description="Client entities managed by your firm."
         actions={
-          <Button
-            onClick={() => {
-              setEditing(null);
-              setOpen(true);
-            }}
-          >
-            <Plus />
-            Add Company
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              variant="outline"
+              onClick={onSyncCompanies}
+              disabled={tallyCompanySync.isPending}
+            >
+              <RefreshCw className={tallyCompanySync.isPending ? "animate-spin" : undefined} />
+              {tallyCompanySync.isPending ? "Syncing…" : "Sync from Tally"}
+            </Button>
+            <Button
+              onClick={() => {
+                setEditing(null);
+                setOpen(true);
+              }}
+            >
+              <Plus />
+              Add Company
+            </Button>
+          </div>
         }
       />
       {isPending ? (

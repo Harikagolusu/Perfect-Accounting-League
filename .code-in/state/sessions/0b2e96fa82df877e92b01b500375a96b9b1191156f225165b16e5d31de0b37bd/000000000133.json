@@ -1,0 +1,1 @@
+{"id":"2fa5bb53-da91-492b-9308-30504c4b9c39","change":{"type":"verification","change":{"action":"verify","expectedRevision":20,"scopes":["static"],"evidence":{"tool":"run_tests","callId":"call_d15ae352dba444e6a8480970"}}},"previous":"4ffe8da6cfc919d609592023b20ffdf53a837bee2cf8f36f12c4e2ea225e4518","hash":"370f3f333d965c2ff8f8e7b025e9dcdaaa00f14aa7db0094c459321e053abeee"}

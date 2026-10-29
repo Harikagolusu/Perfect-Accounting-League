@@ -13,6 +13,7 @@ import {
   type VoucherActionDto,
   type VoucherListFilters,
   type VoucherLineWriteDto,
+  type VoucherPostDto,
   type VoucherUpdateDto,
   type VoucherWriteDto,
 } from "@/lib/api/vouchers";
@@ -110,10 +111,15 @@ export function useVoucherExportPreview(
   companyId: string | undefined,
   dateFrom?: string,
   dateTo?: string,
+  postingMonth?: string,
 ) {
   return useQuery({
-    queryKey: voucherKeys.exportPreview(companyId ?? "unknown", dateFrom, dateTo),
-    queryFn: async () => vouchersApi.exportPreview(companyId as string, { dateFrom, dateTo }),
+    queryKey: [
+      ...voucherKeys.exportPreview(companyId ?? "unknown", dateFrom, dateTo),
+      postingMonth,
+    ],
+    queryFn: async () =>
+      vouchersApi.exportPreview(companyId as string, { dateFrom, dateTo, postingMonth }),
     enabled: isBrowser && Boolean(companyId),
   });
 }
@@ -207,8 +213,19 @@ export function useVerifyVoucherPosting(companyId: string | undefined) {
 
 export function useExportVoucher(companyId: string | undefined) {
   const invalidate = useInvalidateVouchers(companyId);
-  return useMutation<DownloadedFile, Error, { id: string; actor?: string }>({
-    mutationFn: async ({ id, actor }) => vouchersApi.exportOne(companyId as string, id, { actor }),
+  return useMutation<DownloadedFile, Error, { id: string; actor?: string; postingMonth?: string }>({
+    mutationFn: async ({ id, actor, postingMonth }) =>
+      vouchersApi.exportOne(companyId as string, id, { actor, posting_month: postingMonth }),
+    onSuccess: invalidate,
+  });
+}
+
+/** Post one approved voucher straight into TallyPrime. No file is produced. */
+export function usePostVoucherToTally(companyId: string | undefined) {
+  const invalidate = useInvalidateVouchers(companyId);
+  return useMutation<VoucherPostDto, Error, { id: string; actor?: string; postingMonth?: string }>({
+    mutationFn: async ({ id, actor, postingMonth }) =>
+      vouchersApi.postToTally(companyId as string, id, { actor, posting_month: postingMonth }),
     onSuccess: invalidate,
   });
 }
@@ -218,7 +235,13 @@ export function useExportVouchers(companyId: string | undefined) {
   return useMutation<
     DownloadedFile,
     Error,
-    { voucherIds?: string[]; dateFrom?: string; dateTo?: string; actor?: string }
+    {
+      voucherIds?: string[];
+      dateFrom?: string;
+      dateTo?: string;
+      postingMonth?: string;
+      actor?: string;
+    }
   >({
     mutationFn: async (body) => vouchersApi.exportFile(companyId as string, body),
     onSuccess: invalidate,

@@ -11,7 +11,14 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, PlainSerializer, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 from app.models.invoice import (
     InvoiceDirection,
@@ -60,6 +67,8 @@ class _InvoiceFields(BaseModel):
     sgst_amount: NonNegativeMoney | None = None
     igst_amount: NonNegativeMoney | None = None
     cess_amount: NonNegativeMoney | None = None
+    discount_amount: NonNegativeMoney | None = None
+    freight_amount: NonNegativeMoney | None = None
     # May be negative: rounding a total down is normal.
     round_off: Money | None = None
     total_amount: NonNegativeMoney | None = None
@@ -140,6 +149,8 @@ class InvoiceResponse(TimestampedResponse):
     sgst_amount: MoneyOut | None
     igst_amount: MoneyOut | None
     cess_amount: MoneyOut | None
+    discount_amount: MoneyOut | None
+    freight_amount: MoneyOut | None
     round_off: MoneyOut | None
     total_amount: MoneyOut | None
 
@@ -153,6 +164,40 @@ class InvoiceResponse(TimestampedResponse):
     previous_vendor_id: uuid.UUID | None
     vendor_mapping_status: VendorMappingStatus
     vendor_match_method: VendorMatchMethod | None
+
+    #: Structural problems in the stored values, recomputed on every read so a
+    #: reviewer still sees why an invoice needs review after a page reload.
+    #: Derived, never stored: the figures remain exactly as read or typed.
+    validation_issues: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _attach_validation_issues(self) -> "InvoiceResponse":
+        from app.services.invoice_validation import validate_invoice_fields
+
+        object.__setattr__(
+            self,
+            "validation_issues",
+            list(
+                validate_invoice_fields(
+                    invoice_number=self.invoice_number,
+                    invoice_date=self.invoice_date,
+                    due_date=self.due_date,
+                    vendor_gstin=self.vendor_gstin,
+                    vendor_pan=self.vendor_pan,
+                    buyer_gstin=self.buyer_gstin,
+                    taxable_amount=self.taxable_amount,
+                    cgst_amount=self.cgst_amount,
+                    sgst_amount=self.sgst_amount,
+                    igst_amount=self.igst_amount,
+                    cess_amount=self.cess_amount,
+                    discount_amount=self.discount_amount,
+                    freight_amount=self.freight_amount,
+                    round_off=self.round_off,
+                    total_amount=self.total_amount,
+                ).issues
+            ),
+        )
+        return self
 
 
 class VendorMappingRequest(BaseModel):

@@ -32,6 +32,7 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "vendor_gstin",
     "vendor_pan",
     "buyer_gstin",
+    "place_of_supply",
     "po_number",
     "currency",
     "taxable_amount",
@@ -123,6 +124,26 @@ _BUYER_LABELS = (
     "recipient",
 )
 
+_PLACE_OF_SUPPLY_RE = re.compile(
+    r"(?:place\s+of\s+supply|p\.?\s*o\.?\s*s|destination\s+state|state\s+of\s+supply)"
+    r"\s*[:\-]?\s*(.+?)(?:\s*\(\s*\d{1,2}\s*\))?\s*$",
+    re.IGNORECASE,
+)
+
+#: Labels that mark a date as the invoice's own issue date. Word-bounded so
+#: "date" does not match inside "Updated" and "dt" not inside a longer word.
+#: The bare "date"/"dt" alternatives come last; the alternation is ordered so
+#: a specific label wins over them at the same position.
+_INVOICE_DATE_LABEL_RE = re.compile(
+    r"\b(?:invoice\s*date|date\s+of\s+invoice|date\s+of\s+issue|billing\s*date"
+    r"|voucher\s*date|issue\s*date|invoice\s*dt|bill\s*date|bill\s*dt"
+    r"|inv\s*date|inv\s*dt|dated|date|dt)\b\.?",
+    re.IGNORECASE,
+)
+_DUE_DATE_LABEL_RE = re.compile(
+    r"\b(?:due\s*date|payment\s*due|due\s+on|due\s*dt)\b\.?", re.IGNORECASE
+)
+
 _RESERVED_NUMBER_VALUES = {
     "date",
     "no",
@@ -155,6 +176,7 @@ class RegexExtractor:
         self._amounts(lines, collected)
         self._currency(lines, collected)
         self._vendor_name(lines, collected)
+        self._place_of_supply(lines, collected)
         self._derive_vendor_pan(collected)
 
         return ExtractionCandidates(
@@ -245,27 +267,30 @@ class RegexExtractor:
         collected: dict[str, list[FieldCandidate]],
     ) -> None:
         for page, line in lines:
-            matches = list(_DATE_RE.finditer(line))
-            if not matches:
-                continue
-            lowered = line.casefold()
-            value = matches[-1].group(1)
-            if _contains_any(lowered, ("due date", "payment due", "due on")):
-                collected["due_date"].append(
-                    _candidate("due_date", value, page, line)
+            for match in _DATE_RE.finditer(line):
+                # Each date is classified by the nearest label printed before
+                # it, so "Invoice Date: X  Due Date: Y" yields both rather than
+                # filing the whole line under whichever label appears first.
+                head = line[: match.start()]
+                due_at = _last_label_start(_DUE_DATE_LABEL_RE, head)
+                # A due label ends in "date"/"dt" itself, so blank it out before
+                # looking for the weaker bare invoice labels.
+                masked = _DUE_DATE_LABEL_RE.sub(
+                    lambda found: " " * len(found.group(0)), head
                 )
-            elif _contains_any(
-                lowered, ("invoice date", "bill date", "date of invoice", "dated")
-            ):
-                collected["invoice_date"].append(
-                    _candidate("invoice_date", value, page, line)
-                )
-            elif re.search(r"\bdate\b", lowered):
-                collected["invoice_date"].append(
-                    _candidate("invoice_date", value, page, line)
-                )
-            # An unlabelled date is weak evidence; only labelled header lines
-            # contribute, so item-table dates do not masquerade as invoice dates.
+                invoice_at = _last_label_start(_INVOICE_DATE_LABEL_RE, masked)
+                value = match.group(1)
+                if due_at > invoice_at:
+                    collected["due_date"].append(
+                        _candidate("due_date", value, page, line)
+                    )
+                elif invoice_at >= 0:
+                    collected["invoice_date"].append(
+                        _candidate("invoice_date", value, page, line)
+                    )
+                # An unlabelled date is weak evidence; only labelled header
+                # lines contribute, so item-table dates do not masquerade as
+                # invoice dates.
 
     def _amounts(
         self,
@@ -344,6 +369,20 @@ class RegexExtractor:
             )
             break
 
+    def _place_of_supply(
+        self,
+        lines: list[tuple[int, str]],
+        collected: dict[str, list[FieldCandidate]],
+    ) -> None:
+        for page, line in lines:
+            match = _PLACE_OF_SUPPLY_RE.search(line)
+            if match:
+                value = match.group(1).strip(" ,;:-")
+                if value and 2 <= len(value) <= 80:
+                    collected["place_of_supply"].append(
+                        _candidate("place_of_supply", value, page, line)
+                    )
+
     def _derive_vendor_pan(
         self, collected: dict[str, list[FieldCandidate]]
     ) -> None:
@@ -398,6 +437,14 @@ def _lines(
             if line.strip():
                 lines.append((page.page_number, line.strip()))
     return lines
+
+
+def _last_label_start(pattern: re.Pattern[str], text: str) -> int:
+    """Start offset of the last label match in `text`, or -1 when there is none."""
+    start = -1
+    for found in pattern.finditer(text):
+        start = found.start()
+    return start
 
 
 def _candidate(

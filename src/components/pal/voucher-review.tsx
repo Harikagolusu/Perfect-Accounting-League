@@ -7,16 +7,18 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Download, Plus, RotateCcw, Save, Send, Trash2, X } from "lucide-react";
+import { CheckCircle2, Plus, RotateCcw, Save, Send, Trash2, Upload, X } from "lucide-react";
 import { toast } from "sonner";
 
 import { EmptyState, Field, Section, StatusBadge } from "@/components/pal/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useLedgers } from "@/lib/queries/ledgers";
+import { useStore } from "@/lib/store";
+import { periodMonthStart } from "@/lib/constants";
 import {
   useDeleteVoucher,
-  useExportVoucher,
+  usePostVoucherToTally,
   useUpdateVoucher,
   useVoucher,
   useVoucherAction,
@@ -30,7 +32,6 @@ import {
   type VoucherLine,
   type VoucherSide,
 } from "@/lib/api/vouchers";
-import { downloadBlob } from "@/lib/export";
 import { fmtDate } from "@/lib/format";
 
 const editableStatuses = new Set(["DRAFT", "NEEDS_REVIEW", "REJECTED"]);
@@ -38,12 +39,19 @@ const submitStatuses = new Set(["DRAFT", "NEEDS_REVIEW"]);
 const approveStatuses = new Set(["PENDING_APPROVAL"]);
 const rejectStatuses = new Set(["PENDING_APPROVAL", "NEEDS_REVIEW"]);
 const reopenStatuses = new Set(["REJECTED", "POSTING_FAILED", "NEEDS_REVIEW"]);
-const exportStatuses = new Set(["APPROVED", "AWAITING_IMPORT_CONFIRMATION"]);
-const verifyStatuses = new Set([
-  "AWAITING_IMPORT_CONFIRMATION",
-  "POSTING_IN_PROGRESS",
-  "POSTING_FAILED",
-]);
+//: Posting to Tally is the only route out of APPROVED. POSTING_FAILED is a
+//: retry of a post Tally refused; POSTED is terminal and offers no button.
+const postStatuses = new Set(["APPROVED", "POSTING_FAILED"]);
+//: Manual confirmation still serves the bulk import-file route and a post left
+//: stuck in flight. A failed direct post is retried with the button instead.
+const verifyStatuses = new Set(["AWAITING_IMPORT_CONFIRMATION", "POSTING_IN_PROGRESS"]);
+
+/**
+ * Collapse a ledger name to a comparison key. The backend resolves names by
+ * exact (case-insensitive) match, so "Freight Inward A/c" never matches
+ * "Freight Inward"; this catches those near-misses in the reviewer's dropdown.
+ */
+const ledgerKey = (name: string) => name.toLowerCase().replace(/[^a-z0-9]+/g, "");
 
 const blankLine = (lineNumber: number): VoucherLine => ({
   id: `new-${lineNumber}`,
@@ -74,6 +82,8 @@ export function VoucherReview({
   voucherId: string;
   onDeleted?: () => void;
 }) {
+  const { financialYear, period } = useStore();
+  const postingMonth = periodMonthStart(financialYear, period);
   const { data: voucher, isPending, isError, error } = useVoucher(companyId, voucherId);
   const { data: ledgers = [] } = useLedgers(companyId);
   const { data: audit = [] } = useVoucherAudit(companyId, voucherId, Boolean(voucher));
@@ -84,7 +94,7 @@ export function VoucherReview({
   const reject = useVoucherAction(companyId, "reject");
   const reopen = useVoucherAction(companyId, "reopen");
   const verifyPosting = useVerifyVoucherPosting(companyId);
-  const exportVoucher = useExportVoucher(companyId);
+  const postToTally = usePostVoucherToTally(companyId);
 
   const [lines, setLines] = useState<VoucherLine[]>([]);
   const [narration, setNarration] = useState("");
@@ -102,6 +112,27 @@ export function VoucherReview({
   }, [voucher?.id, voucher?.updatedAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const activeLedgers = useMemo(() => ledgers.filter((ledger) => ledger.isActive), [ledgers]);
+
+  const ledgerByKey = useMemo(
+    () => new Map(activeLedgers.map((ledger) => [ledgerKey(ledger.name), ledger])),
+    [activeLedgers],
+  );
+
+  // Pre-select a ledger the backend left unresolved. Derived rather than held
+  // in state so a ledger refetch can never discard the reviewer's own edits.
+  const resolvedLines = useMemo(
+    () =>
+      lines.map((line) => {
+        if (line.ledgerId || !line.ledgerName.trim()) return line;
+        const match = ledgerByKey.get(ledgerKey(line.ledgerName));
+        return match ? { ...line, ledgerId: match.id, ledgerName: match.name } : line;
+      }),
+    [lines, ledgerByKey],
+  );
+
+  const autoMatchedCount = resolvedLines.filter(
+    (line, index) => line.ledgerId !== lines[index]?.ledgerId,
+  ).length;
 
   if (isPending) {
     return <p className="text-sm text-muted-foreground">Loading voucher...</p>;
@@ -124,7 +155,7 @@ export function VoucherReview({
     reject.isPending ||
     reopen.isPending ||
     verifyPosting.isPending ||
-    exportVoucher.isPending;
+    postToTally.isPending;
 
   const setLine = (index: number, changes: Partial<VoucherLine>) => {
     setDirty(true);
@@ -145,7 +176,7 @@ export function VoucherReview({
         id: voucher.id,
         body: {
           narration: narration.trim() || null,
-          lines: lines.map(toLinePayload),
+          lines: resolvedLines.map(toLinePayload),
         },
       });
       setDirty(false);
@@ -206,15 +237,26 @@ export function VoucherReview({
     }
   };
 
-  const exportNow = async () => {
+  const postNow = async () => {
     try {
-      const file = await exportVoucher.mutateAsync({ id: voucher.id, actor });
-      downloadBlob(file.filename, file.blob);
-      toast.success("Import file generated", {
-        description: "The voucher is awaiting import confirmation, not posted.",
+      const result = await postToTally.mutateAsync({ id: voucher.id, actor, postingMonth });
+      if (!result.success) {
+        toast.error("TallyPrime did not accept the voucher", {
+          description: `${result.message} The voucher was not posted; you can retry.`,
+        });
+        return;
+      }
+      if (result.already_posted) {
+        toast.info("Already posted to Tally", {
+          description: `Reference ${result.tally_reference ?? "unknown"}. Nothing was sent again.`,
+        });
+        return;
+      }
+      toast.success("Posted to TallyPrime", {
+        description: `Tally reference ${result.tally_reference ?? "unknown"}.`,
       });
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not export the voucher");
+      toast.error(e instanceof Error ? e.message : "Could not post the voucher to Tally");
     }
   };
 
@@ -307,7 +349,7 @@ export function VoucherReview({
             </tr>
           </thead>
           <tbody>
-            {lines.map((line, index) => (
+            {resolvedLines.map((line, index) => (
               <tr key={line.id || index} className="border-t align-top">
                 <td className="min-w-48 p-2">
                   {editable ? (
@@ -488,11 +530,16 @@ export function VoucherReview({
           <Button size="sm" onClick={save} disabled={busy}>
             <Save /> Save draft
           </Button>
-          {dirty && (
+          {dirty ? (
             <span className="text-xs text-warning">
               Unsaved changes — save before submitting for approval.
             </span>
-          )}
+          ) : autoMatchedCount > 0 ? (
+            <span className="text-xs text-warning">
+              {autoMatchedCount} ledger{autoMatchedCount > 1 ? "s" : ""} matched by name — save the
+              draft to keep the selection, or pick a different ledger.
+            </span>
+          ) : null}
         </div>
       )}
 
@@ -511,7 +558,12 @@ export function VoucherReview({
 
       <div className="flex flex-wrap gap-2">
         {submitStatuses.has(voucher.status) && (
-          <Button variant="outline" size="sm" onClick={submitForApproval} disabled={busy || dirty}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={submitForApproval}
+            disabled={busy || dirty || autoMatchedCount > 0}
+          >
             <Send /> Submit for approval
           </Button>
         )}
@@ -535,10 +587,22 @@ export function VoucherReview({
             <RotateCcw /> Reopen for correction
           </Button>
         )}
-        {exportStatuses.has(voucher.status) && (
-          <Button size="sm" onClick={exportNow} disabled={busy}>
-            <Download /> Generate import file
+        {postStatuses.has(voucher.status) && (
+          <Button size="sm" onClick={postNow} disabled={busy}>
+            <Upload />
+            {postToTally.isPending
+              ? "Posting to Tally…"
+              : voucher.status === "POSTING_FAILED"
+                ? "Retry post to Tally"
+                : "Post to Tally"}
           </Button>
+        )}
+        {voucher.status === "POSTED" && (
+          <span className="flex items-center gap-1.5 text-xs text-success">
+            <CheckCircle2 className="h-4 w-4" />
+            Posted to Tally
+            {voucher.postingReference ? ` · ${voucher.postingReference}` : ""}
+          </span>
         )}
         {editableStatuses.has(voucher.status) && (
           <Button variant="ghost" size="sm" onClick={remove} disabled={busy}>

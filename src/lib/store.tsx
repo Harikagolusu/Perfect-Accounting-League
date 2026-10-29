@@ -1,21 +1,18 @@
-// Session state shared by the app. Domain records come from the API; the
-// remaining arrays are local-only placeholders used by modules whose backend
-// does not exist yet.
+// Session state shared by the app.
+//
+// Domain records come from the API (see src/lib/queries/*): companies, vendors,
+// invoices, documents, bank data, vouchers, ledgers, mappings and the audit
+// trail are all persisted in PostgreSQL and read through React Query, so they
+// survive a reload, a restart and reopening PAL tomorrow.
+//
+// The arrays that remain here (tds, reco, reviews, exports) belong to modules
+// whose backend does not exist yet. They are local-only placeholders: data in
+// them lives for the browser session only. Only non-sensitive UI preferences
+// (selected company / financial year / period) are persisted, to localStorage.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { FINANCIAL_YEARS, currentPeriod } from "./constants";
 import { useCompanies } from "./queries/companies";
-import type {
-  AuditEvent,
-  BankTransaction,
-  Company,
-  ExportJob,
-  InboxDocument,
-  LedgerMapping,
-  ReconciliationRecord,
-  ReviewTask,
-  TDSWorking,
-  Vendor,
-} from "./types";
+import type { Company, ExportJob, ReconciliationRecord, ReviewTask, TDSWorking } from "./types";
 
 type Setter<T> = React.Dispatch<React.SetStateAction<T[]>>;
 
@@ -31,23 +28,13 @@ interface Store {
   // Companies are API-backed and read-only here: writes go through the
   // companies API and React Query invalidation refills the list.
   companies: Company[];
-  vendors: Vendor[];
-  setVendors: Setter<Vendor>;
-  mappings: LedgerMapping[];
-  setMappings: Setter<LedgerMapping>;
-  documents: InboxDocument[];
-  setDocuments: Setter<InboxDocument>;
-  bankTx: BankTransaction[];
-  setBankTx: Setter<BankTransaction>;
   tds: TDSWorking[];
   setTds: Setter<TDSWorking>;
   reco: ReconciliationRecord[];
   setReco: Setter<ReconciliationRecord>;
   reviews: ReviewTask[];
   setReviews: Setter<ReviewTask>;
-  audit: AuditEvent[];
   exports: ExportJob[];
-  log: (e: Omit<AuditEvent, "id" | "timestamp" | "user" | "companyId" | "status">) => void;
   addExport: (e: Omit<ExportJob, "id" | "companyId" | "generatedAt">) => void;
 }
 
@@ -60,17 +47,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [period, setPeriod] = useState(currentPeriod());
   const [role, setRole] = useState<Store["role"]>("Partner");
 
-  const { data: apiCompanies } = useCompanies(true);
+  // The header selector is for active work. Archived (INACTIVE) companies stay
+  // in the Companies page for audit/history, but must not remain selectable.
+  const { data: apiCompanies } = useCompanies(false);
   const companies = useMemo(() => apiCompanies ?? [], [apiCompanies]);
 
-  const [vendors, setVendors] = useState<Vendor[]>([]);
-  const [mappings, setMappings] = useState<LedgerMapping[]>([]);
-  const [documents, setDocuments] = useState<InboxDocument[]>([]);
-  const [bankTx, setBankTx] = useState<BankTransaction[]>([]);
   const [tds, setTds] = useState<TDSWorking[]>([]);
   const [reco, setReco] = useState<ReconciliationRecord[]>([]);
   const [reviews, setReviews] = useState<ReviewTask[]>([]);
-  const [audit, setAudit] = useState<AuditEvent[]>([]);
   const [exports, setExports] = useState<ExportJob[]>([]);
 
   useEffect(() => {
@@ -108,34 +92,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       role,
       setRole,
       companies,
-      vendors,
-      setVendors,
-      mappings,
-      setMappings,
-      documents,
-      setDocuments,
-      bankTx,
-      setBankTx,
       tds,
       setTds,
       reco,
       setReco,
       reviews,
       setReviews,
-      audit,
       exports,
-      log: (e) =>
-        setAudit((a) => [
-          {
-            ...e,
-            id: `AE-${Date.now()}`,
-            timestamp: now(),
-            user: "Local user",
-            companyId,
-            status: "Success",
-          },
-          ...a,
-        ]),
       addExport: (e) =>
         setExports((x) => [
           {
@@ -154,14 +117,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     period,
     role,
     companies,
-    vendors,
-    mappings,
-    documents,
-    bankTx,
     tds,
     reco,
     reviews,
-    audit,
     exports,
   ]);
 

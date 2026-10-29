@@ -29,7 +29,11 @@ SQLAlchemy>=2.0.30
 alembic>=1.13.0
 psycopg[binary]>=3.2.0
 
+# TallyPrime integration (read-only POC)
+# --------------------------------------------------------------------------
+# HTTP client for TallyPrime's XML-over-HTTP endpoint.
+httpx>=0.27.0
+
 # Testing
 # --------------------------------------------------------------------------
 pytest>=8.0.0
-httpx>=0.27.0

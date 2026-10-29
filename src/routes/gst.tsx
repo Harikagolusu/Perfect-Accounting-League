@@ -190,13 +190,6 @@ function GSTPage() {
               disabled={status === "Draft"}
               onClick={() => {
                 setStatus("Reviewed");
-                s.log({
-                  module: "GST Workings",
-                  action: "Approved",
-                  recordId: `GST-${s.period}`,
-                  previous: "Generated",
-                  next: "Reviewed",
-                });
                 toast.success("Marked as reviewed");
               }}
             >

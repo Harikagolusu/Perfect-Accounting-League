@@ -105,6 +105,8 @@ def validate_invoice_fields(
     sgst_amount: Decimal | None = None,
     igst_amount: Decimal | None = None,
     cess_amount: Decimal | None = None,
+    discount_amount: Decimal | None = None,
+    freight_amount: Decimal | None = None,
     round_off: Decimal | None = None,
     total_amount: Decimal | None = None,
 ) -> InvoiceValidationResult:
@@ -131,6 +133,8 @@ def validate_invoice_fields(
         ("SGST", sgst_amount),
         ("IGST", igst_amount),
         ("Cess", cess_amount),
+        ("Discount amount", discount_amount),
+        ("Freight amount", freight_amount),
         ("Total amount", total_amount),
     ):
         if amount is not None and amount < 0:
@@ -145,14 +149,24 @@ def validate_invoice_fields(
 
     # Totals are only checked when enough of them were actually supplied.
     if taxable_amount is not None and total_amount is not None:
-        tax_total = _optional_decimal(cgst_amount) + _optional_decimal(sgst_amount) + _optional_decimal(
-            igst_amount
-        ) + _optional_decimal(cess_amount)
-        computed = taxable_amount + tax_total + _optional_decimal(round_off)
+        tax_total = (
+            _optional_decimal(cgst_amount)
+            + _optional_decimal(sgst_amount)
+            + _optional_decimal(igst_amount)
+            + _optional_decimal(cess_amount)
+        )
+        # discount reduces the total; freight and round-off adjust it.
+        computed = (
+            taxable_amount
+            + tax_total
+            + _optional_decimal(freight_amount)
+            - _optional_decimal(discount_amount)
+            + _optional_decimal(round_off)
+        )
         if abs(computed - total_amount) > MONEY_TOLERANCE:
             # Reported, never corrected: the entered total is the source.
             issues.append(
-                "Total amount does not match taxable + tax + round-off "
+                "Total amount does not match taxable + tax + freight - discount + round-off "
                 f"({computed} vs {total_amount}). Review the figures."
             )
 

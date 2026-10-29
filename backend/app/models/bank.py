@@ -38,6 +38,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID
@@ -170,6 +171,12 @@ class BankStatement(Base):
     currency: Mapped[str] = mapped_column(
         String(3), nullable=False, default="INR", server_default="INR"
     )
+    #: Where the statement came from: an uploaded file, manual entry, or a
+    #: read of TallyPrime's bank-ledger vouchers. Tally-synced statements are
+    #: found again by (account, period, source) on the next sync.
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="MANUAL", server_default="MANUAL"
+    )
     status: Mapped[BankStatementStatus] = mapped_column(
         BANK_STATEMENT_STATUS_ENUM,
         nullable=False,
@@ -197,6 +204,15 @@ class BankTransaction(Base):
     """One line item inside a bank statement."""
 
     __tablename__ = "bank_transactions"
+    __table_args__ = (
+        # PostgreSQL treats NULLs as distinct, so manual rows without an
+        # external id are unaffected by this guard.
+        UniqueConstraint(
+            "bank_statement_id",
+            "external_id",
+            name="uq_bank_transactions_statement_external",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -244,6 +260,9 @@ class BankTransaction(Base):
     is_inter_account_transfer: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    #: Stable key for a transaction imported from an external system, so a
+    #: repeated Tally sync updates nothing and never duplicates a voucher line.
+    external_id: Mapped[str | None] = mapped_column(String(255))
     # Derived from the two amount columns and validated against them, so it
     # can never disagree with them.
     transaction_type: Mapped[TransactionType] = mapped_column(

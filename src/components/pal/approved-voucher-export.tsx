@@ -15,12 +15,16 @@ import { downloadBlob } from "@/lib/export";
 import { fmtDate } from "@/lib/format";
 import { useExportVouchers, useVoucherExportPreview, useVouchers } from "@/lib/queries/vouchers";
 import { voucherStatusLabel, voucherTypeLabel } from "@/lib/api/vouchers";
+import { useStore } from "@/lib/store";
+import { periodMonthStart } from "@/lib/constants";
 
 const exportable = new Set(["APPROVED", "AWAITING_IMPORT_CONFIRMATION"]);
 
 export function ApprovedVoucherExport({ companyId }: { companyId: string }) {
+  const { financialYear, period } = useStore();
+  const postingMonth = periodMonthStart(financialYear, period);
   const { data: vouchers = [], isPending } = useVouchers(companyId);
-  const { data: preview } = useVoucherExportPreview(companyId);
+  const { data: preview } = useVoucherExportPreview(companyId, undefined, undefined, postingMonth);
   const exportVouchers = useExportVouchers(companyId);
 
   const selected = vouchers.filter((voucher) => exportable.has(voucher.status));
@@ -33,6 +37,7 @@ export function ApprovedVoucherExport({ companyId }: { companyId: string }) {
     try {
       const file = await exportVouchers.mutateAsync({
         voucherIds: selected.map((voucher) => voucher.id),
+        postingMonth,
       });
       downloadBlob(file.filename, file.blob);
       toast.success("Import file generated", {

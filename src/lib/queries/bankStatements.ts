@@ -185,6 +185,31 @@ export function useUpdateBankTransactionMapping(companyId: string | undefined) {
   });
 }
 
+export function useUpdateBankTransaction(companyId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: {
+      statementId: string;
+      transactionId: string;
+      body: Partial<BankTransactionWriteDto>;
+    }) =>
+      toBankTransaction(
+        await bankStatementsApi.updateTransaction(
+          companyId as string,
+          input.statementId,
+          input.transactionId,
+          input.body,
+        ),
+      ),
+    onSuccess: (_updated, input) => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({
+        queryKey: bankTransactionKeys.list(companyId, input.statementId),
+      });
+    },
+  });
+}
+
 export function useProcessBankStatement(companyId: string | undefined) {
   return useMutation({
     mutationFn: async (id: string) =>

@@ -85,8 +85,10 @@ TEXT_TOO_LARGE_MESSAGE = (
     "smaller files or enter the invoice fields manually."
 )
 
-#: A header-only JSON object is small; this cap keeps spend bounded.
-EXTRACTION_MAX_TOKENS = 2048
+#: Reasoning models (e.g. deepseek-flash) consume reasoning tokens before
+#: writing output. 2048 is exhausted entirely by chain-of-thought, leaving
+#: nothing for the JSON response. 16384 gives ample room for both.
+EXTRACTION_MAX_TOKENS = 16384
 #: Hard cap on document text sent to a text model. Ten ordinary invoice pages
 #: sit far below this. A larger payload is rejected rather than truncated: the
 #: missing tail could contain the invoice total, and a partial prompt is not a
@@ -403,7 +405,16 @@ class AIDocumentInvoiceExtractor:
     def _interpret_response(self, response, method: ExtractionMethod) -> ExtractionResult:
         try:
             payload = parse_extraction_payload(response.text)
-        except InvalidExtractionOutput:
+        except InvalidExtractionOutput as exc:
+            # Log the stable rejection reason server-side only. The client
+            # keeps the fixed, safe message; provider payloads and raw output
+            # never leave this boundary.
+            logger.warning(
+                "Invoice extraction output rejected: reason=%s model=%s method=%s",
+                exc.reason,
+                response.model,
+                method.value,
+            )
             return self._failed(
                 EXTRACTION_INVALID_OUTPUT,
                 InvalidExtractionOutput.message,

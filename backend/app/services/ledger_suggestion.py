@@ -8,8 +8,12 @@ when there is traceable evidence:
 * a configured vendor/company ledger name; or
 * the confirmed bank counterparty ledger.
 
-When none exists it returns `NO_HISTORICAL_MAPPING` and leaves the choice to a
-reviewer. It never invents a ledger, tax rate or amount.
+When none exists it records `NO_HISTORICAL_MAPPING` and, for the main
+expense/sales line only, asks the AI to pre-select one of the company's
+existing ledgers (see `app.services.ledger_ai_suggestion`). That choice is
+flagged `AI_SUGGESTED_LEDGER` and keeps the voucher in `NEEDS_REVIEW`, so a
+reviewer still confirms it. It never invents a ledger, tax rate or amount:
+tax, party and round-off ledgers remain configuration-only.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.accounting_mapping import (
+    TALLY_HISTORY_CONTEXT,
     AccountingMapping,
     AccountingMappingMatchType,
     AccountingMappingSourceType,
@@ -28,6 +33,7 @@ from app.models.accounting_mapping import (
 from app.models.bank import BankAccount, BankStatement, BankTransaction
 from app.models.company import Company
 from app.models.invoice import Invoice, InvoiceDirection
+from app.models.invoice_line_item import InvoiceLineItem
 from app.models.ledger import Ledger
 from app.models.vendor import Vendor
 from app.models.voucher import (
@@ -49,7 +55,8 @@ from app.services.bank import (
 )
 from app.services.company import get_company
 from app.services.invoice import InvoiceNotFoundError, get_invoice
-from app.services.ledger import find_ledger_by_name
+from app.services.ledger import find_ledger_by_name, list_ledgers
+from app.services.ledger_ai_suggestion import suggest_ledger_with_ai
 
 ZERO = Decimal("0")
 
@@ -195,8 +202,17 @@ def _mapping_evidence(
         found.extend(rows)
     unique = {mapping.id: mapping for mapping in found}
     mappings = list(unique.values())
-    distinct_ledgers = {mapping.ledger_id for mapping in mappings}
-    return mappings, len(distinct_ledgers) > 1
+    # A mapping a person set up outranks one learned from Tally history, so a
+    # manual choice is never reported as ambiguous against the history it was
+    # meant to override. Ambiguity is judged only inside the winning tier.
+    manual = [
+        mapping
+        for mapping in mappings
+        if mapping.transaction_context != TALLY_HISTORY_CONTEXT
+    ]
+    tier = manual or mappings
+    distinct_ledgers = {mapping.ledger_id for mapping in tier}
+    return tier, len(distinct_ledgers) > 1
 
 
 def _historical_invoice_ledger(
@@ -249,6 +265,7 @@ def _main_invoice_suggestion(
     voucher_type: VoucherType,
     purpose: str,
     exceptions: list[VoucherIssueResponse],
+    invoice_items: list[InvoiceLineItem],
 ) -> LedgerSuggestion | None:
     source_type = AccountingMappingSourceType.INVOICE
     mappings, ambiguous = _mapping_evidence(
@@ -343,6 +360,33 @@ def _main_invoice_suggestion(
             purpose,
         )
     )
+
+    # Last resort: let the AI pre-select from the existing ledger master so the
+    # reviewer starts from a candidate instead of an empty dropdown. The
+    # WARNING keeps the voucher in NEEDS_REVIEW until a person confirms it.
+    ai = suggest_ledger_with_ai(
+        db,
+        company_id,
+        purpose=purpose,
+        invoice=invoice,
+        items=invoice_items,
+        vendor_name=vendor.name if vendor is not None else invoice.vendor_name,
+        ledgers=list_ledgers(db, company_id),
+    )
+    if ai is not None:
+        exceptions.append(
+            VoucherIssueResponse(
+                code="AI_SUGGESTED_LEDGER",
+                message=(
+                    f"'{ai.ledger_name}' was selected by AI from the ledger "
+                    "master, not from approved history. Confirm or change it "
+                    "before approval."
+                ),
+                severity="WARNING",
+                field=purpose,
+            )
+        )
+        return ai
     return None
 
 
@@ -378,6 +422,17 @@ def suggest_for_invoice(
             )
         )
 
+    invoice_items = list(
+        db.scalars(
+            select(InvoiceLineItem)
+            .where(
+                InvoiceLineItem.company_id == company_id,
+                InvoiceLineItem.invoice_id == invoice.id,
+            )
+            .order_by(InvoiceLineItem.line_number)
+        ).all()
+    )
+
     main = _main_invoice_suggestion(
         db,
         company_id,
@@ -387,6 +442,7 @@ def suggest_for_invoice(
         voucher_type=voucher_type,
         purpose=main_purpose,
         exceptions=exceptions,
+        invoice_items=invoice_items,
     )
     if main is not None:
         suggestions.append(main)

@@ -7,7 +7,9 @@ services.
 
 from __future__ import annotations
 
+import re
 import uuid
+from difflib import SequenceMatcher
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -70,6 +72,153 @@ def find_ledger_by_name(
     if active_only:
         query = query.where(Ledger.is_active.is_(True))
     return db.scalar(query.order_by(Ledger.created_at).limit(1))
+
+
+#: Tax and withholding ledgers, matched on the ledger's own name or its group.
+#: A fixed group list is not enough: real charts of accounts file GST under
+#: names like "GST_MP" rather than "Duties & Taxes". Tokens are word-matched so
+#: an expense ledger such as "Taxi Fare" is not caught.
+_TAX_TOKEN_RE = re.compile(
+    r"\b(?:[csiu]?gst|cess|tds|tcs|duties|taxes?|vat)\b", re.IGNORECASE
+)
+
+#: Rounding adjustments are never the accounting head of an invoice.
+_ADJUSTMENT_RE = re.compile(r"\bround(?:ed)?[\s-]*off\b", re.IGNORECASE)
+
+#: Group tokens that mark a ledger as something other than an expense/income
+#: head: a party, a bank, or a balance-sheet account.
+_NON_HEAD_GROUP_TOKENS = (
+    "creditor",
+    "debtor",
+    "bank",
+    "cash",
+    "capital",
+    "loan",
+    "provision",
+    "deposit",
+    "asset",
+    "liabilit",
+    "payable",
+    "advance",
+    "suspense",
+    "share",
+    "branch",
+    "stock",
+)
+
+
+def _tokenised(text: str) -> str:
+    """Separator-insensitive text, so "GST_MP" word-matches "gst"."""
+    return re.sub(r"[^a-z0-9]+", " ", text.lower())
+
+
+def is_tax_or_adjustment_ledger(ledger: Ledger) -> bool:
+    """True for a GST/TDS/cess ledger or a rounding adjustment."""
+    name = _tokenised(ledger.name)
+    group = _tokenised(ledger.parent_group or "")
+    if _ADJUSTMENT_RE.search(name):
+        return True
+    return bool(_TAX_TOKEN_RE.search(name) or _TAX_TOKEN_RE.search(group))
+
+
+def is_posting_head_candidate(ledger: Ledger) -> bool:
+    """True when a ledger could be the expense/income head of an invoice.
+
+    Used to narrow the choices offered for a ledger decision. A party, bank or
+    balance-sheet ledger is never the head, so excluding them keeps the choice
+    both smaller and harder to get wrong. Anything unrecognised is kept: this
+    narrows the field, it does not decide.
+    """
+    if is_tax_or_adjustment_ledger(ledger):
+        return False
+    group = _tokenised(ledger.parent_group or "")
+    return not any(token in group for token in _NON_HEAD_GROUP_TOKENS)
+
+
+#: Company-form suffixes that differ only in abbreviation between an invoice's
+#: printed party name and the Tally ledger name for the same party.
+_NAME_SUFFIX_FORMS = (
+    ("private limited", "pvtltd"),
+    ("pvt limited", "pvtltd"),
+    ("pvt ltd", "pvtltd"),
+    ("public limited", "ltd"),
+    ("limited", "ltd"),
+    ("llp", "llp"),
+    ("and associates", "associates"),
+    ("& associates", "associates"),
+)
+
+#: Minimum similarity for a fuzzy ledger name match, and the margin the winner
+#: must beat the runner-up by. Both are deliberately strict: a wrong creditor
+#: ledger posts an invoice against the wrong party.
+_FUZZY_MIN_RATIO = 0.88
+_FUZZY_MIN_MARGIN = 0.04
+
+
+def _comparison_key(name: str) -> str:
+    """Collapse a party name so abbreviation and punctuation stop mattering."""
+    lowered = name.casefold()
+    for printed, canonical in _NAME_SUFFIX_FORMS:
+        lowered = lowered.replace(printed, canonical)
+    return re.sub(r"[^a-z0-9]+", "", lowered)
+
+
+def match_ledger_by_name(
+    db: Session,
+    company_id: uuid.UUID,
+    name: str | None,
+    *,
+    parent_group: str | None = None,
+) -> Ledger | None:
+    """Resolve a name to an active ledger, tolerating abbreviation and typos.
+
+    Exact match first, then a punctuation/suffix-insensitive key, then a fuzzy
+    comparison. `parent_group` confines the fuzzy pass to one Tally group so a
+    party name can never match an expense or tax ledger. Returns None when no
+    candidate is clearly best, leaving the choice to a reviewer.
+    """
+    if not name or not name.strip():
+        return None
+
+    exact = find_ledger_by_name(db, company_id, name)
+    if exact is not None:
+        return exact
+
+    query = select(Ledger).where(
+        Ledger.company_id == company_id, Ledger.is_active.is_(True)
+    )
+    if parent_group:
+        query = query.where(func.lower(Ledger.parent_group) == parent_group.lower())
+    candidates = list(db.scalars(query).all())
+    if not candidates:
+        return None
+
+    target = _comparison_key(name)
+    if not target:
+        return None
+
+    keyed = [(ledger, _comparison_key(ledger.name)) for ledger in candidates]
+    identical = [ledger for ledger, key in keyed if key == target]
+    if len(identical) == 1:
+        return identical[0]
+    if identical:
+        return None
+
+    scored = sorted(
+        (
+            (SequenceMatcher(None, target, key).ratio(), ledger)
+            for ledger, key in keyed
+            if key
+        ),
+        key=lambda pair: pair[0],
+        reverse=True,
+    )
+    if not scored or scored[0][0] < _FUZZY_MIN_RATIO:
+        return None
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    if scored[0][0] - runner_up < _FUZZY_MIN_MARGIN:
+        return None
+    return scored[0][1]
 
 
 def _assert_unique_name(
@@ -181,6 +330,9 @@ __all__ = [
     "deactivate_ledger",
     "find_ledger_by_name",
     "get_ledger",
+    "is_posting_head_candidate",
+    "is_tax_or_adjustment_ledger",
     "list_ledgers",
+    "match_ledger_by_name",
     "update_ledger",
 ]

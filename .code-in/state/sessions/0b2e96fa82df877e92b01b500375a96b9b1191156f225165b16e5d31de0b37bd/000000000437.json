@@ -1,0 +1,1 @@
+{"id":"703c4d48-181a-410f-be3b-2ac57267a787","change":{"type":"verification","change":{"action":"verify","expectedRevision":77,"scopes":["static"],"evidence":{"tool":"run_tests","callId":"call_6ac26ea21e80482f83f04cd8"}}},"previous":"08667c85ffbe17608dad62015417c63582de88c9af9fcb6f015a819d70907c95","hash":"93d4f767233480f34a3527d2f30402c0327873af8d1916243b15a8748c060859"}

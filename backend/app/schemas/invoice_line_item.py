@@ -34,6 +34,7 @@ class _LineItemFields(BaseModel):
     supply_type: SupplyType | None = None
     hsn_sac: str | None = Field(default=None, max_length=16)
     quantity: Quantity | None = None
+    unit_rate: Money | None = None
     gst_rate: GstRate | None = None
 
     taxable_amount: Money | None = None
@@ -95,6 +96,7 @@ class InvoiceLineItemResponse(TimestampedResponse):
     supply_type: SupplyType | None
     hsn_sac: str | None
     quantity: MoneyOut | None
+    unit_rate: MoneyOut | None
     gst_rate: MoneyOut | None
     taxable_amount: MoneyOut | None
     igst_amount: MoneyOut | None

@@ -127,6 +127,18 @@ export interface VoucherActionDto {
   reason?: string | null;
   external_reference?: string | null;
   verified?: boolean | null;
+  /** Any day of the posting period; earlier-dated vouchers post on its first. */
+  posting_month?: string | null;
+}
+
+/** Mirrors `VoucherPostResponse` in backend/app/schemas/voucher.py. */
+export interface VoucherPostDto {
+  success: boolean;
+  voucher_id: string;
+  status: VoucherStatus;
+  tally_reference: string | null;
+  already_posted: boolean;
+  message: string;
 }
 
 export interface VoucherAuditEventDto {
@@ -496,13 +508,17 @@ export const vouchersApi = {
     apiFetch<LedgerSuggestionResponseDto>(
       `${API_V1_PREFIX}/companies/${companyId}/bank-statements/${statementId}/transactions/${transactionId}/ledger-suggestion`,
     ),
-  exportPreview: (companyId: string, options: { dateFrom?: string; dateTo?: string } = {}) =>
+  exportPreview: (
+    companyId: string,
+    options: { dateFrom?: string; dateTo?: string; postingMonth?: string } = {},
+  ) =>
     apiFetch<VoucherExportPreview>(
       `${base(companyId)}/export/preview`,
       {},
       {
         date_from: options.dateFrom || undefined,
         date_to: options.dateTo || undefined,
+        posting_month: options.postingMonth || undefined,
       },
     ),
   exportFile: (
@@ -511,6 +527,7 @@ export const vouchersApi = {
       voucherIds?: string[];
       dateFrom?: string;
       dateTo?: string;
+      postingMonth?: string;
       actor?: string;
     } = {},
   ): Promise<DownloadedFile> =>
@@ -521,6 +538,7 @@ export const vouchersApi = {
         voucher_ids: body.voucherIds ?? null,
         date_from: body.dateFrom || null,
         date_to: body.dateTo || null,
+        posting_month: body.postingMonth || null,
         actor: body.actor ?? "local-user",
       }),
     }),
@@ -532,6 +550,20 @@ export const vouchersApi = {
     apiDownload(`${base(companyId)}/${voucherId}/export`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(action),
+    }),
+  /**
+   * Post one approved voucher into the connected TallyPrime. The XML is built
+   * and sent server-side; nothing is downloaded. Safe to call twice: an
+   * already-posted voucher answers with its stored reference.
+   */
+  postToTally: (
+    companyId: string,
+    voucherId: string,
+    action: VoucherActionDto = {},
+  ): Promise<VoucherPostDto> =>
+    apiFetch<VoucherPostDto>(`${base(companyId)}/${voucherId}/post-to-tally`, {
+      method: "POST",
       body: JSON.stringify(action),
     }),
 };
