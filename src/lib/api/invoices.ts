@@ -414,6 +414,18 @@ export const invoicesApi = {
   /** Asks the backend to extract automatically from the source document. */
   process: (companyId: string, invoiceId: string) =>
     apiFetch<ProcessResult>(`${base(companyId)}/${invoiceId}/process`, { method: "POST" }),
+  /**
+   * Extract straight from a document, creating or reusing its invoice. This is
+   * the inbox batch entry point: one call runs extraction and vendor mapping,
+   * and with `prepareVoucher` also builds the accounting voucher and auto-maps
+   * its ledgers, so the invoice is only PROCESSED when that voucher is complete.
+   */
+  processDocument: (companyId: string, documentId: string, prepareVoucher = false) =>
+    apiFetch<ProcessResult>(
+      `${base(companyId)}/process-document/${documentId}`,
+      { method: "POST" },
+      { prepare_voucher: prepareVoucher ? "true" : undefined },
+    ),
   /** Preview the current deterministic match and its candidates. */
   match: (companyId: string, invoiceId: string) =>
     apiFetch<VendorMatchDto>(`${base(companyId)}/${invoiceId}/vendor-match`),

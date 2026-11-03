@@ -86,6 +86,11 @@ class StatementExtractionResult:
     transactions: tuple[dict, ...] = ()
     statement_updates: dict | None = None
     issues: tuple[str, ...] = ()
+    #: Account identity read off the statement header, used to match the
+    #: statement to an existing bank account on direct upload. Never stored as
+    #: a fact; only used to resolve which account the statement belongs to.
+    detected_account_number: str | None = None
+    detected_bank_name: str | None = None
 
 
 @runtime_checkable
@@ -100,12 +105,16 @@ class BankStatementExtractor(Protocol):
 
     def extract(
         self,
-        statement: BankStatement,
+        statement: BankStatement | None,
         raw_bytes: bytes,
         *,
         document: "Document | None" = None,
     ) -> StatementExtractionResult:
-        """Attempt to read transactions from the statement."""
+        """Attempt to read transactions from the document.
+
+        `statement` is accepted for callers that already have one, but the read
+        is driven entirely by the document bytes, so direct upload passes None.
+        """
         ...
 
 
@@ -123,7 +132,7 @@ class UnconfiguredBankStatementExtractor:
 
     def extract(
         self,
-        statement: BankStatement,
+        statement: BankStatement | None,
         raw_bytes: bytes,
         *,
         document: "Document | None" = None,
@@ -158,7 +167,7 @@ class AIBankStatementExtractor:
 
     def extract(
         self,
-        statement: BankStatement,
+        statement: BankStatement | None,
         raw_bytes: bytes,
         *,
         document: "Document | None" = None,
@@ -394,6 +403,8 @@ class AIBankStatementExtractor:
             transactions=transactions,
             statement_updates=statement_updates or None,
             issues=tuple(issues),
+            detected_account_number=data.get("account_number"),
+            detected_bank_name=data.get("bank_name"),
         )
 
     # ------------------------------------------------------------------
@@ -458,6 +469,9 @@ def _parse_bank_response(raw_text: str) -> dict:
     result: dict = {"is_bank_statement": bool(raw.get("is_bank_statement", False))}
     if not result["is_bank_statement"]:
         return result
+
+    result["account_number"] = _clean_str(raw.get("account_number"))
+    result["bank_name"] = _clean_str(raw.get("bank_name"))
 
     issues: list[str] = []
 

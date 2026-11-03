@@ -193,6 +193,9 @@ class VoucherActionRequest(BaseModel):
     #: Any day of the period being posted. An invoice dated earlier posts to
     #: Tally on the first of this month; same-month or later keeps its own date.
     posting_month: date | None = None
+    #: Re-send an already-POSTED voucher to Tally. Tally matches it by REMOTEID
+    #: and updates the same voucher, so this never creates a duplicate.
+    force: bool = False
 
     @field_validator("actor", mode="before")
     @classmethod

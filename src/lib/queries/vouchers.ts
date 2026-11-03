@@ -223,9 +223,17 @@ export function useExportVoucher(companyId: string | undefined) {
 /** Post one approved voucher straight into TallyPrime. No file is produced. */
 export function usePostVoucherToTally(companyId: string | undefined) {
   const invalidate = useInvalidateVouchers(companyId);
-  return useMutation<VoucherPostDto, Error, { id: string; actor?: string; postingMonth?: string }>({
-    mutationFn: async ({ id, actor, postingMonth }) =>
-      vouchersApi.postToTally(companyId as string, id, { actor, posting_month: postingMonth }),
+  return useMutation<
+    VoucherPostDto,
+    Error,
+    { id: string; actor?: string; postingMonth?: string; force?: boolean }
+  >({
+    mutationFn: async ({ id, actor, postingMonth, force }) =>
+      vouchersApi.postToTally(companyId as string, id, {
+        actor,
+        posting_month: postingMonth,
+        force,
+      }),
     onSuccess: invalidate,
   });
 }

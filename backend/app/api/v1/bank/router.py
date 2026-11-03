@@ -32,6 +32,7 @@ from app.schemas.bank import (
     BankTransactionMappingUpdate,
     BankTransactionResponse,
     BankTransactionUpdate,
+    IngestStatementResponse,
     ProcessStatementResponse,
 )
 from app.schemas.exports import ExportPreviewResponse
@@ -48,6 +49,7 @@ from app.services.bank import (
     get_bank_account,
     get_bank_statement,
     get_transaction,
+    ingest_bank_statement,
     list_bank_accounts,
     list_bank_statements,
     list_transactions,
@@ -66,7 +68,10 @@ from app.services.company import CompanyNotFoundError
 from app.services.document import DocumentNotFoundError
 from app.services.exports.common.workbook import content_disposition
 from app.services.exports.service import bank_export_file, bank_export_preview
-from app.services.ledger_suggestion import suggest_for_bank_transaction
+from app.services.ledger_suggestion import (
+    suggest_for_bank_transaction,
+    suggest_ledgers_for_statement,
+)
 
 router = APIRouter()
 
@@ -333,10 +338,42 @@ def process_bank_statement(
     issues = statement_review_issues(db, statement).as_list()
     return ProcessStatementResponse(
         statement_id=statement.id,
+        status=statement.status,
         configured=result.configured,
         reason=result.reason,
         message=result.message or "",
         issues=issues,
+        transaction_count=result.transaction_count,
+    )
+
+
+@router.post(
+    "/bank-statements/ingest-document/{document_id}",
+    response_model=IngestStatementResponse,
+    summary="Create and extract a statement straight from an uploaded document",
+)
+def ingest_bank_document(
+    document_id: UUID = Path(description="Inbox document id to ingest."),
+    company_id: UUID = Path(description="Owning company id."),
+    db: Session = Depends(get_db),
+) -> IngestStatementResponse:
+    """Direct upload: read the document, match it to a bank account, and create
+    its statement — the caller selects no account. When the read fails or no
+    account can be matched, no statement is created and the reason is returned.
+    """
+    try:
+        statement, result = ingest_bank_statement(db, company_id, document_id)
+    except DocumentNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        ) from None
+    return IngestStatementResponse(
+        document_id=document_id,
+        statement_id=statement.id if statement is not None else None,
+        status=statement.status if statement is not None else None,
+        configured=result.configured,
+        reason=result.reason,
+        message=result.message or "",
         transaction_count=result.transaction_count,
     )
 
@@ -354,11 +391,19 @@ def get_transactions(
     company_id: UUID = Path(description="Owning company id."),
     date_from: date | None = Query(default=None, description="Earliest transaction date."),
     date_to: date | None = Query(default=None, description="Latest transaction date."),
+    needs_clarification: bool | None = Query(
+        default=None, description="Filter to rows parked (or not) for client clarification."
+    ),
     db: Session = Depends(get_db),
 ) -> list[BankTransactionResponse]:
     _require_statement(db, company_id, statement_id)
     return list_transactions(
-        db, company_id, statement_id, transaction_date_from=date_from, transaction_date_to=date_to
+        db,
+        company_id,
+        statement_id,
+        transaction_date_from=date_from,
+        transaction_date_to=date_to,
+        needs_clarification=needs_clarification,
     )
 
 
@@ -410,6 +455,23 @@ def get_transaction_by_id(
 ) -> BankTransactionResponse:
     _require_statement(db, company_id, statement_id)
     return _require_transaction(db, company_id, statement_id, transaction_id)
+
+
+@router.get(
+    "/bank-statements/{statement_id}/ledger-suggestions",
+    response_model=dict[str, str | None],
+    summary="Deterministic ledger name per transaction, for the review table",
+)
+def get_statement_ledger_suggestions(
+    statement_id: UUID = Path(description="Statement id, scoped to this company."),
+    company_id: UUID = Path(description="Owning company id."),
+    db: Session = Depends(get_db),
+) -> dict[str, str | None]:
+    """Map each transaction id to the ledger name implied by Tally history and
+    the narration (a confirmed ledger wins). No AI, so it is safe to call for a
+    whole statement at once."""
+    _require_statement(db, company_id, statement_id)
+    return suggest_ledgers_for_statement(db, company_id, statement_id)
 
 
 @router.get(

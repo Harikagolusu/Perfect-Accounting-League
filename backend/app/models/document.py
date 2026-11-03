@@ -85,6 +85,9 @@ class Document(Base):
     file_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     file_type: Mapped[str] = mapped_column(String(255), nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Shared code for all files uploaded together in one batch, so the inbox can
+    # be filtered to a single upload. Null for documents created before this.
+    batch_code: Mapped[str | None] = mapped_column(String(32), index=True)
     document_type: Mapped[DocumentType] = mapped_column(
         DOCUMENT_TYPE_ENUM,
         nullable=False,

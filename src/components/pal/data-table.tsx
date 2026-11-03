@@ -31,13 +31,18 @@ interface Props<T> {
   pageSize?: number;
   onRowClick?: (row: T) => void;
   selectable?: boolean;
+  /** Rows this returns false for show a disabled checkbox and never get selected. */
+  rowSelectable?: (row: T) => boolean;
   bulkActions?: (selected: string[], clear: () => void) => ReactNode;
   searchPlaceholder?: string;
+  /** Let body cells wrap so the table fits its container instead of scrolling. */
+  wrap?: boolean;
 }
 
 export function DataTable<T>({
-  rows, columns, rowKey, searchKeys, toolbar, pageSize = 10, onRowClick, selectable, bulkActions, searchPlaceholder = "Search…",
+  rows, columns, rowKey, searchKeys, toolbar, pageSize = 10, onRowClick, selectable, rowSelectable, bulkActions, searchPlaceholder = "Search…", wrap,
 }: Props<T>) {
+  const canSelect = (row: T) => !rowSelectable || rowSelectable(row);
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<{ key: string; dir: 1 | -1 } | null>(null);
   const [page, setPage] = useState(0);
@@ -64,7 +69,9 @@ export function DataTable<T>({
   const pages = Math.max(1, Math.ceil(filtered.length / pageSize));
   const cur = Math.min(page, pages - 1);
   const visible = filtered.slice(cur * pageSize, cur * pageSize + pageSize);
-  const allVisibleSelected = visible.length > 0 && visible.every((r) => selected.includes(rowKey(r)));
+  const selectableVisible = visible.filter(canSelect);
+  const allVisibleSelected =
+    selectableVisible.length > 0 && selectableVisible.every((r) => selected.includes(rowKey(r)));
 
   return (
     <div className="rounded-md border bg-card">
@@ -99,7 +106,7 @@ export function DataTable<T>({
                     aria-label="Select all"
                     checked={allVisibleSelected}
                     onCheckedChange={(v) =>
-                      setSelected(v ? Array.from(new Set([...selected, ...visible.map(rowKey)])) : selected.filter((id) => !visible.some((r) => rowKey(r) === id)))
+                      setSelected(v ? Array.from(new Set([...selected, ...selectableVisible.map(rowKey)])) : selected.filter((id) => !visible.some((r) => rowKey(r) === id)))
                     }
                   />
                 </th>
@@ -130,13 +137,14 @@ export function DataTable<T>({
                     <td className="px-3 py-2" onClick={(e) => e.stopPropagation()}>
                       <Checkbox
                         aria-label={`Select ${id}`}
+                        disabled={!canSelect(row)}
                         checked={selected.includes(id)}
                         onCheckedChange={(v) => setSelected((s) => (v ? [...s, id] : s.filter((x) => x !== id)))}
                       />
                     </td>
                   )}
                   {columns.map((c) => (
-                    <td key={c.key} className={cn("whitespace-nowrap px-3 py-2", c.align === "right" && "num text-right", c.className)}>
+                    <td key={c.key} className={cn("px-3 py-2", !wrap && "whitespace-nowrap", c.align === "right" && "num text-right", c.className)}>
                       {c.cell ? c.cell(row) : String((row as Record<string, unknown>)[c.key] ?? "—")}
                     </td>
                   ))}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
@@ -120,6 +121,30 @@ class TallyBankDataSyncRequest(TallySyncRequest):
 
     from_date: date | None = None
     to_date: date | None = None
+
+
+class GstComponentTotals(BaseModel):
+    """Taxable base and the three GST components, as decimal strings."""
+
+    taxable: Decimal = Decimal("0")
+    igst: Decimal = Decimal("0")
+    cgst: Decimal = Decimal("0")
+    sgst: Decimal = Decimal("0")
+
+
+class TallyGstWorkingResponse(BaseModel):
+    """Output tax and input ITC aggregated from Tally vouchers for a period."""
+
+    success: bool
+    company_id: uuid.UUID
+    tally_company_name: str
+    from_date: date | None = None
+    to_date: date | None = None
+    outward: GstComponentTotals = GstComponentTotals()
+    inward_itc: GstComponentTotals = GstComponentTotals()
+    vouchers_fetched: int = 0
+    vouchers_used: int = 0
+    error_message: str | None = None
 
 
 class TallyBankDataSyncResponse(BaseModel):

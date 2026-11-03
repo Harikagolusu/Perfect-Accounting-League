@@ -26,6 +26,7 @@ export interface DocumentDto {
   original_filename: string;
   file_type: string;
   file_size: number;
+  batch_code: string | null;
   document_type: DocumentType;
   status: DocumentStatus;
   created_at: string;
@@ -34,6 +35,17 @@ export interface DocumentDto {
 
 export type DocumentUiStatus = InboxDocument["status"];
 export type DocumentUiType = NonNullable<InboxDocument["documentType"]>;
+
+/**
+ * Next sequential code (e.g. Batch-1, Batch-2 …) past the existing ones.
+ * `prefix` namespaces the counter, so invoice uploads (Batch-) and bank-statement
+ * uploads (Bank-) advance independently instead of sharing one sequence.
+ */
+export const nextBatchCode = (existing: (string | null)[], prefix = "Batch") => {
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  const nums = existing.map((c) => Number(re.exec(c ?? "")?.[1])).filter((n) => Number.isFinite(n));
+  return `${prefix}-${(nums.length ? Math.max(...nums) : 0) + 1}`;
+};
 
 /**
  * The inbox shows "Uploaded" for a freshly stored file; nothing is queued for
@@ -103,6 +115,7 @@ export const toInboxDocument = (dto: DocumentDto): InboxDocument => ({
   source: "Manual Upload",
   receivedAt: dto.created_at,
   fileType: fileTypeLabel(dto.file_type),
+  batchCode: dto.batch_code,
   documentType: documentTypeToUi(dto.document_type),
   status: statusToUi(dto.status),
   // Reviewer assignment arrives with user management.
@@ -115,7 +128,7 @@ const base = (companyId: string) => `${API_V1_PREFIX}/companies/${companyId}/doc
 export const documentsApi = {
   list: (
     companyId: string,
-    filters: { status?: DocumentStatus; documentType?: DocumentType } = {},
+    filters: { status?: DocumentStatus; documentType?: DocumentType; batchCode?: string } = {},
   ) =>
     apiFetch<DocumentDto[]>(
       base(companyId),
@@ -123,11 +136,13 @@ export const documentsApi = {
       {
         status: filters.status,
         document_type: filters.documentType,
+        batch_code: filters.batchCode,
       },
     ),
-  upload: (companyId: string, file: File) => {
+  upload: (companyId: string, file: File, batchCode?: string) => {
     const body = new FormData();
     body.append("file", file);
+    if (batchCode) body.append("batch_code", batchCode);
     return apiFetch<DocumentDto>(base(companyId), { method: "POST", body });
   },
   /** Inline URL for an iframe/image preview of the stored file. */

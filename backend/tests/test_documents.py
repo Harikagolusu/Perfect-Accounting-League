@@ -46,10 +46,12 @@ def _upload(
     data: bytes,
     filename: str,
     content_type: str,
+    batch_code: str | None = None,
 ) -> Any:
     return client.post(
         _documents_url(company_id),
         files={"file": (filename, data, content_type)},
+        data={"batch_code": batch_code} if batch_code else None,
     )
 
 
@@ -462,6 +464,25 @@ def test_delete_nonexistent_document_returns_404(
     assert response.status_code == 404
 
 
+def test_delete_document_referenced_by_invoice_returns_409(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    """A document an invoice references (FK RESTRICT) must refuse with 409,
+    not crash with a 500 the browser reports as a CORS failure."""
+    created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
+    invoice = client.post(
+        f"/api/v1/companies/{company['id']}/invoices",
+        json={"document_id": created["id"]},
+    )
+    assert invoice.status_code == 201
+
+    response = client.delete(f"{_documents_url(company['id'])}/{created['id']}")
+
+    assert response.status_code == 409
+    # The document is still listed because nothing was removed.
+    assert any(d["id"] == created["id"] for d in client.get(_documents_url(company["id"])).json())
+
+
 # --- Company isolation -----------------------------------------------------
 
 
@@ -543,3 +564,29 @@ def test_company_id_cannot_be_supplied_in_a_query_string(
     listed = client.get(_documents_url(a["id"]), params={"company_id": b["id"]}).json()
 
     assert [d["original_filename"] for d in listed] == ["invoice-a.pdf"]
+
+def test_batch_code_is_stored_and_filterable(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    """A document keeps its upload batch code, and the list filters by it."""
+    first = _upload(
+        client, company["id"], PDF_BYTES, "a.pdf", "application/pdf", batch_code="B-261102-AAAA"
+    )
+    _upload(
+        client, company["id"], PDF_BYTES, "b.pdf", "application/pdf", batch_code="B-261102-BBBB"
+    )
+    assert first.status_code == 201
+    assert first.json()["batch_code"] == "B-261102-AAAA"
+
+    listed = client.get(
+        _documents_url(company["id"]), params={"batch_code": "B-261102-AAAA"}
+    ).json()
+    assert [d["original_filename"] for d in listed] == ["a.pdf"]
+
+
+def test_upload_without_batch_code_stores_null(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    response = _upload(client, company["id"], PDF_BYTES, "c.pdf", "application/pdf")
+    assert response.status_code == 201
+    assert response.json()["batch_code"] is None

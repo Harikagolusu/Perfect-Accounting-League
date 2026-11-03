@@ -11,6 +11,7 @@ Usage:
         response = provider.generate_text("Hello, world!")
 """
 
+from app.core.config import get_settings
 from app.services.ai.provider import AIProvider, AIProviderError, AIResponse, ImageInput
 from app.services.ai.deepseek import DeepSeekProvider
 
@@ -21,6 +22,7 @@ __all__ = [
     "DeepSeekProvider",
     "ImageInput",
     "get_ai_provider",
+    "get_reasoning_provider",
 ]
 
 
@@ -32,3 +34,8 @@ def get_ai_provider() -> AIProvider:
     based on configuration, without touching any business logic.
     """
     return DeepSeekProvider()
+
+
+def get_reasoning_provider() -> AIProvider:
+    """Provider for reasoning-heavy, small-output tasks (ledger matching)."""
+    return DeepSeekProvider(model=get_settings().deepseek_reasoner_model)

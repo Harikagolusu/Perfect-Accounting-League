@@ -6,13 +6,36 @@
  * result is shown exactly as returned.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, Plus, RotateCcw, Save, Send, Trash2, Upload, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  CheckCircle2,
+  ChevronsRight,
+  ChevronsUpDown,
+  Loader2,
+  Plus,
+  RotateCcw,
+  Save,
+  Send,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { EmptyState, Field, Section, StatusBadge } from "@/components/pal/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
+import { cn } from "@/lib/utils";
 import { useLedgers } from "@/lib/queries/ledgers";
 import { useStore } from "@/lib/store";
 import { periodMonthStart } from "@/lib/constants";
@@ -73,14 +96,135 @@ const blankLine = (lineNumber: number): VoucherLine => ({
   taxType: "",
 });
 
+const KNOB = 44; // px, must match the knob's h/w below
+
+/** Swipe-to-confirm: drag the knob to the end to fire onConfirm, then it snaps
+ * back (animated). Enter/Space on the knob confirms too, for keyboard users. */
+function SlideToPost({
+  onConfirm,
+  disabled,
+  pending,
+  retry,
+}: {
+  onConfirm: () => void;
+  disabled: boolean;
+  pending: boolean;
+  retry: boolean;
+}) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const maxRef = useRef(0);
+  const [x, setX] = useState(0);
+  const [dragging, setDragging] = useState(false);
+  const off = disabled || pending;
+
+  const measure = () => {
+    maxRef.current = Math.max(0, (trackRef.current?.clientWidth ?? 0) - KNOB - 8);
+  };
+
+  const begin = (e: React.PointerEvent) => {
+    if (off) return;
+    measure();
+    setDragging(true);
+    e.currentTarget.setPointerCapture(e.pointerId);
+  };
+  const move = (e: React.PointerEvent) => {
+    if (!dragging || !trackRef.current) return;
+    const rect = trackRef.current.getBoundingClientRect();
+    setX(Math.min(Math.max(e.clientX - rect.left - 4 - KNOB / 2, 0), maxRef.current));
+  };
+  const release = () => {
+    if (!dragging) return;
+    const done = maxRef.current > 0 && x >= maxRef.current * 0.95;
+    setDragging(false);
+    setX(0);
+    if (done) onConfirm();
+  };
+
+  const progress = maxRef.current ? Math.min(x / maxRef.current, 1) : 0;
+  const armed = progress >= 0.95; // far enough that release will post
+  const label = pending
+    ? "Posting to Tally…"
+    : armed
+      ? "Release to post"
+      : retry
+        ? "Slide to retry post to Tally"
+        : "Slide to post to Tally";
+  const ease = "cubic-bezier(0.34, 1.56, 0.64, 1)"; // gentle spring on snap-back
+
+  return (
+    <div
+      ref={trackRef}
+      className={cn(
+        "relative mx-auto h-12 w-full max-w-md select-none overflow-hidden rounded-full border bg-muted/50 p-1 shadow-inner",
+        off && "opacity-70",
+      )}
+    >
+      <div
+        className={cn(
+          "absolute inset-y-0 left-0 rounded-full",
+          armed ? "bg-success/20" : "bg-primary/15",
+        )}
+        style={{
+          width: x + KNOB,
+          transition: dragging ? "background-color 150ms" : `width 300ms ${ease}, background-color 150ms`,
+        }}
+      />
+      <span
+        className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1 text-sm font-medium text-muted-foreground transition-colors"
+        style={{ opacity: 1 - progress * 0.9 }}
+      >
+        {!pending && !armed && (
+          <ChevronsRight className="h-4 w-4 animate-pulse text-primary/60" />
+        )}
+        {label}
+      </span>
+      <button
+        type="button"
+        disabled={off}
+        aria-label={label}
+        onPointerDown={begin}
+        onPointerMove={move}
+        onPointerUp={release}
+        onPointerCancel={release}
+        onKeyDown={(e) => {
+          if (off) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onConfirm();
+          }
+        }}
+        style={{
+          transform: `translateX(${x}px) scale(${dragging ? 1.08 : 1})`,
+          transition: dragging ? "none" : `transform 300ms ${ease}`,
+        }}
+        className={cn(
+          "relative z-10 flex h-10 w-10 touch-none items-center justify-center rounded-full text-primary-foreground shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+          "bg-gradient-to-b",
+          armed ? "from-success to-success/85 ring-2 ring-success/40" : "from-primary to-primary/85",
+          off ? "cursor-default" : "cursor-grab active:cursor-grabbing",
+        )}
+      >
+        {pending ? (
+          <Loader2 className="h-5 w-5 animate-spin" />
+        ) : (
+          <ChevronsRight className="h-5 w-5" />
+        )}
+      </button>
+    </div>
+  );
+}
+
 export function VoucherReview({
   companyId,
   voucherId,
   onDeleted,
+  approveAndPost = false,
 }: {
   companyId: string;
   voucherId: string;
   onDeleted?: () => void;
+  // Card flow: a single Approve (auto-submits first) then slide-to-post to Tally.
+  approveAndPost?: boolean;
 }) {
   const { financialYear, period } = useStore();
   const postingMonth = periodMonthStart(financialYear, period);
@@ -221,6 +365,29 @@ export function VoucherReview({
     }
   };
 
+  // Card flow: submit (if still a draft) then approve, so the reviewer approves
+  // in one click without a separate "Submit for approval" step.
+  const approveNow = async () => {
+    try {
+      if (submitStatuses.has(voucher.status)) {
+        const result = (await submit.mutateAsync({
+          id: voucher.id,
+          body: { actor, comment: comment.trim() || null },
+        })) as { status: string };
+        if (result.status !== "PENDING_APPROVAL") {
+          toast.warning("Voucher still needs review", {
+            description: "Clear the review exceptions above before approving.",
+          });
+          return;
+        }
+      }
+      await approve.mutateAsync({ id: voucher.id, body: { actor, comment: comment.trim() || null } });
+      toast.success("Voucher approved — slide to post to Tally.");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not approve the voucher");
+    }
+  };
+
   const rejectVoucher = async () => {
     if (!comment.trim()) {
       toast.error("Give a reason so the correction history is useful.");
@@ -331,7 +498,7 @@ export function VoucherReview({
         </div>
       )}
 
-      <div className="overflow-x-auto rounded border">
+      <div className="rounded border">
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
             <tr>
@@ -353,23 +520,12 @@ export function VoucherReview({
               <tr key={line.id || index} className="border-t align-top">
                 <td className="min-w-48 p-2">
                   {editable ? (
-                    <select
-                      className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-                      value={line.ledgerId ?? ""}
-                      onChange={(event) => chooseLedger(index, event.target.value)}
-                    >
-                      <option value="">Select ledger</option>
-                      {!line.ledgerId && line.ledgerName && (
-                        <option value="" disabled>
-                          Missing: {line.ledgerName}
-                        </option>
-                      )}
-                      {activeLedgers.map((ledger) => (
-                        <option key={ledger.id} value={ledger.id}>
-                          {ledger.name}
-                        </option>
-                      ))}
-                    </select>
+                    <LedgerCombobox
+                      ledgers={activeLedgers}
+                      value={line.ledgerId}
+                      missingName={!line.ledgerId ? line.ledgerName : undefined}
+                      onChange={(ledgerId) => chooseLedger(index, ledgerId)}
+                    />
                   ) : (
                     <span>{line.ledgerName || "No ledger"}</span>
                   )}
@@ -557,7 +713,7 @@ export function VoucherReview({
       </div>
 
       <div className="flex flex-wrap gap-2">
-        {submitStatuses.has(voucher.status) && (
+        {!approveAndPost && submitStatuses.has(voucher.status) && (
           <Button
             variant="outline"
             size="sm"
@@ -567,8 +723,14 @@ export function VoucherReview({
             <Send /> Submit for approval
           </Button>
         )}
-        {approveStatuses.has(voucher.status) && (
-          <Button size="sm" onClick={() => runAction("Voucher approved", approve)} disabled={busy}>
+        {(approveAndPost
+          ? submitStatuses.has(voucher.status) || approveStatuses.has(voucher.status)
+          : approveStatuses.has(voucher.status)) && (
+          <Button
+            size="sm"
+            onClick={approveAndPost ? approveNow : () => runAction("Voucher approved", approve)}
+            disabled={busy || (approveAndPost && (dirty || autoMatchedCount > 0))}
+          >
             Approve
           </Button>
         )}
@@ -587,16 +749,24 @@ export function VoucherReview({
             <RotateCcw /> Reopen for correction
           </Button>
         )}
-        {postStatuses.has(voucher.status) && (
-          <Button size="sm" onClick={postNow} disabled={busy}>
-            <Upload />
-            {postToTally.isPending
-              ? "Posting to Tally…"
-              : voucher.status === "POSTING_FAILED"
-                ? "Retry post to Tally"
-                : "Post to Tally"}
-          </Button>
-        )}
+        {postStatuses.has(voucher.status) &&
+          (approveAndPost ? (
+            <SlideToPost
+              onConfirm={postNow}
+              disabled={busy}
+              pending={postToTally.isPending}
+              retry={voucher.status === "POSTING_FAILED"}
+            />
+          ) : (
+            <Button size="sm" onClick={postNow} disabled={busy}>
+              <Upload />
+              {postToTally.isPending
+                ? "Posting to Tally…"
+                : voucher.status === "POSTING_FAILED"
+                  ? "Retry post to Tally"
+                  : "Post to Tally"}
+            </Button>
+          ))}
         {voucher.status === "POSTED" && (
           <span className="flex items-center gap-1.5 text-xs text-success">
             <CheckCircle2 className="h-4 w-4" />
@@ -672,5 +842,71 @@ export function VoucherReview({
         )}
       </Section>
     </div>
+  );
+}
+
+/**
+ * Searchable ledger picker. The chart of accounts runs to hundreds of ledgers,
+ * so a plain <select> is unusable; cmdk filters the list as the reviewer types.
+ */
+export function LedgerCombobox({
+  ledgers,
+  value,
+  missingName,
+  onChange,
+}: {
+  ledgers: { id: string; name: string }[];
+  value: string | null;
+  missingName?: string;
+  onChange: (ledgerId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const selected = ledgers.find((ledger) => ledger.id === value);
+  const label = selected?.name ?? (missingName ? `Missing: ${missingName}` : "Select ledger");
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          className={cn(
+            "h-9 w-full justify-between font-normal",
+            !selected && "text-muted-foreground",
+          )}
+        >
+          <span className="truncate">{label}</span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-[min(22rem,90vw)] p-0" align="start">
+        <Command>
+          <CommandInput placeholder="Search ledger…" />
+          <CommandList>
+            <CommandEmpty>No ledger found.</CommandEmpty>
+            <CommandGroup>
+              {ledgers.map((ledger) => (
+                <CommandItem
+                  key={ledger.id}
+                  value={ledger.name}
+                  onSelect={() => {
+                    onChange(ledger.id);
+                    setOpen(false);
+                  }}
+                >
+                  <Check
+                    className={cn(
+                      "mr-2 h-4 w-4",
+                      value === ledger.id ? "opacity-100" : "opacity-0",
+                    )}
+                  />
+                  <span className="truncate">{ledger.name}</span>
+                </CommandItem>
+              ))}
+            </CommandGroup>
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
   );
 }

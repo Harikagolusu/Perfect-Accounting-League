@@ -703,6 +703,114 @@ def test_process_does_not_fake_transactions_or_advance_status(client: TestClient
     assert client.get(f"{_statements(company['id'])}/{statement['id']}/transactions").json() == []
 
 
+def test_process_persists_extracted_transactions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A configured extractor's rows are saved and the status advances.
+
+    Covers the persistence branch no other process test reaches: a None amount
+    must land as zero and the derived direction must follow the amounts.
+    """
+    from app.services import bank as bank_service
+    from app.services.bank_extraction import StatementExtractionResult
+
+    class _FakeExtractor:
+        name = "fake"
+
+        def is_configured(self) -> bool:
+            return True
+
+        def extract(self, statement, raw_bytes, *, document=None):
+            return StatementExtractionResult(
+                configured=True,
+                transaction_count=2,
+                transactions=(
+                    {
+                        "transaction_date": date(2026, 3, 5),
+                        "description": "NEFT CR ACME",
+                        "debit_amount": None,
+                        "credit_amount": Decimal("2000.00"),
+                        "balance": Decimal("12000.00"),
+                    },
+                    {
+                        "transaction_date": date(2026, 3, 7),
+                        "description": "UPI DR SHOP",
+                        "debit_amount": Decimal("500.00"),
+                        "credit_amount": None,
+                        "balance": Decimal("11500.00"),
+                    },
+                ),
+            )
+
+    monkeypatch.setattr(bank_service, "get_statement_extractor", lambda: _FakeExtractor())
+
+    company = _company(client)
+    account = _account(client, company["id"])
+    statement = _statement(client, company["id"], account["id"]).json()
+
+    response = client.post(f"{_statements(company['id'])}/{statement['id']}/process")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["configured"] is True
+    assert body["transaction_count"] == 2
+
+    after = client.get(f"{_statements(company['id'])}/{statement['id']}").json()
+    assert after["status"] == "PROCESSED"
+
+    txns = client.get(
+        f"{_statements(company['id'])}/{statement['id']}/transactions"
+    ).json()
+    assert len(txns) == 2
+    assert Decimal(txns[0]["debit_amount"]) == 0  # None coerced to zero
+    assert Decimal(txns[0]["credit_amount"]) == Decimal("2000.00")
+    assert txns[0]["transaction_type"] == "CREDIT"
+    assert Decimal(txns[1]["debit_amount"]) == Decimal("500.00")
+    assert txns[1]["transaction_type"] == "DEBIT"
+
+
+def test_process_failure_sets_failed_and_keeps_existing_transactions(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable/encrypted document is FAILED, not a silent empty success."""
+    from app.services import bank as bank_service
+    from app.services.bank_extraction import StatementExtractionResult
+
+    class _FailingExtractor:
+        name = "failing"
+
+        def is_configured(self) -> bool:
+            return True
+
+        def extract(self, statement, raw_bytes, *, document=None):
+            return StatementExtractionResult(
+                configured=True,
+                reason="DOCUMENT_ENCRYPTED",
+                message="The PDF is password-protected and cannot be read.",
+            )
+
+    monkeypatch.setattr(bank_service, "get_statement_extractor", lambda: _FailingExtractor())
+
+    company = _company(client)
+    account = _account(client, company["id"])
+    statement = _statement(client, company["id"], account["id"]).json()
+    _transaction(client, company["id"], statement["id"])  # a pre-existing row
+
+    response = client.post(f"{_statements(company['id'])}/{statement['id']}/process")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["configured"] is True
+    assert body["reason"] == "DOCUMENT_ENCRYPTED"
+    assert body["status"] == "FAILED"
+
+    after = client.get(f"{_statements(company['id'])}/{statement['id']}").json()
+    assert after["status"] == "FAILED"
+    # The failed read must not have wiped the row that was already there.
+    txns = client.get(
+        f"{_statements(company['id'])}/{statement['id']}/transactions"
+    ).json()
+    assert len(txns) == 1
+
+
 def test_process_is_company_scoped(client: TestClient) -> None:
     a = _company(client, "Company A")
     b = _company(client, "Company B")
@@ -710,6 +818,132 @@ def test_process_is_company_scoped(client: TestClient) -> None:
     statement_b = _statement(client, b["id"], account_b["id"]).json()
 
     assert client.post(f"{_statements(a['id'])}/{statement_b['id']}/process").status_code == 404
+
+
+# --- Direct-upload ingest ---------------------------------------------------
+
+
+class _FakeIngestExtractor:
+    """A configured extractor that returns a fixed read, for ingest tests."""
+
+    name = "fake-ingest"
+
+    def __init__(self, *, account_number=None, bank_name=None, reason=None):
+        self._account_number = account_number
+        self._bank_name = bank_name
+        self._reason = reason
+
+    def is_configured(self) -> bool:
+        return True
+
+    def extract(self, statement, raw_bytes, *, document=None):
+        from app.services.bank_extraction import StatementExtractionResult
+
+        if self._reason is not None:
+            return StatementExtractionResult(
+                configured=True, reason=self._reason, message="boom"
+            )
+        return StatementExtractionResult(
+            configured=True,
+            transaction_count=1,
+            transactions=(
+                {
+                    "transaction_date": date(2026, 3, 5),
+                    "description": "NEFT CR",
+                    "debit_amount": None,
+                    "credit_amount": Decimal("100.00"),
+                    "balance": None,
+                },
+            ),
+            detected_account_number=self._account_number,
+            detected_bank_name=self._bank_name,
+        )
+
+
+def _use_extractor(monkeypatch: pytest.MonkeyPatch, extractor: Any) -> None:
+    from app.services import bank as bank_service
+
+    monkeypatch.setattr(bank_service, "get_statement_extractor", lambda: extractor)
+
+
+def test_ingest_single_account_creates_and_extracts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Direct upload with one account: no selection needed, statement is made."""
+    _use_extractor(monkeypatch, _FakeIngestExtractor(bank_name="HDFC Bank"))
+    company = _company(client)
+    _account(client, company["id"])
+    document = _document(client, company["id"])
+
+    response = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "PROCESSED"
+    assert body["statement_id"] is not None
+    assert body["transaction_count"] == 1
+    txns = client.get(
+        f"{_statements(company['id'])}/{body['statement_id']}/transactions"
+    ).json()
+    assert len(txns) == 1
+
+
+def test_ingest_matches_account_by_detected_number(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With several accounts, the detected number's last digits pick the right one."""
+    _use_extractor(
+        monkeypatch, _FakeIngestExtractor(account_number="XXXXXX7890")
+    )
+    company = _company(client)
+    target = _account(client, company["id"], bank_name="HDFC", number="50100234567890")
+    _account(client, company["id"], bank_name="ICICI", number="60200111222333")
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is not None
+    statement = client.get(
+        f"{_statements(company['id'])}/{body['statement_id']}"
+    ).json()
+    assert statement["bank_account_id"] == target["id"]
+
+
+def test_ingest_parks_when_account_cannot_be_matched(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ambiguous: several accounts and no detectable signal -> no statement."""
+    _use_extractor(monkeypatch, _FakeIngestExtractor())  # no number, no name
+    company = _company(client)
+    _account(client, company["id"], bank_name="HDFC", number="50100234567890")
+    _account(client, company["id"], bank_name="ICICI", number="60200111222333")
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is None
+    assert body["status"] is None
+    assert body["reason"] == "BANK_ACCOUNT_UNMATCHED"
+    assert client.get(_statements(company["id"])).json() == []
+
+
+def test_ingest_failed_read_creates_no_statement(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_extractor(monkeypatch, _FakeIngestExtractor(reason="DOCUMENT_ENCRYPTED"))
+    company = _company(client)
+    _account(client, company["id"])
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is None
+    assert body["reason"] == "DOCUMENT_ENCRYPTED"
+    assert client.get(_statements(company["id"])).json() == []
 
 
 # --- Deletion and document preservation ------------------------------------

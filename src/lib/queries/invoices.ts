@@ -21,6 +21,9 @@ import {
 } from "@/lib/api/invoices";
 import { vendorKeys } from "@/lib/queries/vendors";
 import { auditKeys } from "@/lib/queries/accountingAudit";
+import { documentKeys } from "@/lib/queries/documents";
+import { voucherKeys } from "@/lib/queries/vouchers";
+import type { InboxDocument } from "@/lib/types";
 
 export const invoiceKeys = {
   all: ["invoices"] as const,
@@ -177,6 +180,100 @@ export function useProcessInvoice(companyId: string | undefined) {
       if (!companyId) return;
       queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
       queryClient.invalidateQueries({ queryKey: vendorKeys.list(companyId) });
+    },
+  });
+}
+
+export interface BatchItemResult {
+  documentId: string;
+  invoiceId: string | null;
+  status: ProcessResult["status"];
+  message: string;
+}
+
+/**
+ * Extract up to a batch of documents in one go: for each, run extraction only
+ * and persist to PostgreSQL, so the results survive a reload. This is the
+ * Document Inbox's whole job; review, vendor/ledger mapping, voucher prep,
+ * approval and Tally posting all happen later in Invoice Processing.
+ */
+export interface BatchProgress {
+  done: number;
+  total: number;
+  /** The result just completed, or null before the first finishes. */
+  last: BatchItemResult | null;
+}
+
+/** Batch result status -> the inbox document status badge. */
+const BATCH_DOC_STATUS: Record<ProcessResult["status"], InboxDocument["status"]> = {
+  PROCESSED: "Extracted",
+  NEEDS_REVIEW: "Needs Review",
+  FAILED: "Failed",
+  NOT_CONFIGURED: "Uploaded",
+};
+
+export function useProcessDocumentsBatch(companyId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      documentIds,
+      onProgress,
+    }: {
+      documentIds: string[];
+      onProgress?: (p: BatchProgress) => void;
+    }): Promise<BatchItemResult[]> => {
+      const results: BatchItemResult[] = [];
+      const total = documentIds.length;
+      // Flip the inbox row's status straight in the cache so the table updates
+      // live without a refetch while the batch runs.
+      const setDocStatus = (documentId: string, status: InboxDocument["status"]) =>
+        queryClient.setQueriesData<InboxDocument[]>(
+          { queryKey: documentKeys.list(companyId as string) },
+          (old) => old?.map((d) => (d.id === documentId ? { ...d, status } : d)),
+        );
+      onProgress?.({ done: 0, total, last: null });
+      // One document at a time on purpose: concurrent extraction would share
+      // the model's attention and lower per-invoice accuracy.
+      for (const documentId of documentIds) {
+        setDocStatus(documentId, "Processing");
+        let item: BatchItemResult;
+        try {
+          const r = (await invoicesApi.processDocument(
+            companyId as string,
+            documentId,
+            true,
+          )) as ProcessResult;
+          item = {
+            documentId,
+            invoiceId: r.invoice_id,
+            status: r.status,
+            message: r.message,
+          };
+        } catch (e) {
+          // One document's extraction failing must not abort the rest of the
+          // batch; mark it failed and carry on to the next.
+          item = {
+            documentId,
+            invoiceId: null,
+            status: "FAILED",
+            message: e instanceof Error ? e.message : "Extraction failed",
+          };
+        }
+        setDocStatus(documentId, BATCH_DOC_STATUS[item.status]);
+        results.push(item);
+        onProgress?.({ done: results.length, total, last: item });
+      }
+      return results;
+    },
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: invoiceKeys.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: vendorKeys.list(companyId) });
+      // Extraction saves a draft voucher per invoice in the backend, so refresh
+      // vouchers or the Invoice Processing entry-details column stays stale.
+      queryClient.invalidateQueries({ queryKey: voucherKeys.all });
+      // Reconcile the optimistic row statuses with the server's truth.
+      queryClient.invalidateQueries({ queryKey: documentKeys.list(companyId) });
     },
   });
 }

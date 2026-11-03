@@ -260,6 +260,12 @@ class BankTransaction(Base):
     is_inter_account_transfer: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    #: A reviewer can park a transaction for the client to clarify. A review
+    #: annotation, never inferred, that leaves the bank facts untouched.
+    needs_clarification: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    clarification_note: Mapped[str | None] = mapped_column(Text)
     #: Stable key for a transaction imported from an external system, so a
     #: repeated Tally sync updates nothing and never duplicates a voucher line.
     external_id: Mapped[str | None] = mapped_column(String(255))

@@ -59,6 +59,8 @@ export interface InboxDocument {
   source: "Email" | "Manual Upload";
   receivedAt: string;
   fileType: string;
+  /** Shared code for the upload batch this document came in with; null if none. */
+  batchCode: string | null;
   /** Backend classification. "Unknown" until a processing step identifies it. */
   documentType?: "Unknown" | "Invoice" | "Bank Statement" | "Other";
   status: DocStatus;

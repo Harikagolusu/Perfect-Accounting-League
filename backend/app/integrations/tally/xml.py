@@ -54,7 +54,7 @@ _LEDGER_COLLECTION_REQUEST = """<ENVELOPE>
         <TDLMESSAGE>
           <COLLECTION NAME="Ledgers" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
             <TYPE>Ledger</TYPE>
-            <FETCH>Name, Parent</FETCH>
+            <FETCH>Name, Parent, ClosingBalance</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -127,6 +127,8 @@ def build_voucher_import_request(
     narration: str | None,
     lines: list[VoucherImportLine],
     remote_id: str,
+    reference: str | None = None,
+    reference_date: str | None = None,
 ) -> str:
     """Return the XML that imports one voucher into TallyPrime.
 
@@ -159,6 +161,18 @@ def build_voucher_import_request(
         if narration and narration.strip()
         else ""
     )
+    # Supplier invoice No./Date in Tally: REFERENCE is the original bill number,
+    # REFERENCEDATE its original date (YYYYMMDD), independent of the voucher DATE.
+    reference_xml = (
+        f"            <REFERENCE>{escape(reference)}</REFERENCE>\n"
+        if reference and reference.strip()
+        else ""
+    )
+    reference_date_xml = (
+        f"            <REFERENCEDATE>{escape(reference_date)}</REFERENCEDATE>\n"
+        if reference_date and reference_date.strip()
+        else ""
+    )
     voucher_xml = (
         f'        <VOUCHER REMOTEID="{escape(remote_id)}" '
         f'VCHTYPE="{escape(voucher_type)}" ACTION="Create" '
@@ -166,6 +180,11 @@ def build_voucher_import_request(
         f"            <DATE>{escape(voucher_date)}</DATE>\n"
         f"            <VOUCHERTYPENAME>{escape(voucher_type)}</VOUCHERTYPENAME>\n"
         f"            <VOUCHERNUMBER>{escape(voucher_number)}</VOUCHERNUMBER>\n"
+        f"{reference_xml}"
+        f"{reference_date_xml}"
+        # Match TallyPrime's own "As Voucher" ledger-entry mode, under which it
+        # binds REFERENCE/REFERENCEDATE to the Supplier Invoice No./Date fields.
+        "            <VCHENTRYMODE>As Voucher</VCHENTRYMODE>\n"
         # Force accounting-voucher (ledger) mode. Without this Tally posts a
         # Purchase/Sales voucher in invoice (item) mode and expects inventory
         # entries, which PAL does not send.
@@ -220,3 +239,52 @@ def build_voucher_collection_request(company: str | None = None) -> str:
             f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>"
         )
     return _VOUCHER_COLLECTION_REQUEST.format(current_company=current_company)
+
+
+#: The GST working reads vouchers through the built-in Day Book report instead
+#: of a custom Voucher collection: the collection export crashes some TallyPrime
+#: builds with a c0000005 memory access violation, while the Day Book report
+#: honours SVFROMDATE/SVTODATE and returns the same VOUCHER elements.
+_GST_DAYBOOK_REQUEST = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Day Book</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        {date_vars}
+        {current_company}
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+
+def build_gst_voucher_collection_request(
+    company: str | None = None,
+    *,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> str:
+    """Date-scoped Day Book export for the GST working.
+
+    ``from_date``/``to_date`` are Tally's ``YYYYMMDD`` form. Uses the built-in
+    Day Book report, which avoids the c0000005 crash the custom voucher
+    collection triggers on some TallyPrime builds. Read-only.
+    """
+    current_company = (
+        f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>" if company else ""
+    )
+    date_vars = ""
+    if from_date:
+        date_vars += f"<SVFROMDATE>{escape(from_date)}</SVFROMDATE>"
+    if to_date:
+        date_vars += f"<SVTODATE>{escape(to_date)}</SVTODATE>"
+    return _GST_DAYBOOK_REQUEST.format(
+        date_vars=date_vars,
+        current_company=current_company,
+    )

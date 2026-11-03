@@ -18,10 +18,11 @@ tax, party and round-off ledgers remain configuration-only.
 
 from __future__ import annotations
 
+import re
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.accounting_mapping import (
@@ -52,11 +53,15 @@ from app.services.bank import (
     BankAccountNotFoundError,
     BankStatementNotFoundError,
     get_transaction,
+    list_transactions,
 )
 from app.services.company import get_company
 from app.services.invoice import InvoiceNotFoundError, get_invoice
 from app.services.ledger import find_ledger_by_name, list_ledgers
-from app.services.ledger_ai_suggestion import suggest_ledger_with_ai
+from app.services.ledger_ai_suggestion import (
+    suggest_bank_ledger_with_ai,
+    suggest_ledger_with_ai,
+)
 
 ZERO = Decimal("0")
 
@@ -350,17 +355,6 @@ def _main_invoice_suggestion(
         if suggestion is not None:
             return suggestion
 
-    exceptions.append(
-        _issue(
-            "NO_HISTORICAL_MAPPING",
-            (
-                "No approved mapping, approved voucher history or configured "
-                f"{purpose.lower()} ledger is available."
-            ),
-            purpose,
-        )
-    )
-
     # Last resort: let the AI pre-select from the existing ledger master so the
     # reviewer starts from a candidate instead of an empty dropdown. The
     # WARNING keeps the voucher in NEEDS_REVIEW until a person confirms it.
@@ -387,6 +381,20 @@ def _main_invoice_suggestion(
             )
         )
         return ai
+
+    # Only now, with no deterministic match and no AI pick, is the line
+    # genuinely unmapped. Raising this before the AI step made it fire even when
+    # a ledger was found.
+    exceptions.append(
+        _issue(
+            "NO_HISTORICAL_MAPPING",
+            (
+                "No approved mapping, approved voucher history or configured "
+                f"{purpose.lower()} ledger is available."
+            ),
+            purpose,
+        )
+    )
     return None
 
 
@@ -558,11 +566,160 @@ def _historical_bank_ledger(
     return None, len(ledger_ids) > 1
 
 
+#: Generic words that carry no party identity, dropped before matching a bank
+#: narration to a historical ledger. Bank narrations are mostly these plus a
+#: party name; the party is the only thing worth matching on.
+_NARRATION_STOPWORDS = frozenset(
+    {
+        "neft", "imps", "rtgs", "upi", "chq", "cheque", "clg", "from", "for", "via",
+        "ref", "txn", "trf", "transfer", "account", "bank", "receipt", "payment", "pay",
+        "pvt", "private", "ltd", "limited", "llp", "company", "corp", "inc", "india",
+        "general", "insurance", "services", "service", "solutions", "technologies",
+        "technology", "enterprises", "intl", "international", "pos", "card", "online",
+        "payout", "charges", "charge", "deposit", "the", "and", "nonref",
+    }
+)
+
+
+def _identity_tokens(text: str | None) -> set[str]:
+    """Distinctive lowercase word tokens — party identity, no generic noise."""
+    return {
+        word
+        for word in re.findall(r"[a-z]+", (text or "").lower())
+        if len(word) >= 3 and word not in _NARRATION_STOPWORDS
+    }
+
+
+def _similar_historical_bank_ledger(
+    db: Session,
+    company_id: uuid.UUID,
+    *,
+    transaction: BankTransaction,
+    exclude_tokens: frozenset[str] = frozenset(),
+) -> LedgerSuggestion | None:
+    """Match the narration's party to a ledger used for that party before.
+
+    Tally bank-voucher narrations are terse ("Receipt 104"), so whole-narration
+    similarity is useless. The reliable signal is the counterparty itself: the
+    distinctive words in the bank narration against the distinctive words in
+    each ledger name this company has historically posted bank entries to. A
+    ledger wins only when it shares the most such words *and* is a clear winner
+    — a tie (e.g. two branch ledgers of the same insurer) is left for a human.
+    """
+    # Drop the account holder's own name: a narration that merely repeats it
+    # (own transfers, the company as remitter) names no counterparty.
+    narration_tokens = _identity_tokens(transaction.description) - exclude_tokens
+    if not narration_tokens:
+        return None
+    rows = db.execute(
+        select(BankTransaction.counterparty_ledger, func.count())
+        .where(
+            BankTransaction.company_id == company_id,
+            BankTransaction.id != transaction.id,
+            BankTransaction.counterparty_ledger.is_not(None),
+        )
+        .group_by(BankTransaction.counterparty_ledger)
+    ).all()
+    # Rank by shared party words, then by how often the company has used that
+    # ledger. The frequency tiebreak handles one party split across branch
+    # ledgers (e.g. an insurer with per-state ledgers): the narration can't name
+    # the branch, so the most-used one is the sensible default for a reviewer to
+    # confirm. Only a dead-even tie on both word overlap and usage is unresolved.
+    scored = sorted(
+        (
+            (len(narration_tokens & _identity_tokens(name)), count, name)
+            for name, count in rows
+        ),
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    )
+    scored = [item for item in scored if item[0] >= 1]
+    if not scored:
+        return None
+    if len(scored) > 1 and scored[1][0] == scored[0][0] and scored[1][1] == scored[0][1]:
+        return None
+    best_name = scored[0][2]
+    ledger = find_ledger_by_name(db, company_id, best_name)
+    if ledger is None or not ledger.is_active:
+        return None
+    return LedgerSuggestion(
+        purpose="COUNTERPARTY",
+        ledger_id=ledger.id,
+        ledger_name=ledger.name,
+        source="SIMILAR_HISTORICAL",
+        reason=f"The narration matches past bank entries posted to '{ledger.name}'.",
+    )
+
+
+def _narration_historical_bank_ledger(
+    db: Session,
+    company_id: uuid.UUID,
+    *,
+    transaction: BankTransaction,
+    exclude_tokens: frozenset[str] = frozenset(),
+) -> LedgerSuggestion | None:
+    """Match the raw narration to a past mapped bank entry's narration.
+
+    Compares the distinctive words in this narration against those in every
+    earlier bank transaction that already carries a counterparty ledger, and
+    reuses the ledger of the best-matching narration. A ledger wins only when
+    it shares the most words and is a clear winner; a dead-even tie is left for
+    a human. This catches narration→ledger links a ledger-name match misses
+    (e.g. "SWIGGY" → "Food Expenses").
+    """
+    narration_tokens = _identity_tokens(transaction.description) - exclude_tokens
+    if not narration_tokens:
+        return None
+    rows = db.execute(
+        select(BankTransaction.description, BankTransaction.counterparty_ledger)
+        .where(
+            BankTransaction.company_id == company_id,
+            BankTransaction.id != transaction.id,
+            BankTransaction.counterparty_ledger.is_not(None),
+            BankTransaction.description.is_not(None),
+        )
+    ).all()
+    # Best word overlap per ledger, and how many past entries reached it (the
+    # frequency tiebreak, as in _similar_historical_bank_ledger).
+    best: dict[str, tuple[int, int]] = {}
+    for description, ledger_name in rows:
+        overlap = len(narration_tokens & _identity_tokens(description))
+        if overlap < 1:
+            continue
+        current = best.get(ledger_name)
+        if current is None or overlap > current[0]:
+            best[ledger_name] = (overlap, 1)
+        elif overlap == current[0]:
+            best[ledger_name] = (overlap, current[1] + 1)
+    if not best:
+        return None
+    scored = sorted(
+        ((overlap, count, name) for name, (overlap, count) in best.items()),
+        key=lambda item: (item[0], item[1]),
+        reverse=True,
+    )
+    if len(scored) > 1 and scored[1][0] == scored[0][0] and scored[1][1] == scored[0][1]:
+        return None
+    best_name = scored[0][2]
+    ledger = find_ledger_by_name(db, company_id, best_name)
+    if ledger is None or not ledger.is_active:
+        return None
+    return LedgerSuggestion(
+        purpose="COUNTERPARTY",
+        ledger_id=ledger.id,
+        ledger_name=ledger.name,
+        source="SIMILAR_HISTORICAL",
+        reason=f"The narration matches past bank entries posted to '{ledger.name}'.",
+    )
+
+
 def suggest_for_bank_transaction(
     db: Session,
     company_id: uuid.UUID,
     statement_id: uuid.UUID,
     transaction_id: uuid.UUID,
+    *,
+    use_ai: bool = True,
 ) -> LedgerSuggestionResponse:
     transaction = get_transaction(db, company_id, statement_id, transaction_id)
     statement = db.scalar(
@@ -680,12 +837,55 @@ def suggest_for_bank_transaction(
                     exceptions=exceptions,
                 )
         if counterparty is None:
+            company = get_company(db, company_id)
+            company_tokens = frozenset(
+                _identity_tokens(f"{company.name} {company.legal_name or ''}")
+            )
+            # Raw narration against the narration of past mapped bank entries
+            # (old data) is the strongest signal; fall back to matching the
+            # narration's party words against the ledger names themselves.
+            counterparty = _narration_historical_bank_ledger(
+                db,
+                company_id,
+                transaction=transaction,
+                exclude_tokens=company_tokens,
+            ) or _similar_historical_bank_ledger(
+                db,
+                company_id,
+                transaction=transaction,
+                exclude_tokens=company_tokens,
+            )
+
+        if use_ai and counterparty is None:
+            ai = suggest_bank_ledger_with_ai(
+                db,
+                company_id,
+                transaction=transaction,
+                ledgers=list_ledgers(db, company_id),
+            )
+            if ai is not None:
+                exceptions.append(
+                    VoucherIssueResponse(
+                        code="AI_SUGGESTED_LEDGER",
+                        message=(
+                            f"'{ai.ledger_name}' was selected by AI from the ledger "
+                            "master, not from approved history. Confirm or change it "
+                            "before approval."
+                        ),
+                        severity="WARNING",
+                        field="COUNTERPARTY",
+                    )
+                )
+                counterparty = ai
+
+        if counterparty is None:
             exceptions.append(
                 _issue(
                     "NO_HISTORICAL_MAPPING",
                     (
-                        "No confirmed counterparty ledger, approved mapping or "
-                        "approved voucher history is available."
+                        "No confirmed counterparty ledger, approved mapping, "
+                        "approved voucher history or similar past transaction is "
+                        "available."
                     ),
                     "COUNTERPARTY",
                 )
@@ -704,4 +904,32 @@ def suggest_for_bank_transaction(
     return LedgerSuggestionResponse(suggestions=suggestions, exceptions=exceptions)
 
 
-__all__ = ["suggest_for_bank_transaction", "suggest_for_invoice"]
+def suggest_ledgers_for_statement(
+    db: Session, company_id: uuid.UUID, statement_id: uuid.UUID
+) -> dict[str, str | None]:
+    """Deterministic counterparty ledger per transaction, for the table column.
+
+    No AI: only a confirmed ledger, an approved mapping, approved voucher
+    history, or a similar past transaction — cheap enough to run for a whole
+    statement, and it reflects what Tally history + the narration already imply.
+    """
+    suggestions: dict[str, str | None] = {}
+    for txn in list_transactions(db, company_id, statement_id):
+        if txn.counterparty_ledger:
+            suggestions[str(txn.id)] = txn.counterparty_ledger
+            continue
+        response = suggest_for_bank_transaction(
+            db, company_id, statement_id, txn.id, use_ai=False
+        )
+        counterparty = next(
+            (s for s in response.suggestions if s.purpose == "COUNTERPARTY"), None
+        )
+        suggestions[str(txn.id)] = counterparty.ledger_name if counterparty else None
+    return suggestions
+
+
+__all__ = [
+    "suggest_for_bank_transaction",
+    "suggest_for_invoice",
+    "suggest_ledgers_for_statement",
+]

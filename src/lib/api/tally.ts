@@ -77,6 +77,26 @@ export interface TallyBankDataSyncDto {
   error_message: string | null;
 }
 
+export interface GstComponentTotalsDto {
+  taxable: string;
+  igst: string;
+  cgst: string;
+  sgst: string;
+}
+
+export interface TallyGstWorkingDto {
+  success: boolean;
+  company_id: string;
+  tally_company_name: string;
+  from_date: string | null;
+  to_date: string | null;
+  outward: GstComponentTotalsDto;
+  inward_itc: GstComponentTotalsDto;
+  vouchers_fetched: number;
+  vouchers_used: number;
+  error_message: string | null;
+}
+
 export const tallyApi = {
   status: () => apiFetch<TallyStatusDto>(`${API_V1_PREFIX}/tally/status`),
   syncCompanies: () =>
@@ -106,6 +126,15 @@ export const tallyApi = {
         body: JSON.stringify({ tally_company_name: tallyCompanyName }),
       },
     ),
+  gstWorking: (companyId: string, tallyCompanyName: string, fromDate?: string, toDate?: string) =>
+    apiFetch<TallyGstWorkingDto>(`${API_V1_PREFIX}/tally/sync/${companyId}/gst-working`, {
+      method: "POST",
+      body: JSON.stringify({
+        tally_company_name: tallyCompanyName,
+        from_date: fromDate || undefined,
+        to_date: toDate || undefined,
+      }),
+    }),
   syncBankData: (
     companyId: string,
     tallyCompanyName: string,

@@ -456,6 +456,138 @@ def sync_tally_bank_accounts(
     )
 
 
+@dataclass
+class _GstTotals:
+    """Mutable accumulator for one side of the GST working."""
+
+    taxable: Decimal = ZERO
+    igst: Decimal = ZERO
+    cgst: Decimal = ZERO
+    sgst: Decimal = ZERO
+
+
+@dataclass(frozen=True)
+class TallyGstWorkingResult:
+    """Outward tax and inward ITC aggregated from Tally vouchers for a period."""
+
+    success: bool
+    tally_company_name: str
+    from_date: date | None
+    to_date: date | None
+    outward: _GstTotals
+    inward_itc: _GstTotals
+    vouchers_fetched: int
+    vouchers_used: int
+    error_message: str | None = None
+
+
+def _gst_component(ledger_name: str) -> str | None:
+    """Return 'igst' | 'cgst' | 'sgst' for a GST tax ledger, else None.
+
+    UTGST is reported alongside SGST. Cess and other heads are not GST
+    components and return None (they fall into the taxable base — a reviewer
+    corrects the rare voucher where that is wrong).
+    """
+    name = ledger_name.lower()
+    if "igst" in name:
+        return "igst"
+    if "cgst" in name:
+        return "cgst"
+    if "sgst" in name or "utgst" in name:
+        return "sgst"
+    return None
+
+
+def compute_tally_gst_working(
+    db: Session,
+    company_id: uuid.UUID,
+    tally_company_name: str,
+    *,
+    from_date: date | None = None,
+    to_date: date | None = None,
+    service: TallyService | None = None,
+) -> TallyGstWorkingResult:
+    """Read Tally vouchers and total output GST (sales) and input ITC (purchases).
+
+    Read-only: PAL never writes to Tally and stores nothing. For a sales voucher
+    the credited ledgers are output tax and taxable sales; for a purchase the
+    debited ledgers are input tax and taxable purchases. The party ledger sits
+    on the opposite side and is excluded. Other voucher types are ignored.
+
+    Raises CompanyNotFoundError when company_id is not in PAL.
+    """
+    get_company(db, company_id)
+
+    tally_company_name = tally_company_name.strip()
+    owned_service = service is None
+    svc: TallyService = service or get_tally_service()
+
+    outward = _GstTotals()
+    inward = _GstTotals()
+    fetched = used = 0
+    error_message: str | None = None
+
+    try:
+        result = svc.get_gst_vouchers(
+            tally_company_name,
+            from_date=from_date.strftime("%Y%m%d") if from_date else None,
+            to_date=to_date.strftime("%Y%m%d") if to_date else None,
+        )
+        fetched = len(result.vouchers)
+        for voucher in result.vouchers:
+            if from_date and (voucher.date is None or voucher.date < from_date):
+                continue
+            if to_date and (voucher.date is None or voucher.date > to_date):
+                continue
+            # Direction from the GST tax ledgers, not the voucher-type name
+            # (which is often a custom name like "Tax Invoice"). A credited GST
+            # ledger is output tax (outward); a debited one is input tax (ITC).
+            tax_credit = any(
+                _gst_component(e.ledger_name) and not e.is_deemed_positive
+                for e in voucher.entries
+            )
+            tax_debit = any(
+                _gst_component(e.ledger_name) and e.is_deemed_positive
+                for e in voucher.entries
+            )
+            if tax_credit and not tax_debit:
+                bucket, want_debit = outward, False
+            elif tax_debit and not tax_credit:
+                bucket, want_debit = inward, True
+            else:
+                continue  # no GST, or both sides — left for a manual review
+            touched = False
+            for entry in voucher.entries:
+                if entry.is_deemed_positive != want_debit:
+                    continue
+                component = _gst_component(entry.ledger_name)
+                value = abs(entry.amount)
+                if component is None:
+                    bucket.taxable += value
+                else:
+                    setattr(bucket, component, getattr(bucket, component) + value)
+                touched = True
+            if touched:
+                used += 1
+    except TallyError as exc:
+        error_message = str(exc)
+    finally:
+        if owned_service:
+            svc.close()
+
+    return TallyGstWorkingResult(
+        success=error_message is None,
+        tally_company_name=tally_company_name,
+        from_date=from_date,
+        to_date=to_date,
+        outward=outward,
+        inward_itc=inward,
+        vouchers_fetched=fetched,
+        vouchers_used=used,
+        error_message=error_message,
+    )
+
+
 def current_financial_year(today: date | None = None) -> tuple[date, date]:
     """Return the Indian financial year (1 April – 31 March) around ``today``."""
     today = today or date.today()
@@ -481,6 +613,43 @@ class TallyBankDataSyncResult:
     transactions_created: int
     transactions_skipped: int
     error_message: str | None = None
+
+
+def _counterparty_ledger(voucher, account_by_ledger: dict) -> str | None:
+    """The non-bank ledger a Tally bank voucher posted against.
+
+    A receipt/payment/contra voucher has the bank line plus one or more
+    counterparty lines. The largest non-bank line is the head the money came
+    from or went to — the historical ledger a future statement with the same
+    narration should reuse. A split (several non-bank lines) just takes the
+    biggest, which is enough signal for narration matching.
+    """
+    others = [
+        entry
+        for entry in voucher.entries
+        if entry.ledger_name
+        and account_by_ledger.get(entry.ledger_name.casefold()) is None
+        and entry.amount != 0
+    ]
+    if not others:
+        return None
+    best = max(others, key=lambda entry: abs(entry.amount))
+    return (best.ledger_name or "").strip() or None
+
+
+def _running_balances(nets: list[Decimal], closing: Decimal) -> list[Decimal]:
+    """Per-line balance from each line's net effect and the closing balance.
+
+    The last line ends at ``closing``; each earlier line sits at the line after
+    it minus that later line's net. The opening and closing totals are
+    order-independent; only the intra-period middles depend on line order.
+    """
+    balances = [closing] * len(nets)
+    running = closing
+    for index in range(len(nets) - 1, -1, -1):
+        balances[index] = running
+        running = running - nets[index]
+    return balances
 
 
 def _entry_direction(entry, *, is_overdraft: bool) -> tuple[Decimal, Decimal]:
@@ -556,6 +725,21 @@ def sync_tally_bank_data(
             for ledger in bank_ledgers
             if (ledger.name or "").strip()
         }
+        # account id -> signed closing balance, so a running balance can be
+        # filled for each line (Tally vouchers carry no running balance). Tally
+        # reports the magnitude; a normal bank account holds a positive balance,
+        # an overdraft a negative one.
+        closing_by_account: dict[uuid.UUID, Decimal] = {}
+        for ledger in bank_ledgers:
+            account = account_by_ledger.get((ledger.name or "").casefold())
+            if account is None or ledger.closing_balance is None:
+                continue
+            group = (ledger.parent or "").strip().lower()
+            closing_by_account[account.id] = (
+                ledger.closing_balance
+                if group in _DEPOSIT_GROUPS
+                else -ledger.closing_balance
+            )
 
         voucher_result = svc.get_vouchers(tally_company_name)
         vouchers_fetched = len(voucher_result.vouchers)
@@ -602,17 +786,24 @@ def sync_tally_bank_data(
                 db.flush()
                 statements_created += 1
 
-            existing_ids = set(
-                db.scalars(
-                    select(BankTransaction.external_id).where(
+            existing = {
+                row.external_id: row
+                for row in db.scalars(
+                    select(BankTransaction).where(
                         BankTransaction.bank_statement_id == statement.id,
                         BankTransaction.external_id.is_not(None),
                     )
                 ).all()
-            )
+            }
 
             for external_id, voucher, entry in rows:
-                if external_id in existing_ids:
+                counterparty_ledger = _counterparty_ledger(voucher, account_by_ledger)
+                prior = existing.get(external_id)
+                if prior is not None:
+                    # Backfill the historical ledger onto a row imported before
+                    # this was captured, so narration matching can learn from it.
+                    if counterparty_ledger and not prior.counterparty_ledger:
+                        prior.counterparty_ledger = counterparty_ledger
                     transactions_skipped += 1
                     continue
 
@@ -620,33 +811,52 @@ def sync_tally_bank_data(
                 debit, credit = _entry_direction(
                     entry, is_overdraft=group not in _DEPOSIT_GROUPS
                 )
-                db.add(
-                    BankTransaction(
-                        company_id=company_id,
-                        bank_statement_id=statement.id,
-                        transaction_date=voucher.date,
-                        description=(
-                            voucher.narration
-                            or " ".join(
-                                part
-                                for part in (
-                                    voucher.voucher_type,
-                                    voucher.voucher_number,
-                                )
-                                if part
+                transaction = BankTransaction(
+                    company_id=company_id,
+                    bank_statement_id=statement.id,
+                    transaction_date=voucher.date,
+                    description=(
+                        voucher.narration
+                        or " ".join(
+                            part
+                            for part in (
+                                voucher.voucher_type,
+                                voucher.voucher_number,
                             )
-                            or None
-                        ),
-                        reference_number=voucher.voucher_number,
-                        debit_amount=debit,
-                        credit_amount=credit,
-                        is_inter_account_transfer=False,
-                        external_id=external_id,
-                        transaction_type=derive_transaction_type(debit, credit),
-                    )
+                            if part
+                        )
+                        or None
+                    ),
+                    reference_number=voucher.voucher_number,
+                    debit_amount=debit,
+                    credit_amount=credit,
+                    counterparty_ledger=counterparty_ledger,
+                    is_inter_account_transfer=False,
+                    external_id=external_id,
+                    transaction_type=derive_transaction_type(debit, credit),
                 )
-                existing_ids.add(external_id)
+                db.add(transaction)
+                existing[external_id] = transaction
                 transactions_created += 1
+
+            # Fill a running balance for the whole statement (new + backfilled),
+            # anchored on Tally's closing balance. Skipped when Tally gave none,
+            # so a balance is never fabricated.
+            closing = closing_by_account.get(account_id)
+            if closing is not None:
+                ordered = db.scalars(
+                    select(BankTransaction)
+                    .where(BankTransaction.bank_statement_id == statement.id)
+                    .order_by(
+                        BankTransaction.transaction_date, BankTransaction.created_at
+                    )
+                ).all()
+                if ordered:
+                    nets = [t.credit_amount - t.debit_amount for t in ordered]
+                    for txn, balance in zip(ordered, _running_balances(nets, closing)):
+                        txn.balance = balance
+                    statement.opening_balance = closing - sum(nets, ZERO)
+                    statement.closing_balance = closing
 
         db.commit()
     except TallyError as exc:

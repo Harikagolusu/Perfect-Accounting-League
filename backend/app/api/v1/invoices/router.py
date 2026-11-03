@@ -404,6 +404,13 @@ def remove_invoice(
 def process_document_route(
     document_id: UUID = Path(description="Document to attempt extraction on."),
     company_id: UUID = Path(description="Owning company id."),
+    prepare_voucher: bool = Query(
+        False,
+        description=(
+            "Document Inbox flow: also build the accounting voucher and auto-map "
+            "its ledgers, so the invoice is only PROCESSED when the voucher is complete."
+        ),
+    ),
     db: Session = Depends(get_db),
 ) -> ProcessInvoiceResponse:
     """Try to read an invoice out of a stored document.
@@ -413,7 +420,9 @@ def process_document_route(
     reused and moved through the existing invoice lifecycle.
     """
     try:
-        document, result, invoice = process_document(db, company_id, document_id)
+        document, result, invoice = process_document(
+            db, company_id, document_id, prepare_voucher=prepare_voucher
+        )
     except DocumentNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"

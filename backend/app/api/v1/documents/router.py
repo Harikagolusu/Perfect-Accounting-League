@@ -14,6 +14,7 @@ from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Path,
     Query,
@@ -31,6 +32,7 @@ from app.models.document import Document, DocumentStatus, DocumentType
 from app.schemas.document import DocumentResponse
 from app.services.company import CompanyNotFoundError
 from app.services.document import (
+    DocumentInUseError,
     DocumentNotFoundError,
     create_document,
     delete_document,
@@ -64,6 +66,9 @@ def document_or_404(
 async def post_document(
     company_id: UUID = Path(description="Company the document belongs to."),
     file: UploadFile = File(description="PDF, JPEG, PNG, XLS, XLSX or DOCX file."),
+    batch_code: str | None = Form(
+        default=None, max_length=32, description="Shared code for one upload batch."
+    ),
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
     max_bytes = get_settings().document_max_upload_bytes
@@ -84,6 +89,7 @@ async def post_document(
             original_filename=file.filename,
             content_type=file.content_type,
             data=data,
+            batch_code=batch_code,
         )
     except CompanyNotFoundError:
         raise HTTPException(
@@ -107,9 +113,18 @@ def get_documents(
     document_type: DocumentType | None = Query(
         default=None, description="Filter by document type."
     ),
+    batch_code: str | None = Query(
+        default=None, max_length=32, description="Filter by upload batch code."
+    ),
     db: Session = Depends(get_db),
 ) -> list[DocumentResponse]:
-    return list_documents(db, company_id, status=status_filter, document_type=document_type)
+    return list_documents(
+        db,
+        company_id,
+        status=status_filter,
+        document_type=document_type,
+        batch_code=batch_code,
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentResponse, summary="Get a document")
@@ -163,6 +178,10 @@ def remove_document(
     """Delete the stored file and the record. Scoped to the owning company."""
     try:
         delete_document(db, document.company_id, document.id)
+    except DocumentInUseError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from None
     except StorageError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

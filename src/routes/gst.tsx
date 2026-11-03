@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Play, Download, CheckCheck } from "lucide-react";
+import { Play, Download, CheckCheck, RefreshCw } from "lucide-react";
 import {
   PageHeader,
   Section,
@@ -14,7 +14,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useCompany, useStore } from "@/lib/store";
-import { FINANCIAL_YEARS, PERIODS } from "@/lib/constants";
+import { useTallyGstWorking } from "@/lib/queries/tally";
+import { FINANCIAL_YEARS, PERIODS, periodMonthStart } from "@/lib/constants";
 import { useVendors } from "@/lib/queries/vendors";
 import { fmtINR } from "@/lib/format";
 import { exportFile, exportSheets } from "@/lib/export";
@@ -115,6 +116,50 @@ function GSTPage() {
   const [key, setKey] = useState(company?.id ?? "");
   const [source, setSource] = useState("Books + Processed Invoices");
   const [status, setStatus] = useState<"Draft" | "Generated" | "Reviewed">("Draft");
+  const gstSync = useTallyGstWorking();
+
+  const syncFromTally = () => {
+    const name = company?.legalName ?? company?.displayName ?? "";
+    if (!company || !name) return toast.error("This company has no name to match in Tally.");
+    const start = periodMonthStart(s.financialYear, s.period);
+    let end: string | undefined;
+    if (start) {
+      const y = Number(start.slice(0, 4));
+      const m = Number(start.slice(5, 7));
+      const lastDay = new Date(y, m, 0).getDate();
+      end = `${start.slice(0, 7)}-${String(lastDay).padStart(2, "0")}`;
+    }
+    const num = (v: string) => Number(v) || 0;
+    gstSync.mutate(
+      { companyId: company.id, tallyCompanyName: name, fromDate: start, toDate: end },
+      {
+        onSuccess: (d) => {
+          if (!d.success) return toast.error(`Tally sync failed: ${d.error_message}`);
+          const o = d.outward;
+          const i = d.inward_itc;
+          setR1((rows) =>
+            rows.map((r) =>
+              r.category === "B2B - Registered"
+                ? { ...r, taxable: num(o.taxable), igst: num(o.igst), cgst: num(o.cgst), sgst: num(o.sgst) }
+                : r,
+            ),
+          );
+          setR3((rows) =>
+            rows.map((r) => {
+              if (r.category === "3.1(a) Outward taxable supplies")
+                return { ...r, taxable: num(o.taxable), igst: num(o.igst), cgst: num(o.cgst), sgst: num(o.sgst) };
+              if (r.category === "4(A)(5) All other ITC - Eligible")
+                return { ...r, taxable: num(i.taxable), igst: num(i.igst), cgst: num(i.cgst), sgst: num(i.sgst) };
+              return r;
+            }),
+          );
+          setStatus("Generated");
+          toast.success(`Pulled ${d.vouchers_used} voucher(s) from Tally`);
+        },
+        onError: (e) => toast.error(e.message),
+      },
+    );
+  };
 
   if (key !== (company?.id ?? "")) {
     setKey(company?.id ?? "");
@@ -152,6 +197,10 @@ function GSTPage() {
         description={`${company.displayName} - ${s.financialYear} - ${s.period}`}
         actions={
           <>
+            <Button variant="outline" onClick={syncFromTally} disabled={gstSync.isPending}>
+              <RefreshCw className={gstSync.isPending ? "animate-spin" : undefined} />
+              {gstSync.isPending ? "Pulling…" : "Sync from Tally"}
+            </Button>
             <Button
               onClick={() => {
                 setStatus("Generated");
@@ -200,8 +249,8 @@ function GSTPage() {
         }
       />
       <InfoNotice>
-        Workings are entered manually. PAL does not access the GST portal, compute tax
-        automatically, or file returns.
+        Sync from Tally totals output GST and input ITC from the period's vouchers; everything stays
+        editable. PAL does not access the GST portal or file returns.
       </InfoNotice>
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <Field label="Company">

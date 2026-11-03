@@ -39,6 +39,9 @@ class TallyLedger:
 
     name: str
     parent: str | None = None
+    #: Tally's reported closing balance magnitude (sign dropped; Tally's Dr/Cr
+    #: convention is applied by the caller using the ledger's group).
+    closing_balance: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -206,7 +209,14 @@ def parse_ledgers(text: str, *, company: str | None = None) -> TallyLedgerResult
         if key in seen:
             continue
         seen.add(key)
-        ledgers.append(TallyLedger(name=name, parent=parent))
+        raw_balance = _parse_decimal(_first_text(element, "CLOSINGBALANCE"))
+        ledgers.append(
+            TallyLedger(
+                name=name,
+                parent=parent,
+                closing_balance=abs(raw_balance) if raw_balance is not None else None,
+            )
+        )
     return TallyLedgerResult(company=resolved_company, ledgers=ledgers)
 
 

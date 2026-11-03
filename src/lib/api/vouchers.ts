@@ -129,6 +129,8 @@ export interface VoucherActionDto {
   verified?: boolean | null;
   /** Any day of the posting period; earlier-dated vouchers post on its first. */
   posting_month?: string | null;
+  /** Re-send an already-posted voucher to Tally (updates it by REMOTEID). */
+  force?: boolean;
 }
 
 /** Mirrors `VoucherPostResponse` in backend/app/schemas/voucher.py. */

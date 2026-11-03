@@ -8,6 +8,7 @@ import {
   type TallyBankSyncDto,
   type TallyCompanySyncDto,
   type TallyMappingSyncDto,
+  type TallyGstWorkingDto,
   type TallyStatusDto,
   type TallySyncDto,
 } from "@/lib/api/tally";
@@ -70,6 +71,17 @@ export function useTallyMappingSync() {
       queryClient.invalidateQueries({ queryKey: ["vouchers"] });
       queryClient.invalidateQueries({ queryKey: ["invoices"] });
     },
+  });
+}
+
+export function useTallyGstWorking() {
+  return useMutation<
+    TallyGstWorkingDto,
+    Error,
+    { companyId: string; tallyCompanyName: string; fromDate?: string; toDate?: string }
+  >({
+    mutationFn: ({ companyId, tallyCompanyName, fromDate, toDate }) =>
+      tallyApi.gstWorking(companyId, tallyCompanyName, fromDate, toDate),
   });
 }
 

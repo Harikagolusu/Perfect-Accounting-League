@@ -17,15 +17,35 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+)
 
 from app.schemas.common import GSTIN_RE, PAN_RE, clean_optional
 from app.services.invoice_validation import validate_invoice_fields
+
+
+def _strip_grouping(value: Any) -> Any:
+    """Indian/US invoices print amounts with thousands commas ('52,093.98');
+    Decimal rejects the comma, so strip it before parsing. Non-strings pass through."""
+    if isinstance(value, str):
+        return value.replace(",", "").strip()
+    return value
+
+
+#: A Decimal that tolerates comma-grouped number strings from the model.
+StrippedDecimal = Annotated[Decimal, BeforeValidator(_strip_grouping)]
 
 #: Mirrors the NUMERIC(15,2) columns. A response outside this shape is rejected
 #: as invalid output rather than rounded into something different.
 ExtractedMoney = Annotated[
     Decimal,
+    BeforeValidator(_strip_grouping),
     Field(max_digits=15, decimal_places=2, allow_inf_nan=False),
 ]
 
@@ -77,10 +97,10 @@ class ExtractedLineItem(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     supply_type: str | None = Field(default=None, max_length=16)
     hsn_sac: str | None = Field(default=None, max_length=16)
-    quantity: Decimal | None = None
+    quantity: StrippedDecimal | None = None
     # unit_rate can have >2 dp when the AI back-calculates it from totals.
-    unit_rate: Decimal | None = None
-    gst_rate: Decimal | None = None
+    unit_rate: StrippedDecimal | None = None
+    gst_rate: StrippedDecimal | None = None
 
     taxable_amount: ExtractedMoney | None = None
     igst_amount: ExtractedMoney | None = None

@@ -584,6 +584,63 @@ class TestTallySyncService:
         assert cash.parent_group == "Cash-in-Hand"
         assert cash.source == LedgerSource.TALLY
 
+    def test_gst_working_totals_output_and_itc(self, db: Session):
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260720</DATE><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Creditor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>590</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Purchase</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-500</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Input IGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        assert result.vouchers_used == 2
+        assert result.outward.taxable == Decimal("1000")
+        assert result.outward.cgst == Decimal("90")
+        assert result.outward.sgst == Decimal("90")
+        assert result.outward.igst == Decimal("0")
+        assert result.inward_itc.taxable == Decimal("500")
+        assert result.inward_itc.igst == Decimal("90")
+
+    def test_gst_working_filters_by_date(self, db: Session):
+        from datetime import date
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260515</DATE><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(
+            db, company.id, "PAL Test Company",
+            from_date=date(2026, 7, 1), to_date=date(2026, 7, 31), service=svc,
+        )
+
+        assert result.success
+        assert result.vouchers_used == 0
+        assert result.outward.taxable == Decimal("0")
+
     def test_repeated_sync_creates_no_duplicates(self, db: Session):
         from app.services.tally_sync import sync_tally_ledgers
 
@@ -890,3 +947,106 @@ def test_voucher_import_posts_in_accounting_mode() -> None:
     )
     assert "<ISINVOICE>No</ISINVOICE>" in xml
     assert 'OBJVIEW="Accounting Voucher View"' in xml
+    # No supplier reference passed: neither reference tag appears.
+    assert "<REFERENCE>" not in xml
+    assert "<REFERENCEDATE>" not in xml
+
+
+def test_voucher_import_carries_supplier_invoice_reference_and_date() -> None:
+    """The original bill number and date load into Tally's Supplier Invoice
+    No./Date via REFERENCE and REFERENCEDATE, independent of the voucher DATE."""
+    from decimal import Decimal
+
+    from app.integrations.tally.xml import (
+        VoucherImportLine,
+        build_voucher_import_request,
+    )
+
+    xml = build_voucher_import_request(
+        company="Acme",
+        voucher_date="20260401",
+        voucher_type="Purchase",
+        voucher_number="PUR-1",
+        narration=None,
+        lines=[
+            VoucherImportLine("Purchases", Decimal("100"), True),
+            VoucherImportLine("Creditor", Decimal("100"), False),
+        ],
+        remote_id="abc",
+        reference="BILL-77",
+        reference_date="20260315",
+    )
+    assert "<REFERENCE>BILL-77</REFERENCE>" in xml
+    assert "<REFERENCEDATE>20260315</REFERENCEDATE>" in xml
+    assert "<DATE>20260401</DATE>" in xml
+    # "As Voucher" entry mode is what makes Tally bind REFERENCE to Supplier
+    # Invoice No. (confirmed against a manually entered voucher's export).
+    assert "<VCHENTRYMODE>As Voucher</VCHENTRYMODE>" in xml
+
+
+# --- Counterparty ledger capture from bank vouchers ------------------------
+
+
+def test_counterparty_ledger_picks_the_largest_non_bank_line() -> None:
+    """The historical ledger stored on a Tally bank transaction."""
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from app.services.tally_sync import _counterparty_ledger
+
+    account_by_ledger = {"hdfc bank": object()}
+    voucher = SimpleNamespace(
+        entries=[
+            SimpleNamespace(ledger_name="HDFC Bank", amount=Decimal("1500")),
+            SimpleNamespace(ledger_name="Bank Charges", amount=Decimal("500")),
+            SimpleNamespace(ledger_name="Office Rent", amount=Decimal("1000")),
+        ]
+    )
+    assert _counterparty_ledger(voucher, account_by_ledger) == "Office Rent"
+
+
+def test_counterparty_ledger_none_when_only_a_bank_line() -> None:
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    from app.services.tally_sync import _counterparty_ledger
+
+    account_by_ledger = {"hdfc bank": object()}
+    voucher = SimpleNamespace(
+        entries=[SimpleNamespace(ledger_name="HDFC Bank", amount=Decimal("1500"))]
+    )
+    assert _counterparty_ledger(voucher, account_by_ledger) is None
+
+
+# --- Running balance from Tally closing balance ----------------------------
+
+
+def test_running_balances_walks_back_from_closing() -> None:
+    from decimal import Decimal
+
+    from app.services.tally_sync import _running_balances
+
+    nets = [Decimal("100"), Decimal("-30"), Decimal("50")]
+    # closing 120 -> last=120, middle=70, first=100, opening=0
+    assert _running_balances(nets, Decimal("120")) == [
+        Decimal("100"),
+        Decimal("70"),
+        Decimal("120"),
+    ]
+
+
+def test_parse_ledgers_reads_closing_balance_magnitude() -> None:
+    from decimal import Decimal
+
+    from app.integrations.tally import parse_ledgers
+
+    xml = (
+        "<ENVELOPE><HEADER><STATUS>1</STATUS></HEADER><BODY><DATA><COLLECTION>"
+        '<LEDGER NAME="HDFC Bank"><NAME>HDFC Bank</NAME>'
+        "<PARENT>Bank Accounts</PARENT>"
+        "<CLOSINGBALANCE>-1854268.05</CLOSINGBALANCE></LEDGER>"
+        "</COLLECTION></DATA></BODY></ENVELOPE>"
+    )
+    result = parse_ledgers(xml)
+    ledger = next(item for item in result.ledgers if item.name == "HDFC Bank")
+    assert ledger.closing_balance == Decimal("1854268.05")

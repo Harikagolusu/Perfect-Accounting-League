@@ -7,6 +7,7 @@ leaves the voucher retryable and never POSTED.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Any
 
 import httpx
@@ -200,6 +201,65 @@ def test_successful_post_sets_posted_and_stores_the_reference(
     # A debit is negative with ISDEEMEDPOSITIVE Yes, a credit the mirror.
     assert "<AMOUNT>-1000.00</AMOUNT>" in sent
     assert "<AMOUNT>1000.00</AMOUNT>" in sent
+
+
+def test_posting_date_is_clamped_to_month_but_stored_date_is_unchanged(
+    client: TestClient, db: Session
+) -> None:
+    # Voucher dated 2026-03-15, posted into May 2026: Tally gets the first of
+    # May (max of the two); PAL keeps the real 2026-03-15.
+    company, voucher = _approved_voucher(client)
+    recorder = _Recorder(ACCEPTED)
+
+    result = post_voucher_to_tally(
+        db,
+        voucher["company_id"],
+        voucher["id"],
+        actor="tester",
+        posting_month=date(2026, 5, 10),
+        service=_service(recorder),
+    )
+
+    assert result.success is True
+    sent = recorder.payloads[0]
+    assert "<DATE>20260501</DATE>" in sent
+    assert "20260315" not in sent
+
+    row = client.get(f"{_base(company['id'])}/vouchers/{voucher['id']}").json()
+    assert row["voucher_date"] == "2026-03-15"
+
+
+def test_force_repushes_an_already_posted_voucher(
+    client: TestClient, db: Session
+) -> None:
+    company, voucher = _approved_voucher(client)
+    first = _Recorder(ACCEPTED)
+    post_voucher_to_tally(
+        db, voucher["company_id"], voucher["id"], actor="t", service=_service(first)
+    )
+
+    # Without force a re-post is a no-op: Tally is not called again.
+    again = _Recorder(ACCEPTED)
+    noop = post_voucher_to_tally(
+        db, voucher["company_id"], voucher["id"], actor="t", service=_service(again)
+    )
+    assert noop.already_posted is True
+    assert again.payloads == []
+
+    # With force the voucher is sent again (REMOTEID makes Tally update it).
+    repush = _Recorder(ACCEPTED)
+    result = post_voucher_to_tally(
+        db,
+        voucher["company_id"],
+        voucher["id"],
+        actor="t",
+        force=True,
+        service=_service(repush),
+    )
+    assert result.success is True
+    assert result.already_posted is False
+    assert len(repush.payloads) == 1
+    assert f'REMOTEID="{voucher["id"]}"' in repush.payloads[0]
 
 
 def test_posting_is_audited_with_the_tally_reference(

@@ -30,7 +30,10 @@ from app.services.ai.provider import AIProvider, AIProviderError, AIResponse, Im
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_SECONDS = 30
+# A bank statement extraction can emit up to BANK_MAX_TOKENS (~16k) tokens, which
+# routinely runs past 30s; the ceiling must cover the slowest extraction, not a
+# quick prompt. It is a max wait, so a larger value never slows a fast call.
+DEFAULT_TIMEOUT_SECONDS = 120
 
 
 class DeepSeekProvider(AIProvider):
@@ -38,14 +41,16 @@ class DeepSeekProvider(AIProvider):
 
     name = "deepseek"
 
-    def __init__(self) -> None:
+    def __init__(self, model: str | None = None) -> None:
         settings = get_settings()
         # The key is held only so the client can be constructed. It is never
         # logged, serialised, or returned; `_api_key` is private and not part
         # of the public surface.
         self._api_key = settings.deepseek_api_key
         self._base_url = settings.deepseek_base_url
-        self._model = settings.deepseek_model
+        # `model` lets a caller pick a task-specific model (e.g. the reasoning
+        # model for ledger matching); the configured default covers the rest.
+        self._model = model or settings.deepseek_model
 
         if self._api_key:
             self._client = OpenAI(

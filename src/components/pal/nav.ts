@@ -30,7 +30,7 @@ export const NAV: { group: string; items: NavItem[] }[] = [
     group: "Control",
     items: [
       { title: "Reports & Exports", url: "/reports", icon: FileBarChart },
-      { title: "Review Queue", url: "/review", icon: ClipboardCheck },
+      { title: "Posted to Tally", url: "/review", icon: ClipboardCheck },
       { title: "Audit Trail", url: "/audit", icon: History },
       { title: "Settings", url: "/settings", icon: Settings },
     ],

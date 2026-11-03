@@ -22,5 +22,6 @@ class DocumentResponse(TimestampedResponse):
     original_filename: str
     file_type: str
     file_size: int
+    batch_code: str | None = None
     document_type: DocumentType
     status: DocumentStatus

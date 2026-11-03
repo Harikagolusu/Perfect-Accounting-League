@@ -45,7 +45,7 @@ class TestSettings:
         assert settings.ai_configured is False
         assert settings.deepseek_api_key == ""
         assert settings.deepseek_base_url == "https://api.deepseek.com"
-        assert settings.deepseek_model == "deepseek-flash"
+        assert settings.deepseek_model == "deepseek-chat"
 
     def test_settings_with_api_key(self, monkeypatch):
         """Settings report configured=True when an API key is present."""
@@ -86,7 +86,7 @@ class TestProviderFactory:
     def test_provider_has_correct_metadata(self):
         provider = get_ai_provider()
         assert provider.name == "deepseek"
-        assert provider.model == "deepseek-flash"
+        assert provider.model == "deepseek-chat"
 
     def test_provider_is_not_configured_without_key(self):
         provider = get_ai_provider()
@@ -160,7 +160,7 @@ class TestStatusEndpoint:
         data = response.json()
         assert data["configured"] is False
         assert data["provider"] == "deepseek"
-        assert data["model"] == "deepseek-flash"
+        assert data["model"] == "deepseek-chat"
 
     def test_ai_status_does_not_expose_secrets(self):
         """Status endpoint response must not contain any key material."""
@@ -384,7 +384,7 @@ class TestProviderErrorConversion:
 
         result = provider.generate_text("test prompt")
         assert result.text == "PAL AI connection successful."
-        assert result.model == "deepseek-flash"
+        assert result.model == "deepseek-chat"
         assert result.usage["total_tokens"] == 15
 
     def test_generate_text_raises_when_not_configured(self):

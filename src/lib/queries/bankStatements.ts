@@ -17,6 +17,7 @@ import {
   type BankStatementWriteDto,
   type BankTransactionMappingWriteDto,
   type BankTransactionWriteDto,
+  type IngestStatementResultDto,
   type ProcessStatementResultDto,
   type UiBankStatement,
   type UiBankTransaction,
@@ -84,6 +85,22 @@ export function useBankTransactions(
           dateTo,
         })
       ).map(toBankTransaction),
+    enabled: isBrowser && Boolean(companyId) && Boolean(statementId),
+  });
+}
+
+/** Deterministic ledger name per transaction for a statement (table column). */
+export function useBankStatementLedgerSuggestions(
+  companyId: string | undefined,
+  statementId: string | undefined,
+) {
+  return useQuery<Record<string, string | null>>({
+    queryKey: [
+      ...bankTransactionKeys.list(companyId ?? "unknown", statementId ?? "unknown"),
+      "ledger-suggestions",
+    ],
+    queryFn: () =>
+      bankStatementsApi.listLedgerSuggestions(companyId as string, statementId as string),
     enabled: isBrowser && Boolean(companyId) && Boolean(statementId),
   });
 }
@@ -214,5 +231,135 @@ export function useProcessBankStatement(companyId: string | undefined) {
   return useMutation({
     mutationFn: async (id: string) =>
       bankStatementsApi.process(companyId as string, id) as Promise<ProcessStatementResultDto>,
+  });
+}
+
+export interface BankBatchItemResult {
+  statementId: string;
+  status: BankStatementStatus;
+  configured: boolean;
+  message: string;
+}
+
+export interface BankBatchProgress {
+  done: number;
+  total: number;
+  /** The statement just completed, or null before the first finishes. */
+  last: BankBatchItemResult | null;
+}
+
+/**
+ * Extract a queue of statements one at a time, the same way the Document Inbox
+ * extracts invoices: a shared model pass per statement keeps per-statement
+ * accuracy up, and the caller gets live progress through `onProgress`.
+ */
+export function useProcessBankStatementsBatch(companyId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      statementIds,
+      onProgress,
+    }: {
+      statementIds: string[];
+      onProgress?: (p: BankBatchProgress) => void;
+    }): Promise<BankBatchItemResult[]> => {
+      const results: BankBatchItemResult[] = [];
+      const total = statementIds.length;
+      onProgress?.({ done: 0, total, last: null });
+      for (const statementId of statementIds) {
+        let item: BankBatchItemResult;
+        try {
+          const r = await bankStatementsApi.process(companyId as string, statementId);
+          item = { statementId, status: r.status, configured: r.configured, message: r.message };
+        } catch (e) {
+          // One statement failing must not abort the queue.
+          item = {
+            statementId,
+            status: "FAILED",
+            configured: true,
+            message: e instanceof Error ? e.message : "Extraction failed",
+          };
+        }
+        results.push(item);
+        onProgress?.({ done: results.length, total, last: item });
+      }
+      return results;
+    },
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: bankStatementKeys.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: bankTransactionKeys.all });
+    },
+  });
+}
+
+export interface BankIngestItemResult {
+  documentId: string;
+  statementId: string | null;
+  status: BankStatementStatus | null;
+  configured: boolean;
+  reason: string | null;
+  message: string;
+}
+
+export interface BankIngestProgress {
+  done: number;
+  total: number;
+  last: BankIngestItemResult | null;
+}
+
+/**
+ * Direct-upload ingest queue: one document at a time, each read, matched to a
+ * bank account and turned into a statement server-side. The caller selects no
+ * account. Live progress is reported through `onProgress`.
+ */
+export function useIngestBankStatementsBatch(companyId: string | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      documentIds,
+      onProgress,
+    }: {
+      documentIds: string[];
+      onProgress?: (p: BankIngestProgress) => void;
+    }): Promise<BankIngestItemResult[]> => {
+      const results: BankIngestItemResult[] = [];
+      const total = documentIds.length;
+      onProgress?.({ done: 0, total, last: null });
+      for (const documentId of documentIds) {
+        let item: BankIngestItemResult;
+        try {
+          const r: IngestStatementResultDto = await bankStatementsApi.ingestDocument(
+            companyId as string,
+            documentId,
+          );
+          item = {
+            documentId,
+            statementId: r.statement_id,
+            status: r.status,
+            configured: r.configured,
+            reason: r.reason,
+            message: r.message,
+          };
+        } catch (e) {
+          item = {
+            documentId,
+            statementId: null,
+            status: null,
+            configured: true,
+            reason: "INGEST_FAILED",
+            message: e instanceof Error ? e.message : "Could not ingest the file",
+          };
+        }
+        results.push(item);
+        onProgress?.({ done: results.length, total, last: item });
+      }
+      return results;
+    },
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: bankStatementKeys.list(companyId) });
+      queryClient.invalidateQueries({ queryKey: bankTransactionKeys.all });
+    },
   });
 }

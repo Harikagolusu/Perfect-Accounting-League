@@ -31,10 +31,12 @@ from app.integrations.tally import (
     VoucherImportLine,
     get_tally_service,
 )
+from app.models.invoice import Invoice
 from app.models.voucher import (
     AccountingEntityType,
     Voucher,
     VoucherSide,
+    VoucherSourceType,
     VoucherStatus,
 )
 from app.services.accounting_audit import record_event
@@ -97,6 +99,7 @@ def post_voucher_to_tally(
     actor: str = "local-user",
     tally_company_name: str | None = None,
     posting_month: date | None = None,
+    force: bool = False,
     service: TallyService | None = None,
 ) -> VoucherPostResult:
     """Send one approved voucher to TallyPrime and record the outcome.
@@ -104,12 +107,16 @@ def post_voucher_to_tally(
     Raises VoucherTransitionError when the voucher is not in a postable state,
     and VoucherValidationError when it is not safe to post (unbalanced, or a
     line without a ledger). Neither leaves the voucher changed.
+
+    `force` re-sends an already-POSTED voucher. Tally matches it by REMOTEID and
+    updates the same voucher, so a re-push never creates a duplicate.
     """
     company = get_company(db, company_id)
     voucher = get_voucher(db, company_id, voucher_id)
 
-    # Idempotency: the posted reference is the answer, Tally is not called.
-    if voucher.status is VoucherStatus.POSTED:
+    # Idempotency: the posted reference is the answer, Tally is not called —
+    # unless the caller explicitly re-pushes to update the voucher in Tally.
+    if voucher.status is VoucherStatus.POSTED and not force:
         return VoucherPostResult(
             success=True,
             voucher_id=voucher.id,
@@ -119,7 +126,9 @@ def post_voucher_to_tally(
             message="This voucher is already posted to Tally.",
         )
 
-    if voucher.status not in _POSTABLE:
+    if voucher.status not in _POSTABLE and not (
+        force and voucher.status is VoucherStatus.POSTED
+    ):
         raise VoucherTransitionError(
             f"A voucher in {voucher.status.value} cannot be posted. "
             "Only an approved voucher may be posted to Tally."
@@ -137,6 +146,19 @@ def post_voucher_to_tally(
 
     lines = _import_lines(voucher)
     target_company = (tally_company_name or company.legal_name or company.name or "").strip()
+
+    # Supplier invoice No./Date for the Tally voucher: the original bill number
+    # and its original date, taken from the source invoice unchanged (never the
+    # clamped posting date).
+    reference: str | None = None
+    reference_date: str | None = None
+    if voucher.source_type is VoucherSourceType.INVOICE and voucher.source_id is not None:
+        invoice = db.get(Invoice, voucher.source_id)
+        if invoice is not None and invoice.company_id == voucher.company_id:
+            reference = invoice.invoice_number
+            reference_date = (
+                _tally_date(invoice.invoice_date) if invoice.invoice_date else None
+            )
 
     previous = voucher.status
     voucher.status = VoucherStatus.POSTING_IN_PROGRESS
@@ -174,6 +196,8 @@ def post_voucher_to_tally(
             narration=voucher.narration,
             lines=lines,
             remote_id=str(voucher.id),
+            reference=reference,
+            reference_date=reference_date,
         )
     except TallyError as exc:
         # A transport failure is not evidence the voucher was rejected, but it

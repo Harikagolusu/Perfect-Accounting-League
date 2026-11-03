@@ -32,6 +32,7 @@ from app.core.storage import (
     write_document,
 )
 from app.models.document import Document, DocumentStatus, DocumentType
+from app.models.invoice import Invoice
 from app.models.voucher import AccountingEntityType
 from app.services.accounting_audit import record_event
 from app.services.company import get_company
@@ -43,12 +44,17 @@ class DocumentNotFoundError(Exception):
     """Raised when a document id does not resolve within the given company."""
 
 
+class DocumentInUseError(Exception):
+    """Raised when a document still has an invoice referencing it (FK RESTRICT)."""
+
+
 def list_documents(
     db: Session,
     company_id: uuid.UUID,
     *,
     status: DocumentStatus | None = None,
     document_type: DocumentType | None = None,
+    batch_code: str | None = None,
 ) -> list[Document]:
     """Return a company's documents, newest first, with optional filters."""
     stmt = (
@@ -60,6 +66,8 @@ def list_documents(
         stmt = stmt.where(Document.status == status)
     if document_type is not None:
         stmt = stmt.where(Document.document_type == document_type)
+    if batch_code is not None:
+        stmt = stmt.where(Document.batch_code == batch_code)
     return list(db.scalars(stmt).all())
 
 
@@ -82,6 +90,7 @@ def create_document(
     original_filename: str | None,
     content_type: str | None,
     data: bytes,
+    batch_code: str | None = None,
 ) -> Document:
     """Validate, store and record one uploaded file.
 
@@ -103,6 +112,7 @@ def create_document(
         file_path=relative_path,
         file_type=validated.file_type,
         file_size=validated.size,
+        batch_code=(batch_code or None),
         document_type=DocumentType.UNKNOWN,
         status=DocumentStatus.UPLOADED,
     )
@@ -143,6 +153,21 @@ def create_document(
 def delete_document(db: Session, company_id: uuid.UUID, document_id: uuid.UUID) -> Document:
     """Delete a document and its stored file, scoped to the owning company."""
     document = get_document(db, company_id, document_id)
+
+    # The invoice FK is ondelete=RESTRICT, so deleting a referenced document
+    # would raise an IntegrityError (a 500 the browser reports as a CORS/network
+    # failure). Refuse cleanly instead and tell the caller what to remove first.
+    referenced = db.scalar(
+        select(Invoice.id).where(
+            Invoice.company_id == company_id, Invoice.document_id == document_id
+        ).limit(1)
+    )
+    if referenced is not None:
+        raise DocumentInUseError(
+            "This document has an invoice in Invoice Processing. "
+            "Delete that invoice first, then delete the document."
+        )
+
     relative_path = document.file_path
     removed = False
 

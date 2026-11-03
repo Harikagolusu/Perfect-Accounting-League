@@ -22,6 +22,7 @@ const PDF: DocumentDto = {
   original_filename: "invoice_march.pdf",
   file_type: "application/pdf",
   file_size: 2048,
+  batch_code: null,
   document_type: "UNKNOWN",
   status: "UPLOADED",
   created_at: "2026-10-19T06:00:00Z",

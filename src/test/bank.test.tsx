@@ -90,6 +90,8 @@ const TRANSACTION: BankTransactionDto = {
   counterparty_pincode: null,
   counterparty_gstin: null,
   is_inter_account_transfer: false,
+  needs_clarification: false,
+  clarification_note: null,
   transaction_type: "CREDIT",
   created_at: "2026-10-19T06:00:00Z",
   updated_at: "2026-10-19T06:00:00Z",

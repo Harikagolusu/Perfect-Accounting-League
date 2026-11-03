@@ -7,6 +7,7 @@ audit, invoice/bank creation, export lifecycle and cross-company isolation.
 from __future__ import annotations
 
 import io
+from datetime import date
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -616,6 +617,79 @@ def test_invoice_creates_balanced_purchase_draft_with_configured_ledgers(
     assert again.json()["id"] == voucher["id"]
 
 
+def test_posting_sends_supplier_invoice_number_and_date_from_the_source_invoice(
+    client: TestClient, db: Session
+) -> None:
+    import httpx
+
+    from app.integrations.tally import TallyClient, TallyService
+    from app.services.voucher_posting import post_voucher_to_tally
+
+    company, ledgers = _company_with_ledgers(client)
+    vendor = _vendor(client, company["id"])
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])  # INV-001, 2026-03-15
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+    client.post(f"{_base(company['id'])}/vouchers/{voucher['id']}/submit", json={})
+    approved = client.post(
+        f"{_base(company['id'])}/vouchers/{voucher['id']}/approve", json={}
+    )
+    assert approved.status_code == 200, approved.text
+
+    payloads: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(request.content.decode("utf-8"))
+        return httpx.Response(
+            200, text="<RESPONSE><CREATED>1</CREATED><LASTVCHID>7</LASTVCHID>"
+            "<ERRORS>0</ERRORS><EXCEPTIONS>0</EXCEPTIONS></RESPONSE>",
+        )
+
+    service = TallyService(
+        TallyClient(base_url="http://tally.test:9000", transport=httpx.MockTransport(handler))
+    )
+    result = post_voucher_to_tally(
+        db, company["id"], voucher["id"], actor="tester", service=service
+    )
+    assert result.success is True
+    assert "<REFERENCE>INV-001</REFERENCE>" in payloads[0]
+    assert "<REFERENCEDATE>20260315</REFERENCEDATE>" in payloads[0]
+
+
+def test_multi_item_invoice_splits_into_one_expense_line_per_item(
+    client: TestClient,
+) -> None:
+    company, ledgers = _company_with_ledgers(client)
+    vendor = _vendor(client, company["id"])
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+    # Two items summing exactly to the invoice taxable amount (1000.00).
+    for desc, amount in (("Freight leg A", "600.00"), ("Freight leg B", "400.00")):
+        line = client.post(
+            f"{_base(company['id'])}/invoices/{invoice['id']}/line-items",
+            json={"description": desc, "taxable_amount": amount},
+        )
+        assert line.status_code == 201, line.text
+
+    response = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    )
+    assert response.status_code == 200, response.text
+    voucher = response.json()
+    assert voucher["is_balanced"] is True
+    expense = [
+        line
+        for line in voucher["lines"]
+        if line["side"] == "Dr" and line["line_type"] == "LEDGER"
+    ]
+    assert len(expense) == 2
+    assert all(line["ledger_name"] == "Freight Inward" for line in expense)
+    assert {line["amount"] for line in expense} == {"600.00", "400.00"}
+    assert {line["item_name"] for line in expense} == {"Freight leg A", "Freight leg B"}
+
+
 def test_invoice_missing_ledger_routes_to_review_without_inventing_one(
     client: TestClient,
 ) -> None:
@@ -774,6 +848,53 @@ def test_ledger_suggestion_uses_approved_mapping_after_approval(
     assert expense["ledger_name"] == "Freight Inward"
     assert expense["source"] in {"APPROVED_MAPPING", "HISTORICAL_VOUCHER"}
     assert expense["reason"]
+
+
+def test_approving_a_purchase_learns_the_vendor_party_ledger(client: TestClient) -> None:
+    """Once a vendor's party line is mapped and the voucher approved, the vendor
+    master remembers that creditor ledger so the next invoice auto-fills it."""
+    import uuid as _uuid
+
+    from app.models.voucher import Voucher as _Voucher
+    from app.models.voucher import VoucherSide as _Side
+    from tests.conftest import TestingSessionLocal
+
+    company, ledgers = _company_with_ledgers(client)
+    vendor = _vendor(client, company["id"], creditor_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(
+        client,
+        company["id"],
+        document["id"],
+        vendor["id"],
+        cgst_amount="0.00",
+        sgst_amount="0.00",
+        total_amount="1000.00",
+    )
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    # The reviewer maps the unmapped party line to the creditor ledger.
+    with TestingSessionLocal() as session:
+        v = session.get(_Voucher, _uuid.UUID(voucher["id"]))
+        party = next(
+            line
+            for line in v.lines
+            if line.side is _Side.CR and line.line_type == "LEDGER" and line.ledger_id is None
+        )
+        party.ledger_id = _uuid.UUID(ledgers["party"]["id"])
+        party.ledger_name = ledgers["party"]["name"]
+        session.commit()
+
+    client.post(f"{_base(company['id'])}/vouchers/{voucher['id']}/submit")
+    approved = client.post(
+        f"{_base(company['id'])}/vouchers/{voucher['id']}/approve", json={}
+    )
+    assert approved.status_code == 200, approved.text
+
+    got = client.get(f"{_base(company['id'])}/vendors/{vendor['id']}").json()
+    assert got["creditor_ledger"] == ledgers["party"]["name"]
 
 
 # --- Automatic ledger selection from Tally-history mappings ----------------
@@ -1126,6 +1247,8 @@ def test_ai_preselects_an_existing_ledger_and_flags_it_for_review(
         issue["code"] == "AI_SUGGESTED_LEDGER" and issue["severity"] == "WARNING"
         for issue in body["exceptions"]
     )
+    # A ledger was found, so the "no mapping available" exception must not fire.
+    assert not any(issue["code"] == "NO_HISTORICAL_MAPPING" for issue in body["exceptions"])
 
     # The draft is pre-filled but still parked in review for a human.
     voucher = client.post(
@@ -1399,6 +1522,50 @@ def test_bank_mapping_update_is_company_scoped_and_audited(client: TestClient) -
     )
 
 
+def test_bank_request_clarification_is_recorded_and_filterable(
+    client: TestClient,
+) -> None:
+    company, _ledgers = _company_with_ledgers(client, name="Clarify Co")
+    _account, statement, transaction = _bank_ready(client, company["id"])
+
+    resp = client.patch(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{transaction['id']}/mapping",
+        json={
+            "needs_clarification": True,
+            "clarification_note": "Whose payment is this?",
+        },
+        headers={"X-PAL-Actor": "reviewer"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["needs_clarification"] is True
+    assert body["clarification_note"] == "Whose payment is this?"
+
+    parked = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}/transactions",
+        params={"needs_clarification": "true"},
+    ).json()
+    assert [t["id"] for t in parked] == [transaction["id"]]
+    assert (
+        client.get(
+            f"{_base(company['id'])}/bank-statements/{statement['id']}/transactions",
+            params={"needs_clarification": "false"},
+        ).json()
+        == []
+    )
+
+    audit = client.get(
+        f"{_base(company['id'])}/accounting-audit", params={"entity_type": "MAPPING"}
+    ).json()
+    assert any(
+        event["event_type"] == "BANK_TRANSACTION_MAPPING_UPDATED"
+        and event["field"] == "needs_clarification"
+        and event["new_value"] == "true"
+        for event in audit
+    )
+
+
 def test_bank_missing_counterparty_routes_to_review(client: TestClient) -> None:
     company, ledgers = _company_with_ledgers(client)
     _, _, transaction = _bank_ready(
@@ -1419,6 +1586,181 @@ def test_bank_missing_counterparty_routes_to_review(client: TestClient) -> None:
     )
     assert approved.status_code == 409
     assert approved.json()["detail"]["code"] == "INVALID_STATUS_TRANSITION"
+
+
+def test_bank_similar_historical_transaction_suggests_the_same_ledger(
+    client: TestClient,
+) -> None:
+    """A past, already-mapped transaction lends its ledger to a similar new one."""
+    company, ledgers = _company_with_ledgers(client)
+    _bank_ready(
+        client,
+        company["id"],
+        description="NEFT FROM DECCAN FREIGHT CARRIERS",
+        counterparty_ledger="Deccan Freight Carriers",
+    )
+    _, statement, transaction = _bank_ready(
+        client,
+        company["id"],
+        description="NEFT FROM DECCAN FREIGHT CARRIERS LTD",
+        counterparty_ledger=None,
+    )
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{transaction['id']}/ledger-suggestion"
+    ).json()
+    counterparty = next(
+        item for item in body["suggestions"] if item["purpose"] == "COUNTERPARTY"
+    )
+    assert counterparty["source"] == "SIMILAR_HISTORICAL"
+    assert counterparty["ledger_name"] == "Deccan Freight Carriers"
+    assert counterparty["ledger_id"] is not None
+
+
+def test_bank_party_narration_matches_historical_ledger(client: TestClient) -> None:
+    """A bank narration naming a party reuses the ledger that party was posted to.
+
+    The historical row has a terse Tally narration ("Receipt 104"); matching is
+    on the party words, not the narration text.
+    """
+    company, _ledgers = _company_with_ledgers(client)
+    _ledger(client, company["id"], "TATA AIG General Insurance Co Ltd")
+    _ledger(client, company["id"], "ICICI Lombard General Insurance Co Ltd")
+    _bank_ready(
+        client,
+        company["id"],
+        description="Receipt 104",
+        counterparty_ledger="TATA AIG General Insurance Co Ltd",
+    )
+    _, statement, txn = _bank_ready(
+        client,
+        company["id"],
+        description="NEFT FROM TATA AIG DEUTN520260901",
+        counterparty_ledger=None,
+    )
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{txn['id']}/ledger-suggestion"
+    ).json()
+    counterparty = next(
+        s for s in body["suggestions"] if s["purpose"] == "COUNTERPARTY"
+    )
+    assert counterparty["ledger_name"] == "TATA AIG General Insurance Co Ltd"
+    assert counterparty["source"] == "SIMILAR_HISTORICAL"
+
+
+def test_bank_narration_matches_ledger_with_no_shared_name_words(
+    client: TestClient,
+) -> None:
+    """Raw narration reuses a past entry's ledger even when the ledger name
+    shares no words with the narration (e.g. 'SWIGGY' booked to 'Food Expenses').
+    """
+    company, _ledgers = _company_with_ledgers(client)
+    _ledger(client, company["id"], "Food Expenses")
+    _bank_ready(
+        client,
+        company["id"],
+        description="UPI SWIGGY BANGALORE",
+        counterparty_ledger="Food Expenses",
+    )
+    _, statement, txn = _bank_ready(
+        client,
+        company["id"],
+        description="UPI SWIGGY ORDER 8821",
+        counterparty_ledger=None,
+    )
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{txn['id']}/ledger-suggestion"
+    ).json()
+    counterparty = next(
+        s for s in body["suggestions"] if s["purpose"] == "COUNTERPARTY"
+    )
+    assert counterparty["ledger_name"] == "Food Expenses"
+    assert counterparty["source"] == "SIMILAR_HISTORICAL"
+
+
+def test_bank_ambiguous_party_branch_is_left_for_review(client: TestClient) -> None:
+    """Two branch ledgers of the same party tie, so no ledger is auto-picked."""
+    company, _ledgers = _company_with_ledgers(client)
+    _ledger(client, company["id"], "ICICI Lombard GI Delhi")
+    _ledger(client, company["id"], "ICICI Lombard GI Mumbai")
+    _bank_ready(
+        client, company["id"], description="Receipt 1",
+        counterparty_ledger="ICICI Lombard GI Delhi",
+    )
+    _bank_ready(
+        client, company["id"], description="Receipt 2",
+        counterparty_ledger="ICICI Lombard GI Mumbai",
+    )
+    _, statement, txn = _bank_ready(
+        client, company["id"], description="NEFT FROM ICICI LOMBARD",
+        counterparty_ledger=None,
+    )
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{txn['id']}/ledger-suggestion"
+    ).json()
+    assert not any(s["purpose"] == "COUNTERPARTY" for s in body["suggestions"])
+
+
+def test_bank_ai_fallback_suggests_a_counterparty_ledger(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """With no history at all, AI pre-selects a head and the voucher stays in review."""
+    company, ledgers = _company_with_ledgers(client)
+    _, statement, transaction = _bank_ready(
+        client, company["id"], counterparty_ledger=None, credit="500.00"
+    )
+    provider = _FakeLedgerAI(
+        '{"ledger_name": "Freight Inward", "reason": "Matches freight narration."}'
+    )
+    # The bank path uses the reasoning provider, not the default one.
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_reasoning_provider", lambda: provider
+    )
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}"
+        f"/transactions/{transaction['id']}/ledger-suggestion"
+    ).json()
+    counterparty = next(
+        item for item in body["suggestions"] if item["purpose"] == "COUNTERPARTY"
+    )
+    assert counterparty["source"] == "AI_SUGGESTION"
+    assert counterparty["ledger_name"] == "Freight Inward"
+    assert any(
+        issue["code"] == "AI_SUGGESTED_LEDGER" and issue["severity"] == "WARNING"
+        for issue in body["exceptions"]
+    )
+
+
+def test_statement_ledger_suggestions_map_transactions_to_ledgers(
+    client: TestClient,
+) -> None:
+    """The table column: confirmed ledger wins; an unmapped twin reuses it."""
+    company, ledgers = _company_with_ledgers(client)
+    _account, statement, confirmed = _bank_ready(
+        client,
+        company["id"],
+        description="NEFT FROM DECCAN FREIGHT CARRIERS",
+        counterparty_ledger="Deccan Freight Carriers",
+    )
+    second = client.post(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}/transactions",
+        json={
+            "transaction_date": "2026-03-21",
+            "description": "NEFT FROM DECCAN FREIGHT CARRIERS LTD",
+            "debit_amount": "0.00",
+            "credit_amount": "300.00",
+        },
+    ).json()
+
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}/ledger-suggestions"
+    ).json()
+    assert body[confirmed["id"]] == "Deccan Freight Carriers"
+    # The unmapped twin picks up the same ledger via similar-narration history.
+    assert body[second["id"]] == "Deccan Freight Carriers"
 
 
 # --- End-to-end source workflows ------------------------------------------
@@ -1592,6 +1934,35 @@ def test_export_transitions_to_awaiting_not_posted_and_verification_sets_posted(
     types = [event["event_type"] for event in audit]
     assert "VOUCHER_EXPORTED" in types
     assert "VOUCHER_POSTED_VERIFIED" in types
+
+
+def test_export_clamps_voucher_date_to_posting_month_without_changing_stored_date(
+    client: TestClient,
+) -> None:
+    # Voucher dated 2026-03-15, exported for April 2026: the sheet carries the
+    # first of April (max of the two); PAL keeps the real 2026-03-15.
+    company, ledgers = _company_with_ledgers(client)
+    voucher = _manual_voucher(
+        client,
+        company["id"],
+        ledgers["expense"]["id"],
+        ledgers["party"]["id"],
+        voucher_date="2026-03-15",
+    ).json()
+    client.post(f"{_base(company['id'])}/vouchers/{voucher['id']}/submit")
+    client.post(f"{_base(company['id'])}/vouchers/{voucher['id']}/approve", json={})
+
+    exported = client.post(
+        f"{_base(company['id'])}/vouchers/{voucher['id']}/export",
+        json={"posting_month": "2026-04-10"},
+    )
+    assert exported.status_code == 200, exported.text
+    sheet = load_workbook(io.BytesIO(exported.content))["Accounting Voucher"]
+    date_cell = sheet.cell(row=2, column=1).value  # "Voucher Date"
+    assert (date_cell.year, date_cell.month, date_cell.day) == (2026, 4, 1)
+
+    after = client.get(f"{_base(company['id'])}/vouchers/{voucher['id']}").json()
+    assert after["voucher_date"] == "2026-03-15"
 
 
 def test_posting_verification_failure_marks_posting_failed(client: TestClient) -> None:

@@ -34,6 +34,7 @@ from app.schemas.tally import (
     TallyLedgerResponse,
     TallyLedgersResponse,
     TallyMappingSyncResponse,
+    TallyGstWorkingResponse,
     TallyStatusResponse,
     TallySyncRequest,
     TallySyncResponse,
@@ -41,6 +42,7 @@ from app.schemas.tally import (
 from app.services.company import CompanyNotFoundError
 from app.services.tally_mapping_sync import sync_tally_accounting_mappings
 from app.services.tally_sync import (
+    compute_tally_gst_working,
     get_latest_sync,
     sync_tally_bank_accounts,
     sync_tally_bank_data,
@@ -342,6 +344,50 @@ def tally_sync_bank_data(
         statements_created=result.statements_created,
         transactions_created=result.transactions_created,
         transactions_skipped=result.transactions_skipped,
+        error_message=result.error_message,
+    )
+
+
+@router.post(
+    "/sync/{company_id}/gst-working",
+    response_model=TallyGstWorkingResponse,
+    summary="Aggregate output GST and input ITC from Tally vouchers for a period",
+)
+def tally_gst_working(
+    company_id: UUID,
+    body: TallyBankDataSyncRequest,
+    db: Session = Depends(get_db),
+) -> TallyGstWorkingResponse:
+    """Total output GST (sales) and input ITC (purchases) from Tally vouchers.
+
+    Read-only: nothing is written to Tally or stored in PAL. A Tally failure
+    returns HTTP 200 with success=False so the UI can show it.
+    """
+    if body.from_date and body.to_date and body.to_date < body.from_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The end date must not be before the start date.",
+        )
+    try:
+        result = compute_tally_gst_working(
+            db,
+            company_id,
+            body.tally_company_name,
+            from_date=body.from_date,
+            to_date=body.to_date,
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    return TallyGstWorkingResponse(
+        success=result.success,
+        company_id=company_id,
+        tally_company_name=result.tally_company_name,
+        from_date=result.from_date,
+        to_date=result.to_date,
+        outward=result.outward.__dict__,
+        inward_itc=result.inward_itc.__dict__,
+        vouchers_fetched=result.vouchers_fetched,
+        vouchers_used=result.vouchers_used,
         error_message=result.error_message,
     )
 

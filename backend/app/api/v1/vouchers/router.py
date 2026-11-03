@@ -445,6 +445,7 @@ def post_voucher_to_tally_endpoint(
             voucher.id,
             actor=(body.actor if body else actor),
             posting_month=(body.posting_month if body else None),
+            force=(body.force if body else False),
         )
     except VoucherTransitionError as exc:
         raise HTTPException(

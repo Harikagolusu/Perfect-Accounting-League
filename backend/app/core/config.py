@@ -51,7 +51,14 @@ class Settings(BaseSettings):
     # API key is NEVER logged, returned, or exposed to the frontend.
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
-    deepseek_model: str = "deepseek-flash"
+    # deepseek-chat (V3, non-reasoning) emits JSON directly. Reasoning models
+    # (deepseek-flash/-reasoner) spend the whole max_tokens budget on
+    # reasoning_content and return empty content for a long statement.
+    deepseek_model: str = "deepseek-chat"
+    # Ledger matching is a last-resort, pick-one-from-a-list task with tiny
+    # output; the reasoning model picks a usable ledger where deepseek-chat
+    # returns null, and the small answer never hits the reasoning-budget trap.
+    deepseek_reasoner_model: str = "deepseek-reasoner"
 
     # --- Invoice extraction --------------------------------------------
     # Hard cap on PDF pages sent to the vision model. A document above this
@@ -64,7 +71,7 @@ class Settings(BaseSettings):
     # XML-over-HTTP server normally listens on port 9000.
     tally_base_url: str = "http://localhost:9000"
     # Bounded so a dead TallyPrime cannot hold a PAL request open indefinitely.
-    tally_timeout_seconds: float = Field(default=10.0, gt=0, le=60)
+    tally_timeout_seconds: float = Field(default=30.0, gt=0, le=60)
 
     @property
     def document_storage_dir(self) -> Path:

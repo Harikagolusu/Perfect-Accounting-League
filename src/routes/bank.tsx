@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { Download, Plus, RefreshCw, Save, Sparkles, Trash2 } from "lucide-react";
+import { Check, Download, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import {
   PageHeader,
   StatusBadge,
@@ -15,7 +16,6 @@ import { FileUploadDropzone } from "@/components/pal/dropzone";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   Dialog,
   DialogContent,
@@ -24,22 +24,19 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useCompany } from "@/lib/store";
-import { useTallyBankDataSync } from "@/lib/queries/tally";
+import { useTallyBankDataSync, useTallyMappingSync } from "@/lib/queries/tally";
 import { fmtDate, fmtMoney, compareMoney } from "@/lib/format";
 import { downloadBlob, exportFile } from "@/lib/export";
 import { BankVoucherPanel } from "@/components/pal/bank-voucher";
+import { LedgerCombobox } from "@/components/pal/voucher-review";
+import { useLedgers } from "@/lib/queries/ledgers";
 import { cn } from "@/lib/utils";
 import { exportsApi, firstExportError } from "@/lib/api/exports";
-import {
-  bankAccountLabel,
-  toBankAccountPayload,
-  type BankAccountFormValues,
-} from "@/lib/api/bankAccounts";
+import { vouchersApi } from "@/lib/api/vouchers";
+import { toBankAccountPayload, type BankAccountFormValues } from "@/lib/api/bankAccounts";
 import {
   statusToUiLabel,
-  toStatementPayload,
   toTransactionPayload,
-  type StatementFormValues,
   type TransactionFormValues,
   type UiBankTransaction,
 } from "@/lib/api/bankStatements";
@@ -49,14 +46,16 @@ import {
   useDeactivateBankAccount,
 } from "@/lib/queries/bankAccounts";
 import {
+  useBankStatementLedgerSuggestions,
   useBankStatements,
   useBankTransactions,
-  useCreateBankStatement,
   useCreateBankTransaction,
   useDeleteBankStatement,
-  useProcessBankStatement,
+  useIngestBankStatementsBatch,
   useUpdateBankTransaction,
+  useUpdateBankTransactionMapping,
 } from "@/lib/queries/bankStatements";
+import { nextBatchCode } from "@/lib/api/documents";
 import { useDocuments, useUploadDocuments } from "@/lib/queries/documents";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
@@ -78,33 +77,11 @@ const inr = (v: string | null | undefined) => {
   return grouped === "—" ? "—" : `₹${grouped}`;
 };
 
-/**
- * A readable narration derived from the identified counterparty and the
- * direction the bank recorded. No AI, no stored "cleaned" field: it is the
- * confirmed counterparty phrased for a human. `known` is false when the
- * extractor has not identified a counterparty yet.
- */
-const cleanedNarration = (t: UiBankTransaction): { text: string; known: boolean } => {
-  const name = t.counterpartyName || t.counterpartyLedger;
-  if (!name) return { text: "— counterparty unknown", known: false };
-  const isCredit = t.creditAmount !== "0.00";
-  return { text: `${isCredit ? "Receipt from" : "Payment to"} ${name}`, known: true };
-};
-
 const emptyAccountForm: BankAccountFormValues = {
   bankName: "",
   accountName: "",
   accountNumber: "",
   currency: "INR",
-};
-
-const emptyStatementForm: StatementFormValues = {
-  bankAccountId: "",
-  documentId: "",
-  statementStartDate: "",
-  statementEndDate: "",
-  openingBalance: "",
-  closingBalance: "",
 };
 
 const emptyTransactionForm: TransactionFormValues = {
@@ -123,6 +100,9 @@ const emptyTransactionForm: TransactionFormValues = {
   isInterAccountTransfer: false,
 };
 
+/** One extraction queue is capped so the run stays responsive and reviewable. */
+const MAX_BATCH = 10;
+
 function BankPage() {
   const company = useCompany();
   const companyId = company?.id;
@@ -133,13 +113,14 @@ function BankPage() {
   const uploadDocuments = useUploadDocuments(companyId);
   const createAccount = useCreateBankAccount(companyId);
   const deactivateAccount = useDeactivateBankAccount(companyId);
-  const createStatement = useCreateBankStatement(companyId);
   const createTransaction = useCreateBankTransaction(companyId);
   const deleteStatement = useDeleteBankStatement(companyId);
-  const processStatement = useProcessBankStatement(companyId);
+  const ingestBatch = useIngestBankStatementsBatch(companyId);
   const updateTransaction = useUpdateBankTransaction(companyId);
+  const updateMapping = useUpdateBankTransactionMapping(companyId);
 
   const tallySyncMutation = useTallyBankDataSync();
+  const mappingSyncMutation = useTallyMappingSync();
   const [tallyCfg, setTallyCfg] = useState({
     tallyCompany: company?.legalName ?? "",
     fromDate: "",
@@ -151,11 +132,21 @@ function BankPage() {
   const documents = useMemo(() => documentsQuery.data ?? [], [documentsQuery.data]);
 
   const [accountForm, setAccountForm] = useState<BankAccountFormValues>(emptyAccountForm);
-  const [statementForm, setStatementForm] = useState<StatementFormValues>(emptyStatementForm);
   const [transactionForm, setTransactionForm] =
     useState<TransactionFormValues>(emptyTransactionForm);
-  const [file, setFile] = useState<File | null>(null);
+  const [staged, setStaged] = useState<File[]>([]);
+  // Session-only cards for the live extraction queue, mirroring Document Inbox.
+  const [batchItems, setBatchItems] = useState<
+    {
+      id: string;
+      name: string;
+      status: "queued" | "extracting" | "completed" | "review" | "failed";
+      detail?: string;
+    }[]
+  >([]);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [statementId, setStatementId] = useState("");
+  const [batch, setBatch] = useState("All");
   const [type, setType] = useState("All");
   const [dFrom, setDFrom] = useState("");
   const [dTo, setDTo] = useState("");
@@ -164,13 +155,36 @@ function BankPage() {
   const [editForm, setEditForm] = useState<TransactionFormValues>(emptyTransactionForm);
   const [showAddForm, setShowAddForm] = useState(false);
   const [exportingClient, setExportingClient] = useState(false);
+  const [postingTally, setPostingTally] = useState(false);
+  // Transactions posted to Tally this session; their checkbox is disabled so
+  // they are not posted twice (fromBank is not idempotent — see shortcut below).
+  const [postedIds, setPostedIds] = useState<Set<string>>(new Set());
+  // Id of the single row posting from the Tally column, for its spinner.
+  const [postingId, setPostingId] = useState<string | null>(null);
+  const acceptLedger = async (txnId: string, name: string) => {
+    if (!statement || !name.trim()) return;
+    try {
+      await updateMapping.mutateAsync({
+        statementId: statement.id,
+        transactionId: txnId,
+        body: { counterparty_ledger: name.trim() },
+      });
+      toast.success("Ledger mapped");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not map the ledger");
+    }
+  };
+  const queryClient = useQueryClient();
   const [tallyOpen, setTallyOpen] = useState(false);
   const [accountsOpen, setAccountsOpen] = useState(false);
 
   // Follow the company: a switch must not leave another company's selection.
   useEffect(() => {
     setStatementId("");
-    setStatementForm((f) => ({ ...f, bankAccountId: "" }));
+    setStaged([]);
+    setBatchItems([]);
+    setProgress(null);
+    setPostedIds(new Set());
     setTallyCfg((c) => ({ ...c, tallyCompany: company?.legalName ?? "" }));
   }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -180,21 +194,41 @@ function BankPage() {
       setTallyCfg((c) => (c.tallyCompany ? c : { ...c, tallyCompany: company.legalName }));
   }, [company?.legalName]);
 
-  // Auto-select the bank account when there is exactly one active account.
-  useEffect(() => {
-    const active = accounts.filter((a) => a.isActive);
-    if (active.length === 1)
-      setStatementForm((f) => (f.bankAccountId ? f : { ...f, bankAccountId: active[0].id }));
-  }, [accounts]);
+  // A statement's batch lives on its source document (same as invoices), so the
+  // selector can be narrowed to one upload batch.
+  const batchByDoc = useMemo(() => new Map(documents.map((d) => [d.id, d.batchCode])), [documents]);
+  // Only batches that actually back a bank statement — invoice-upload batches
+  // live in the same documents table but must not appear here.
+  const batchCodes = useMemo(() => {
+    const stmtDocIds = new Set(statements.map((st) => st.documentId).filter(Boolean));
+    return Array.from(
+      new Set(
+        documents
+          .filter((d) => stmtDocIds.has(d.id))
+          .map((d) => d.batchCode)
+          .filter(Boolean),
+      ),
+    ) as string[];
+  }, [statements, documents]);
+  const visibleStatements = useMemo(
+    () =>
+      batch === "All"
+        ? statements
+        : statements.filter(
+            (st) => ((st.documentId ? batchByDoc.get(st.documentId) : null) ?? null) === batch,
+          ),
+    [statements, batch, batchByDoc],
+  );
 
-  // Keep a valid selection as statements come and go.
+  // Keep a valid selection as statements (and the batch filter) come and go.
   useEffect(() => {
-    if (statements.length === 0) {
+    if (visibleStatements.length === 0) {
       setStatementId("");
       return;
     }
-    if (!statements.some((st) => st.id === statementId)) setStatementId(statements[0].id);
-  }, [statements, statementId]);
+    if (!visibleStatements.some((st) => st.id === statementId))
+      setStatementId(visibleStatements[0].id);
+  }, [visibleStatements, statementId]);
 
   const statement = statements.find((st) => st.id === statementId) ?? null;
 
@@ -202,6 +236,13 @@ function BankPage() {
     dateFrom: dFrom || undefined,
     dateTo: dTo || undefined,
   });
+  const ledgerSuggestionsQuery = useBankStatementLedgerSuggestions(companyId, statement?.id);
+  const ledgerSuggestions = ledgerSuggestionsQuery.data ?? {};
+  const ledgersQuery = useLedgers(companyId);
+  const activeLedgers = useMemo(
+    () => (ledgersQuery.data ?? []).filter((l) => l.isActive),
+    [ledgersQuery.data],
+  );
   const transactions = useMemo(() => {
     const rows = transactionsQuery.data ?? [];
     return type === "All" ? rows : rows.filter((t) => t.transactionType === type.toUpperCase());
@@ -212,8 +253,6 @@ function BankPage() {
 
   const setAccountField = (k: keyof BankAccountFormValues, v: string) =>
     setAccountForm((f) => ({ ...f, [k]: v }));
-  const setStatementField = (k: keyof StatementFormValues, v: string) =>
-    setStatementForm((f) => ({ ...f, [k]: v }));
   const setTransactionField = (k: keyof TransactionFormValues, v: string) =>
     setTransactionForm((f) => ({ ...f, [k]: v }));
 
@@ -223,7 +262,6 @@ function BankPage() {
     try {
       const created = await createAccount.mutateAsync(toBankAccountPayload(accountForm));
       setAccountForm(emptyAccountForm);
-      setStatementForm((f) => ({ ...f, bankAccountId: created.id }));
       toast.success("Bank account added", {
         description: `${created.bankName} · ${created.maskedAccountNumber}`,
       });
@@ -241,47 +279,80 @@ function BankPage() {
     }
   };
 
-  const uploadStatement = async () => {
-    if (!file) return toast.error("Choose a statement file first.");
-    if (!statementForm.bankAccountId) return toast.error("Choose a bank account first.");
-    const start = statementForm.statementStartDate;
-    const end = statementForm.statementEndDate;
-    if (start && end && end < start) {
-      return toast.error("Statement end date must not be before the start date.");
+  // One file finishing -> its card status. A statement created and cleanly
+  // processed is a tick; anything else (needs review, failed read, no matching
+  // account) needs a human.
+  const ingestCard = (r: { statementId: string | null; status: string | null }) =>
+    r.statementId && r.status === "PROCESSED"
+      ? ("completed" as const)
+      : r.statementId && r.status === "NEEDS_REVIEW"
+        ? ("review" as const)
+        : ("failed" as const);
+
+  const uploadStatements = async () => {
+    if (!staged.length) return toast.error("Choose at least one statement file.");
+    if (staged.length > MAX_BATCH) {
+      return toast.error(`Maximum ${MAX_BATCH} statements can be extracted at a time.`);
     }
+    const files = staged;
+    setStaged([]);
+    // One shared code for this whole upload, so statements can be filtered to it.
+    const batchCode = nextBatchCode(
+      documents.map((d) => d.batchCode),
+      "Bank",
+    );
+    // Each file goes to the Document Inbox; ingest then reads it, finds which
+    // bank account it belongs to, and creates the statement. No account picked.
+    const docs: { id: string; name: string }[] = [];
     try {
-      // The file goes to the Document Inbox first, and the statement points
-      // at it. The original stays there whatever happens to the statement.
-      const [uploaded] = await uploadDocuments.mutateAsync([file]);
-      const created = await createStatement.mutateAsync({
-        ...toStatementPayload(statementForm),
-        document_id: uploaded.id,
-      });
-      setFile(null);
-      setStatementId(created.id);
-      setStatementForm(emptyStatementForm);
-      toast.success("Statement uploaded — extracting transactions…");
-      try {
-        const result = await processStatement.mutateAsync(created.id);
-        toast[result.configured ? "success" : "info"](result.message);
-        for (const issue of result.issues) toast.warning(issue);
-      } catch {
-        toast.warning("Extraction failed. Use the Extract button to retry.");
+      for (const f of files) {
+        const [uploaded] = await uploadDocuments.mutateAsync({ files: [f], batchCode });
+        docs.push({ id: uploaded.id, name: f.name });
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not upload statement");
+      setStaged((prev) => [...files, ...prev]);
+      toast.error(e instanceof Error ? e.message : "Could not upload files");
+      return;
     }
-  };
-
-  const createStatementManually = async () => {
-    if (!statementForm.bankAccountId) return toast.error("Choose a bank account first.");
+    toast.success(`${docs.length} file${docs.length === 1 ? "" : "s"} uploaded — extracting…`);
+    setBatchItems(docs.map((d) => ({ id: d.id, name: d.name, status: "queued" as const })));
+    setProgress({ done: 0, total: docs.length });
     try {
-      const created = await createStatement.mutateAsync(toStatementPayload(statementForm));
-      setStatementId(created.id);
-      setStatementForm(emptyStatementForm);
-      toast.success("Statement created");
+      const results = await ingestBatch.mutateAsync({
+        documentIds: docs.map((d) => d.id),
+        onProgress: (p) => {
+          setProgress({ done: p.done, total: p.total });
+          setBatchItems((prev) =>
+            prev.map((it, idx) => {
+              if (p.last && it.id === p.last.documentId) {
+                const status = ingestCard(p.last);
+                return {
+                  ...it,
+                  status,
+                  detail: status === "completed" ? undefined : p.last.message,
+                };
+              }
+              if (idx === p.done && p.done < p.total) return { ...it, status: "extracting" };
+              return it;
+            }),
+          );
+        },
+      });
+      const firstCreated = results.find((r) => r.statementId);
+      if (firstCreated?.statementId) setStatementId(firstCreated.statementId);
+      const needAttention = results.filter(
+        (r) => !r.statementId || r.status !== "PROCESSED",
+      ).length;
+      if (results.every((r) => !r.configured)) {
+        toast.info("Automatic extraction is not configured.");
+      } else if (needAttention) {
+        toast.warning(`${needAttention} of ${results.length} file(s) need attention.`);
+      } else {
+        toast.success("All statements extracted.");
+      }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not create statement");
+      setProgress(null);
+      toast.error(e instanceof Error ? e.message : "Extraction failed");
     }
   };
 
@@ -357,18 +428,6 @@ function BankPage() {
     }
   };
 
-  const runExtraction = async () => {
-    if (!statement) return;
-    try {
-      const result = await processStatement.mutateAsync(statement.id);
-      // The backend is honest about having no engine, and the UI says so.
-      toast[result.configured ? "success" : "info"](result.message);
-      for (const issue of result.issues) toast.warning(issue);
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Could not run extraction");
-    }
-  };
-
   const exportRows = (rows: UiBankTransaction[]) => {
     const n = exportFile(
       "CSV",
@@ -389,6 +448,58 @@ function BankPage() {
   };
 
   const exportCsv = () => exportRows(transactions);
+
+  // Post selected transactions to TallyPrime: each becomes a voucher, then
+  // submit -> approve -> post-to-tally. Sequential so a mid-run Tally failure
+  // stops cleanly and the summary is accurate.
+  // shortcut: fromBank is not idempotent, so re-posting the same transaction
+  // creates a second draft voucher; add a transaction->voucher link to guard.
+  const exportSelectedToTally = async (ids: string[], clear: () => void) => {
+    if (!companyId || ids.length === 0) return;
+    // A ledger must be confirmed manually first; an unconfirmed suggestion
+    // (counterpartyLedger still null) is not a mapping and must not post.
+    const byId = new Map(transactions.map((t) => [t.id, t]));
+    const mapped = ids.filter((id) => byId.get(id)?.counterpartyLedger);
+    if (mapped.length < ids.length) {
+      toast.warning(
+        `${ids.length - mapped.length} transaction(s) have no ledger mapped — map them manually before posting to Tally.`,
+      );
+    }
+    if (mapped.length === 0) return;
+    ids = mapped;
+    setPostingTally(true);
+    let posted = 0;
+    const failures: string[] = [];
+    const done: string[] = [];
+    for (const id of ids) {
+      try {
+        const voucher = await vouchersApi.fromBank(companyId, id);
+        await vouchersApi.submit(companyId, voucher.id);
+        await vouchersApi.approve(companyId, voucher.id);
+        const res = await vouchersApi.postToTally(companyId, voucher.id);
+        if (res.success || res.already_posted) {
+          posted += 1;
+          done.push(id);
+        } else failures.push(res.message || voucher.voucher_number);
+      } catch (e) {
+        failures.push(e instanceof Error ? e.message : String(e));
+      }
+    }
+    if (done.length) setPostedIds((prev) => new Set([...prev, ...done]));
+    queryClient.invalidateQueries({ queryKey: ["vouchers"] });
+    queryClient.invalidateQueries({ queryKey: ["bankStatements"] });
+    setPostingTally(false);
+    clear();
+    if (posted) toast.success(`Posted ${posted} voucher(s) to Tally`);
+    if (failures.length) toast.error(`${failures.length} failed: ${failures[0]}`);
+  };
+
+  // Post a single transaction from the Tally column; reuses the batch path.
+  const postOneToTally = async (id: string) => {
+    setPostingId(id);
+    await exportSelectedToTally([id], () => {});
+    setPostingId(null);
+  };
 
   const exportClientBank = async () => {
     if (!companyId) return;
@@ -435,17 +546,11 @@ function BankPage() {
       cell: (r) => fmtDate(r.transactionDate),
     },
     {
-      key: "valueDate",
-      header: "Value",
-      className: "num text-xs text-muted-foreground",
-      cell: (r) => (r.valueDate ? fmtDate(r.valueDate) : "—"),
-    },
-    {
       key: "description",
       header: "Raw Narration",
       cell: (r) =>
         r.description ? (
-          <span className="num block min-w-[13rem] max-w-sm truncate text-xs" title={r.description}>
+          <span className="num block min-w-[13rem] whitespace-normal break-words text-xs">
             {r.description}
           </span>
         ) : (
@@ -453,21 +558,40 @@ function BankPage() {
         ),
     },
     {
-      key: "counterparty",
-      header: "Cleaned Narration",
-      sortValue: (r) => cleanedNarration(r).text,
+      key: "ledger",
+      header: "Ledger",
+      sortValue: (r) => r.counterpartyLedger ?? ledgerSuggestions[r.id] ?? "",
       cell: (r) => {
-        const { text, known } = cleanedNarration(r);
+        const confirmed = r.counterpartyLedger;
+        const suggested = ledgerSuggestions[r.id] ?? "";
+        // Confirmed reads plainly; an AI/history suggestion reads as italic muted
+        // text until confirmed. Only a row with no name at all gets the picker.
+        if (confirmed || suggested) {
+          return (
+            <span
+              className={cn(
+                "block min-w-[11rem] whitespace-normal break-words",
+                !confirmed && "italic text-muted-foreground",
+              )}
+              title={
+                confirmed ? confirmed : `Suggested from Tally history / narration: ${suggested}`
+              }
+            >
+              {confirmed || suggested}
+            </span>
+          );
+        }
         return (
-          <span
-            className={cn(
-              "block min-w-[12rem] max-w-sm truncate",
-              !known && "text-muted-foreground",
-            )}
-            title={text}
-          >
-            {text}
-          </span>
+          <div className="min-w-[13rem]" onClick={(e) => e.stopPropagation()}>
+            <LedgerCombobox
+              ledgers={activeLedgers}
+              value={null}
+              onChange={(id) => {
+                const name = activeLedgers.find((l) => l.id === id)?.name;
+                if (name) void acceptLedger(r.id, name);
+              }}
+            />
+          </div>
         );
       },
     },
@@ -503,6 +627,41 @@ function BankPage() {
       sortValue: (r) => r.balance ?? "",
       sortCompare: (a, b) => compareMoney(a.balance, b.balance),
       cell: (r) => inr(r.balance),
+    },
+    {
+      key: "tally",
+      header: "Tally",
+      align: "right",
+      cell: (r) => {
+        if (postedIds.has(r.id)) {
+          return (
+            <span
+              title="Posted to Tally"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input text-success"
+            >
+              <Check className="h-4 w-4" />
+            </span>
+          );
+        }
+        return (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              void postOneToTally(r.id);
+            }}
+            disabled={postingTally}
+            aria-label="Post to Tally"
+            title="Post this transaction to TallyPrime"
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-input transition-colors hover:bg-muted disabled:opacity-70"
+          >
+            {postingId === r.id ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <img src="/tally.png" alt="" className="h-4 w-4" />
+            )}
+          </button>
+        );
+      },
     },
   ];
 
@@ -620,102 +779,115 @@ function BankPage() {
             </div>
           }
         >
-          <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field label="Bank Account">
-                <select
-                  aria-label="Bank Account"
-                  className={selectCls}
-                  value={statementForm.bankAccountId}
-                  onChange={(e) => setStatementField("bankAccountId", e.target.value)}
-                >
-                  <option value="">— Select account —</option>
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {bankAccountLabel(a)}
-                      {a.isActive ? "" : " (inactive)"}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Link Existing Document">
-                <select
-                  aria-label="Link Existing Document"
-                  className={selectCls}
-                  value={statementForm.documentId}
-                  onChange={(e) => setStatementField("documentId", e.target.value)}
-                >
-                  <option value="">— None —</option>
-                  {documents.map((d) => (
-                    <option key={d.id} value={d.id}>
-                      {d.name}
-                    </option>
-                  ))}
-                </select>
-              </Field>
-              <Field label="Statement Start">
-                <Input
-                  type="date"
-                  value={statementForm.statementStartDate}
-                  onChange={(e) => setStatementField("statementStartDate", e.target.value)}
-                />
-              </Field>
-              <Field label="Statement End">
-                <Input
-                  type="date"
-                  value={statementForm.statementEndDate}
-                  onChange={(e) => setStatementField("statementEndDate", e.target.value)}
-                />
-              </Field>
-              <Field label="Opening Balance (optional)">
-                <Input
-                  className="num"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={statementForm.openingBalance}
-                  onChange={(e) => setStatementField("openingBalance", e.target.value)}
-                />
-              </Field>
-              <Field label="Closing Balance (optional)">
-                <Input
-                  className="num"
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  value={statementForm.closingBalance}
-                  onChange={(e) => setStatementField("closingBalance", e.target.value)}
-                />
-              </Field>
+          <div className="flex flex-col gap-3">
+            <p className="text-sm text-muted-foreground">
+              Drop your bank statements — PAL reads each one, works out which bank account it
+              belongs to, and extracts the transactions. No need to pick an account.
+            </p>
+            <FileUploadDropzone
+              multiple
+              accept=".pdf,.xlsx,.xls,.csv"
+              hint="PDF, Excel or CSV statements — up to 10 at once"
+              onFiles={(f) => setStaged((p) => [...p, ...f])}
+            />
+            {staged.length > 0 && (
+              <ul className="divide-y rounded border text-sm">
+                {staged.map((f, i) => (
+                  <li
+                    key={`${f.name}-${i}`}
+                    className="flex items-center justify-between px-3 py-1.5"
+                  >
+                    <span className="truncate">{f.name}</span>
+                    <button
+                      className="text-xs text-destructive hover:underline"
+                      onClick={() => setStaged((p) => p.filter((_, j) => j !== i))}
+                    >
+                      Remove
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {staged.length > MAX_BATCH && (
+              <p className="text-xs text-destructive">
+                Maximum {MAX_BATCH} statements can be extracted at a time.
+              </p>
+            )}
+            <div>
+              <Button
+                onClick={uploadStatements}
+                disabled={
+                  !staged.length ||
+                  staged.length > MAX_BATCH ||
+                  uploadDocuments.isPending ||
+                  ingestBatch.isPending
+                }
+              >
+                {uploadDocuments.isPending
+                  ? "Uploading…"
+                  : ingestBatch.isPending
+                    ? "Extracting…"
+                    : staged.length > 1
+                      ? `Upload & extract ${staged.length}`
+                      : "Upload & extract"}
+              </Button>
             </div>
-            <div className="flex flex-col">
-              <FileUploadDropzone
-                multiple={false}
-                accept=".pdf,.xlsx,.xls,.csv"
-                hint="PDF or Excel statement"
-                onFiles={(f) => setFile(f[0])}
-              />
-              {file && (
-                <p className="mt-2 truncate text-xs text-muted-foreground">Selected: {file.name}</p>
-              )}
-            </div>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Button
-              className="flex-1 sm:flex-none"
-              onClick={uploadStatement}
-              disabled={!file || uploadDocuments.isPending}
-            >
-              Upload statement
-            </Button>
-            <Button
-              variant="outline"
-              onClick={createStatementManually}
-              disabled={createStatement.isPending}
-            >
-              <Plus />
-              Create without a file
-            </Button>
           </div>
         </Section>
+
+        {batchItems.length > 0 && (
+          <div className="rounded-md border bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold">Extracting bank statements</h3>
+              {progress && (
+                <span className="num text-xs font-medium text-muted-foreground">
+                  {progress.done}/{progress.total} completed ·{" "}
+                  {Math.round((progress.done / progress.total) * 100)}%
+                </span>
+              )}
+            </div>
+            {progress && (
+              <div className="mb-3 h-2 w-full overflow-hidden rounded bg-muted">
+                <div
+                  className="h-full bg-primary transition-all"
+                  style={{ width: `${(progress.done / progress.total) * 100}%` }}
+                />
+              </div>
+            )}
+            <ul className="divide-y rounded border text-sm">
+              {batchItems.map((it) => (
+                <li key={it.id} className="px-3 py-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate">{it.name}</span>
+                    <span className="flex shrink-0 items-center gap-1.5 text-xs">
+                      {it.status === "extracting" && (
+                        <>
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                          <span className="text-primary">Extracting…</span>
+                        </>
+                      )}
+                      {it.status === "completed" && (
+                        <span className="font-medium text-success">✓ Completed</span>
+                      )}
+                      {it.status === "review" && (
+                        <span className="font-medium text-warning">Needs review</span>
+                      )}
+                      {it.status === "failed" && (
+                        <span className="font-medium text-destructive">Failed</span>
+                      )}
+                      {it.status === "queued" && (
+                        <span className="text-muted-foreground">Queued</span>
+                      )}
+                    </span>
+                  </div>
+                  {it.detail && (it.status === "failed" || it.status === "review") && (
+                    <p className="mt-0.5 text-xs text-muted-foreground">{it.detail}</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         {/* Statement context bar */}
         <div>
@@ -729,75 +901,87 @@ function BankPage() {
                     : "Upload a statement above, enter one by hand, or sync from Tally."
                 }
               />
-            ) : statement ? (
+            ) : (
               <>
-                <div className="flex flex-wrap items-center gap-2">
+                {batchCodes.length > 0 && (
                   <select
-                    aria-label="Select statement"
-                    className={selectCls + " min-w-64 flex-1"}
-                    value={statementId}
-                    onChange={(e) => setStatementId(e.target.value)}
+                    aria-label="Filter by batch code"
+                    className={selectCls + " mb-3"}
+                    value={batch}
+                    onChange={(e) => setBatch(e.target.value)}
                   >
-                    {statements.map((st) => {
-                      const owner = accounts.find((a) => a.id === st.bankAccountId);
-                      const period = st.statementStartDate
-                        ? `${fmtDate(st.statementStartDate)} – ${
-                            st.statementEndDate ? fmtDate(st.statementEndDate) : "open"
-                          }`
-                        : "No period set";
-                      return (
-                        <option key={st.id} value={st.id}>
-                          {owner ? owner.bankName : "Account"} · {period} · {st.status}
-                        </option>
-                      );
-                    })}
+                    <option value="All">All batches</option>
+                    {batchCodes.map((code) => (
+                      <option key={code} value={code}>
+                        {code}
+                      </option>
+                    ))}
                   </select>
-                  <StatusBadge status={statusToUiLabel(statement.status)} />
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={runExtraction}
-                    disabled={processStatement.isPending}
-                  >
-                    <Sparkles />
-                    Extract
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    onClick={remove}
-                    disabled={deleteStatement.isPending}
-                  >
-                    <Trash2 />
-                    Delete
-                  </Button>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
-                  <KV k="Opening balance" v={fmtMoney(statement.openingBalance)} />
-                  <KV k="Closing balance" v={fmtMoney(statement.closingBalance)} />
-                  <KV
-                    k="Period"
-                    v={
-                      statement.statementStartDate
-                        ? `${fmtDate(statement.statementStartDate)} – ${
-                            statement.statementEndDate
-                              ? fmtDate(statement.statementEndDate)
-                              : "open"
-                          }`
-                        : "Not set"
-                    }
-                  />
-                  <KV
-                    k="Source document"
-                    v={
-                      statement.documentId
-                        ? (documents.find((d) => d.id === statement.documentId)?.name ?? "—")
-                        : "None"
-                    }
-                  />
-                </div>
+                )}
+                {statement ? (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        aria-label="Select statement"
+                        className={selectCls + " min-w-64 flex-1"}
+                        value={statementId}
+                        onChange={(e) => setStatementId(e.target.value)}
+                      >
+                        {visibleStatements.map((st) => {
+                          const owner = accounts.find((a) => a.id === st.bankAccountId);
+                          const period = st.statementStartDate
+                            ? `${fmtDate(st.statementStartDate)} – ${
+                                st.statementEndDate ? fmtDate(st.statementEndDate) : "open"
+                              }`
+                            : "No period set";
+                          return (
+                            <option key={st.id} value={st.id}>
+                              {owner ? owner.bankName : "Account"} · {period} · {st.status}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <StatusBadge status={statusToUiLabel(statement.status)} />
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={remove}
+                        disabled={deleteStatement.isPending}
+                      >
+                        <Trash2 />
+                        Delete
+                      </Button>
+                    </div>
+                    <div className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 sm:grid-cols-4">
+                      <KV k="Opening balance" v={fmtMoney(statement.openingBalance)} />
+                      <KV k="Closing balance" v={fmtMoney(statement.closingBalance)} />
+                      <KV
+                        k="Period"
+                        v={
+                          statement.statementStartDate
+                            ? `${fmtDate(statement.statementStartDate)} – ${
+                                statement.statementEndDate
+                                  ? fmtDate(statement.statementEndDate)
+                                  : "open"
+                              }`
+                            : "Not set"
+                        }
+                      />
+                      <KV
+                        k="Source document"
+                        v={
+                          statement.documentId
+                            ? (documents.find((d) => d.id === statement.documentId)?.name ?? "—")
+                            : "None"
+                        }
+                      />
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No statements in this batch.</p>
+                )}
               </>
-            ) : null}
+            )}
           </Section>
         </div>
 
@@ -805,22 +989,22 @@ function BankPage() {
         <div className="flex flex-col gap-4">
           <div>
             <DataTable
+              wrap
               rows={transactions}
               rowKey={(r) => r.id}
               pageSize={20}
               selectable
+              rowSelectable={(r) => !postedIds.has(r.id)}
               bulkActions={(ids, clear) => (
                 <Button
                   size="sm"
                   variant="outline"
                   className="h-7"
-                  onClick={() => {
-                    exportRows(transactions.filter((t) => ids.includes(t.id)));
-                    clear();
-                  }}
+                  disabled={postingTally}
+                  onClick={() => exportSelectedToTally(ids, clear)}
                 >
-                  <Download />
-                  Export selected
+                  {postingTally ? <Loader2 className="animate-spin" /> : <Download />}
+                  {postingTally ? "Posting…" : "Export to Tally"}
                 </Button>
               )}
               searchKeys={(r) =>
@@ -1047,6 +1231,17 @@ function BankPage() {
                             toast.success(
                               `Tally sync complete — ${data.transactions_created} transactions, ${data.accounts_created} new accounts`,
                             );
+                            // Learn ledger mappings from Tally's old vouchers so
+                            // the table can suggest a ledger per transaction.
+                            mappingSyncMutation.mutate(
+                              { companyId, tallyCompanyName: tallyCfg.tallyCompany },
+                              {
+                                onSuccess: () =>
+                                  queryClient.invalidateQueries({
+                                    queryKey: ["bankTransactions"],
+                                  }),
+                              },
+                            );
                           } else {
                             toast.error(`Tally sync failed: ${data.error_message}`);
                           }
@@ -1055,10 +1250,20 @@ function BankPage() {
                       },
                     );
                   }}
-                  disabled={tallySyncMutation.isPending}
+                  disabled={tallySyncMutation.isPending || mappingSyncMutation.isPending}
                 >
-                  <RefreshCw className={tallySyncMutation.isPending ? "animate-spin" : undefined} />
-                  {tallySyncMutation.isPending ? "Syncing…" : "Sync Bank Data"}
+                  <RefreshCw
+                    className={
+                      tallySyncMutation.isPending || mappingSyncMutation.isPending
+                        ? "animate-spin"
+                        : undefined
+                    }
+                  />
+                  {tallySyncMutation.isPending
+                    ? "Syncing…"
+                    : mappingSyncMutation.isPending
+                      ? "Learning mappings…"
+                      : "Sync Bank Data"}
                 </Button>
                 {tallySyncMutation.data &&
                   (() => {
@@ -1176,11 +1381,11 @@ function BankPage() {
         </DialogContent>
       </Dialog>
 
-      <Sheet open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
-        <SheetContent className="w-full overflow-y-auto sm:max-w-lg">
-          <SheetHeader>
-            <SheetTitle>Transaction detail</SheetTitle>
-          </SheetHeader>
+      <Dialog open={!!open} onOpenChange={(o) => !o && setOpen(null)}>
+        <DialogContent className="max-h-[90vh] w-[95vw] max-w-6xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Transaction detail</DialogTitle>
+          </DialogHeader>
           {open && (
             <div className="mt-4 space-y-4">
               {editing ? (
@@ -1292,13 +1497,11 @@ function BankPage() {
                 companyId={companyId}
                 statementId={statement?.id ?? ""}
                 transactionId={open.id}
-                transaction={open}
-                onTransactionUpdated={setOpen}
               />
             </div>
           )}
-        </SheetContent>
-      </Sheet>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }

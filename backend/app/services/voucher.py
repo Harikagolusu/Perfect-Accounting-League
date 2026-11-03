@@ -27,6 +27,7 @@ from app.models.accounting_mapping import (
 from app.models.bank import BankAccount, BankStatement, BankTransaction
 from app.models.company import Company
 from app.models.invoice import Invoice, InvoiceDirection
+from app.models.vendor import Vendor
 from app.models.voucher import (
     AccountingEntityType,
     Voucher,
@@ -688,6 +689,49 @@ def verify_posting(
     return voucher
 
 
+def _learn_vendor_party_ledger(
+    db: Session, voucher: Voucher, invoice: Invoice, *, actor: str
+) -> None:
+    """Remember the vendor's party/creditor ledger from an approved purchase, so
+    the next invoice for the same vendor auto-fills the party line instead of
+    leaving it unmapped. Approval only reaches here once every line is mapped, so
+    the party ledger already exists in the Ledger Master."""
+    if voucher.voucher_type is not VoucherType.PURCHASE:
+        return
+    party = next(
+        (
+            line
+            for line in voucher.lines
+            if line.line_type == "LEDGER"
+            and line.side is VoucherSide.CR
+            and line.ledger_id is not None
+            and line.amount == invoice.total_amount
+        ),
+        None,
+    )
+    if party is None:
+        return
+    vendor = db.get(Vendor, invoice.vendor_id)
+    if vendor is None or vendor.creditor_ledger == party.ledger_name:
+        return
+    old = vendor.creditor_ledger
+    vendor.creditor_ledger = party.ledger_name
+    db.flush()
+    record_event(
+        db,
+        company_id=voucher.company_id,
+        entity_type=AccountingEntityType.VENDOR,
+        entity_id=vendor.id,
+        voucher_id=voucher.id,
+        event_type="VENDOR_CREDITOR_LEDGER_LEARNED",
+        actor=actor,
+        field="creditor_ledger",
+        old_value=old,
+        new_value=party.ledger_name,
+        reason=f"Learned from approved voucher {voucher.voucher_number}.",
+    )
+
+
 def _record_approved_mappings(
     db: Session, voucher: Voucher, *, actor: str
 ) -> None:
@@ -707,6 +751,7 @@ def _record_approved_mappings(
         )
         if invoice is None or invoice.vendor_id is None:
             return
+        _learn_vendor_party_ledger(db, voucher, invoice, actor=actor)
         candidates = [
             line
             for line in voucher.lines

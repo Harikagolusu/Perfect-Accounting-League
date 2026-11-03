@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -336,6 +337,7 @@ def list_transactions(
     *,
     transaction_date_from: date | None = None,
     transaction_date_to: date | None = None,
+    needs_clarification: bool | None = None,
 ) -> list[BankTransaction]:
     """Return a statement's transactions in date order."""
     query = select(BankTransaction).where(
@@ -346,6 +348,10 @@ def list_transactions(
         query = query.where(BankTransaction.transaction_date >= transaction_date_from)
     if transaction_date_to is not None:
         query = query.where(BankTransaction.transaction_date <= transaction_date_to)
+    if needs_clarification is not None:
+        query = query.where(
+            BankTransaction.needs_clarification.is_(needs_clarification)
+        )
     query = query.order_by(BankTransaction.transaction_date, BankTransaction.created_at)
     return list(db.scalars(query).all())
 
@@ -519,7 +525,7 @@ def _apply_extracted_transactions(
     """
     db.execute(
         sa_delete(BankTransaction).where(
-            BankTransaction.statement_id == statement.id
+            BankTransaction.bank_statement_id == statement.id
         )
     )
     count = 0
@@ -527,11 +533,13 @@ def _apply_extracted_transactions(
         txn_date = row.get("transaction_date")
         if not txn_date:
             continue
-        debit = row.get("debit_amount")
-        credit = row.get("credit_amount")
+        # The AI parser may leave an amount as None; the columns are NOT NULL and
+        # derive_transaction_type needs a real number, so coerce as create_transaction does.
+        debit = row.get("debit_amount") or ZERO
+        credit = row.get("credit_amount") or ZERO
         db.add(
             BankTransaction(
-                statement_id=statement.id,
+                bank_statement_id=statement.id,
                 company_id=statement.company_id,
                 transaction_date=txn_date,
                 value_date=row.get("value_date"),
@@ -587,23 +595,143 @@ def process_statement(
     if not result.configured:
         return statement, result
 
-    # Apply extracted statement header fields (dates, balances).
+    if result.reason is not None:
+        # A real extraction failure: an unreadable or encrypted document, a file
+        # that is not a bank statement, or unusable AI output. Record it as
+        # FAILED and keep any previously extracted rows — never wipe them and
+        # claim PROCESSED, which is what hid these failures as empty successes.
+        statement.status = BankStatementStatus.FAILED
+        db.commit()
+        db.refresh(statement)
+        return statement, result
+
+    _finalize_extraction(db, statement, result)
+    return statement, result
+
+
+def _finalize_extraction(
+    db: Session, statement: BankStatement, result: StatementExtractionResult
+) -> None:
+    """Apply a clean extraction's header + rows and set the final status.
+
+    Only called when `result.configured` and `result.reason is None`.
+    """
     if result.statement_updates:
         for key, value in result.statement_updates.items():
             setattr(statement, key, value)
-
     if result.transactions is not None:
         _apply_extracted_transactions(db, statement, result.transactions)
-
-    new_status = (
+    statement.status = (
         BankStatementStatus.NEEDS_REVIEW
         if result.issues
         else BankStatementStatus.PROCESSED
     )
-    statement.status = new_status
     db.commit()
     db.refresh(statement)
 
+
+#: Reported when a freshly read statement can't be tied to a bank account.
+INGEST_UNMATCHED = "BANK_ACCOUNT_UNMATCHED"
+
+
+def _match_bank_account(
+    db: Session,
+    company_id: uuid.UUID,
+    *,
+    account_number: str | None,
+    bank_name: str | None,
+) -> BankAccount | None:
+    """Pick the account a freshly-read statement belongs to, or None.
+
+    Accounts come from Tally; this never creates one. The common case is a
+    single active account. With several, the detected account number (by last
+    four digits, since statements and Tally ledgers rarely agree in full) or
+    the bank name must single one out — otherwise the statement is parked.
+    """
+    active = [a for a in list_bank_accounts(db, company_id) if a.is_active]
+    if len(active) <= 1:
+        return active[0] if active else None
+
+    digits = "".join(c for c in (account_number or "") if c.isdigit())
+    if len(digits) >= 4:
+        tail = digits[-4:]
+        by_number = [
+            a
+            for a in active
+            if tail in "".join(c for c in (a.account_number or "") if c.isdigit())
+            or tail in "".join(c for c in (a.ledger_name or "") if c.isdigit())
+        ]
+        if len(by_number) == 1:
+            return by_number[0]
+
+    name = (bank_name or "").strip().lower()
+    if name:
+        by_name = [
+            a
+            for a in active
+            if name in (a.bank_name or "").lower()
+            or name in (a.ledger_name or "").lower()
+            or (a.bank_name or "").lower() in name
+        ]
+        if len(by_name) == 1:
+            return by_name[0]
+    return None
+
+
+def ingest_bank_statement(
+    db: Session, company_id: uuid.UUID, document_id: uuid.UUID
+) -> tuple[BankStatement | None, StatementExtractionResult]:
+    """Extract an uploaded document, match it to an account, create its statement.
+
+    The direct-upload entry point: the user selects no account. The document is
+    read once; the account it belongs to is resolved from what the read found;
+    only then is the statement created. A failed read or an unmatched account
+    creates no statement and is reported for a human — nothing is guessed.
+    """
+    from app.core.storage import resolve_storage_path
+
+    document = get_document(db, company_id, document_id)
+    extractor = get_statement_extractor()
+    if not extractor.is_configured():
+        return None, extractor.extract(None, b"")
+
+    raw = resolve_storage_path(document.file_path).read_bytes()
+    result = extractor.extract(None, raw, document=document)
+    if not result.configured or result.reason is not None:
+        return None, result
+
+    account = _match_bank_account(
+        db,
+        company_id,
+        account_number=result.detected_account_number,
+        bank_name=result.detected_bank_name,
+    )
+    if account is None:
+        return None, replace(
+            result,
+            reason=INGEST_UNMATCHED,
+            message=(
+                "Couldn't match this statement to a bank account. Sync the "
+                "account from Tally, or open the statement and set the account."
+            ),
+        )
+
+    statement = BankStatement(
+        company_id=company_id,
+        bank_account_id=account.id,
+        document_id=document.id,
+        status=BankStatementStatus.UPLOADED,
+    )
+    db.add(statement)
+    db.commit()
+    db.refresh(statement)
+    _finalize_extraction(db, statement, result)
+    logger.info(
+        "Ingested statement %s from document %s into account %s",
+        statement.id,
+        document_id,
+        account.id,
+    )
     return statement, result
 
 
@@ -622,6 +750,7 @@ __all__ = [
     "get_bank_account",
     "get_bank_statement",
     "get_transaction",
+    "ingest_bank_statement",
     "list_bank_accounts",
     "list_bank_statements",
     "list_transactions",

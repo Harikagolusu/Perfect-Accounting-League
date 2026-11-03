@@ -345,10 +345,22 @@ def create_voucher_from_invoice(
             .order_by(InvoiceLineItem.line_number)
         ).all()
     )
-    # The accounting voucher aggregates the invoice's taxable value onto one
-    # ledger line. Item fields are only copied when the invoice has exactly one
-    # item, so a multi-item invoice never shows one item's HSN/quantity against
-    # the whole aggregate amount.
+    # One expense/income ledger line per invoice item, but only when every item
+    # has a taxable amount and they sum exactly to the invoice taxable amount —
+    # then the split totals the same, so the voucher balances identically to the
+    # invoice. Otherwise fall back to a single aggregate line.
+    expense_items = (
+        invoice_items
+        if len(invoice_items) >= 2
+        and invoice.taxable_amount is not None
+        and all(item.taxable_amount is not None for item in invoice_items)
+        and sum((item.taxable_amount for item in invoice_items), ZERO)
+        == invoice.taxable_amount
+        else None
+    )
+    # Single-item invoice: copy its fields onto the one aggregate line. A
+    # multi-item invoice that is not split must not show one item's HSN/quantity
+    # against the whole amount.
     item_for_line = invoice_items[0] if len(invoice_items) == 1 else None
 
     lines: list[VoucherLine] = []
@@ -418,14 +430,20 @@ def create_voucher_from_invoice(
                         "Round Off Ledger",
                     )
                 )
-        add(
-            purpose,
-            side,
-            amount,
-            line_type=line_type,
-            # Item fields belong to the taxable line only.
-            item=item_for_line if purpose == main_purpose else None,
-        )
+        if purpose == main_purpose and expense_items is not None:
+            # One ledger line per item; each starts from the same suggested
+            # expense/income ledger, which the reviewer can change per line.
+            for item in expense_items:
+                add(purpose, side, item.taxable_amount, line_type=line_type, item=item)
+        else:
+            add(
+                purpose,
+                side,
+                amount,
+                line_type=line_type,
+                # Item fields belong to the taxable line only.
+                item=item_for_line if purpose == main_purpose else None,
+            )
     if not any(line for line in lines if line.line_type != "TAX" and line.side is VoucherSide.CR) and not is_sales:
         issues.append(
             VoucherIssue(

@@ -462,6 +462,45 @@ def test_valid_pdf_extraction_creates_a_processed_ai_invoice(
     assert "DFC/2026/0042" in fake_ai.prompts[0]
 
 
+def test_inbox_prepare_voucher_saves_a_draft_voucher_without_gating_status(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """The Document Inbox flow (`prepare_voucher=true`) auto-saves a draft
+    accounting voucher for the extracted invoice so Invoice Processing can show
+    its entry details without opening the row. The voucher's completeness does
+    not gate the invoice: a clean extraction is still PROCESSED, and the voucher
+    is created idempotently (one per invoice)."""
+    company = _company(client)
+    document = _pdf_document(client, company["id"])
+
+    first = client.post(
+        f"{COMPANIES_URL}/{company['id']}/invoices/process-document/{document['id']}",
+        params={"prepare_voucher": "true"},
+    )
+    assert first.status_code == 200, first.text
+    invoice_id = first.json()["invoice_id"]
+    assert first.json()["status"] == "PROCESSED"
+    assert _get_invoice(client, company["id"], invoice_id)["status"] == "PROCESSED"
+
+    vouchers = client.get(
+        f"{COMPANIES_URL}/{company['id']}/vouchers/",
+        params={"source_type": "INVOICE", "source_id": invoice_id},
+    )
+    assert vouchers.status_code == 200, vouchers.text
+    assert len(vouchers.json()) == 1
+
+    # Idempotent: re-running does not create a second voucher.
+    client.post(
+        f"{COMPANIES_URL}/{company['id']}/invoices/process-document/{document['id']}",
+        params={"prepare_voucher": "true"},
+    )
+    again = client.get(
+        f"{COMPANIES_URL}/{company['id']}/vouchers/",
+        params={"source_type": "INVOICE", "source_id": invoice_id},
+    )
+    assert len(again.json()) == 1
+
+
 def test_llm_verification_wins_over_a_regex_candidate() -> None:
     """Regex is a hint; the model's reading of the source is what is stored."""
     source = (
@@ -861,7 +900,7 @@ def test_provider_failure_does_not_leak_the_exception_message(
         "",
         '{"is_invoice": true, "invoice_number": "X", "total_amount": NaN}',
         '{"invoice_number": "X"}',
-        '{"is_invoice": true, "invoice_number": "X", "taxable_amount": "1,000.00"}',
+        '{"is_invoice": true, "invoice_number": "X", "taxable_amount": "abc"}',
         '{"is_invoice": true, "invoice_number": "X", "total_amount": "10.123"}',
     ),
 )
@@ -882,6 +921,26 @@ def test_invalid_ai_output_is_rejected_safely(
     invoice = _get_invoice(client, company["id"], body["invoice_id"])
     assert invoice["status"] == "FAILED"
     assert invoice["total_amount"] is None
+
+
+def test_comma_grouped_amounts_are_accepted(
+    client: TestClient, fake_ai: FakeProvider
+) -> None:
+    """Indian invoices print amounts like '1,23,456.78'; the grouping commas must
+    not fail extraction. Regression for real statements rejected as schema_mismatch."""
+    fake_ai.text = json.dumps(
+        {**SAMPLE_INVOICE, "taxable_amount": "1,23,456.78", "total_amount": "1,45,678.90"}
+    )
+    company = _company(client)
+    document = _pdf_document(client, company["id"])
+
+    body = _process_document(client, company["id"], document["id"]).json()
+
+    assert body["status"] != "FAILED"
+    assert body["reason"] != "EXTRACTION_INVALID_OUTPUT"
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert invoice["taxable_amount"] == "123456.78"
+    assert invoice["total_amount"] == "145678.90"
 
 
 def test_fenced_json_is_accepted(

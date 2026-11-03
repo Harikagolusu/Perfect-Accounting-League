@@ -99,6 +99,11 @@ Field notes:
 - discount_amount: a header-level discount printed separately from the line items, or null.
 - freight_amount: freight or other charges printed as a header-level addition, or null.
 - line_items: every line in the invoice table. Return [] if no table is visible.
+  Return every row without exception: do not skip, merge, de-duplicate,
+  summarise or stop early. Include a row even when some cells (HSN, quantity,
+  rate, tax) are blank — put null for those cells but still return the row. The
+  number of objects in line_items must equal the number of item rows printed in
+  the table. Number the rows sequentially from 1 in printed order.
   For each line: description is the item name as printed; supply_type is "GOODS"
   or "SERVICE" if labelled, else null; unit_rate is the printed rate per unit;
   gst_rate is the GST percentage (e.g. 18.00), not an amount.
@@ -203,6 +208,11 @@ Field notes:
 - discount_amount: a header-level discount printed separately from the line items, or null.
 - freight_amount: freight or other charges printed as a header-level addition, or null.
 - line_items: every line in the invoice table. Return [] if no table is visible.
+  Return every row without exception: do not skip, merge, de-duplicate,
+  summarise or stop early. Include a row even when some cells (HSN, quantity,
+  rate, tax) are blank — put null for those cells but still return the row. The
+  number of objects in line_items must equal the number of item rows printed in
+  the table. Number the rows sequentially from 1 in printed order.
   For each line: description is the item name as printed; supply_type is "GOODS"
   or "SERVICE" if labelled, else null; unit_rate is the printed rate per unit;
   gst_rate is the GST percentage (e.g. 18.00), not an amount.

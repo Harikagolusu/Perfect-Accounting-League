@@ -67,6 +67,8 @@ export interface BankTransactionDto {
   counterparty_pincode: string | null;
   counterparty_gstin: string | null;
   is_inter_account_transfer: boolean;
+  needs_clarification: boolean;
+  clarification_note: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,14 +102,28 @@ export interface BankTransactionMappingWriteDto {
   counterparty_pincode?: string | null;
   counterparty_gstin?: string | null;
   is_inter_account_transfer?: boolean;
+  needs_clarification?: boolean;
+  clarification_note?: string | null;
 }
 
 export interface ProcessStatementResultDto {
   statement_id: string;
+  status: BankStatementStatus;
   configured: boolean;
   reason: string | null;
   message: string;
   issues: string[];
+  transaction_count: number | null;
+}
+
+export interface IngestStatementResultDto {
+  document_id: string;
+  /** null when no statement was created (failed read or unmatched account). */
+  statement_id: string | null;
+  status: BankStatementStatus | null;
+  configured: boolean;
+  reason: string | null;
+  message: string;
   transaction_count: number | null;
 }
 
@@ -179,6 +195,8 @@ export const toBankTransaction = (dto: BankTransactionDto) => ({
   counterpartyPincode: dto.counterparty_pincode,
   counterpartyGstin: dto.counterparty_gstin,
   isInterAccountTransfer: dto.is_inter_account_transfer,
+  needsClarification: dto.needs_clarification,
+  clarificationNote: dto.clarification_note,
   createdAt: dto.created_at,
   updatedAt: dto.updated_at,
 });
@@ -293,6 +311,11 @@ export const bankStatementsApi = {
     apiFetch<ProcessStatementResultDto>(`${base(companyId)}/${statementId}/process`, {
       method: "POST",
     }),
+  /** Direct upload: read a document, match its account and create the statement. */
+  ingestDocument: (companyId: string, documentId: string) =>
+    apiFetch<IngestStatementResultDto>(`${base(companyId)}/ingest-document/${documentId}`, {
+      method: "POST",
+    }),
   listTransactions: (
     companyId: string,
     statementId: string,
@@ -305,6 +328,11 @@ export const bankStatementsApi = {
     ),
   getTransaction: (companyId: string, statementId: string, transactionId: string) =>
     apiFetch<BankTransactionDto>(`${base(companyId)}/${statementId}/transactions/${transactionId}`),
+  /** Deterministic ledger name per transaction id, for the review table column. */
+  listLedgerSuggestions: (companyId: string, statementId: string) =>
+    apiFetch<Record<string, string | null>>(
+      `${base(companyId)}/${statementId}/ledger-suggestions`,
+    ),
   createTransaction: (companyId: string, statementId: string, body: BankTransactionWriteDto) =>
     apiFetch<BankTransactionDto>(`${base(companyId)}/${statementId}/transactions`, {
       method: "POST",

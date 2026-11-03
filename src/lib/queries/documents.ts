@@ -56,12 +56,16 @@ function useInvalidateCompany(companyId: string | undefined) {
 export function useUploadDocuments(companyId: string | undefined) {
   const invalidate = useInvalidateCompany(companyId);
   return useMutation({
-    mutationFn: async (files: File[]) => {
+    mutationFn: async (input: File[] | { files: File[]; batchCode?: string }) => {
+      const files = Array.isArray(input) ? input : input.files;
+      const batchCode = Array.isArray(input) ? undefined : input.batchCode;
       const uploaded = [];
       // Sequential on purpose: a partial failure should leave the caller with a
       // precise account of which files landed, and inboxes are never large.
       for (const file of files) {
-        uploaded.push(toInboxDocument(await documentsApi.upload(companyId as string, file)));
+        uploaded.push(
+          toInboxDocument(await documentsApi.upload(companyId as string, file, batchCode)),
+        );
       }
       return uploaded;
     },

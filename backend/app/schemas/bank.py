@@ -217,10 +217,12 @@ class BankTransactionCreate(BaseModel):
 
 
 class BankTransactionMappingUpdate(BaseModel):
-    """Payload for confirming a bank transaction's counterparty ledger.
+    """Payload for a reviewer's annotations on a bank transaction.
 
-    Only mapping fields are accepted. Amounts, dates and narration are bank
-    facts and must be corrected through their own facts, not a mapping edit.
+    Only mapping and review fields are accepted — the counterparty ledger, the
+    inter-account flag, and a clarification request. Amounts, dates and
+    narration are bank facts and must be corrected through their own fields,
+    not a mapping edit. Every changed field is audited.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -232,12 +234,16 @@ class BankTransactionMappingUpdate(BaseModel):
     counterparty_gstin: str | None = Field(default=None, max_length=15)
     #: A reviewer may flag an inter-account transfer; PAL never infers it.
     is_inter_account_transfer: bool | None = None
+    #: A reviewer may park the row for the client to clarify, with a note.
+    needs_clarification: bool | None = None
+    clarification_note: str | None = None
 
     @field_validator(
         "counterparty_name",
         "counterparty_ledger",
         "counterparty_address",
         "counterparty_pincode",
+        "clarification_note",
         mode="before",
     )
     @classmethod
@@ -270,6 +276,8 @@ class BankTransactionResponse(TimestampedResponse):
     counterparty_pincode: str | None
     counterparty_gstin: str | None
     is_inter_account_transfer: bool
+    needs_clarification: bool
+    clarification_note: str | None
     transaction_type: TransactionType
 
 
@@ -300,10 +308,29 @@ class ProcessStatementResponse(BaseModel):
     """Result of asking the system to parse a statement automatically."""
 
     statement_id: uuid.UUID
+    #: The statement's status after the attempt, so a batch UI can show the
+    #: per-statement verdict without a second read.
+    status: BankStatementStatus
     configured: bool
     reason: str | None = None
     message: str
     issues: list[str] = Field(default_factory=list)
+    transaction_count: int | None = None
+
+
+class IngestStatementResponse(BaseModel):
+    """Result of a direct-upload ingest: extract, match an account, create.
+
+    `statement_id` and `status` are null when no statement was created — a
+    failed read or an account that couldn't be matched.
+    """
+
+    document_id: uuid.UUID
+    statement_id: uuid.UUID | None = None
+    status: BankStatementStatus | None = None
+    configured: bool
+    reason: str | None = None
+    message: str
     transaction_count: int | None = None
 
 
@@ -318,6 +345,7 @@ __all__ = [
     "BankTransactionMappingUpdate",
     "BankTransactionResponse",
     "BankTransactionUpdate",
+    "IngestStatementResponse",
     "ProcessStatementResponse",
     "mask_account_number",
 ]

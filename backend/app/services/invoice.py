@@ -570,12 +570,38 @@ def confirm_vendor_mapping(
     return invoice
 
 
+def _prepare_invoice_voucher(db: Session, invoice: Invoice) -> None:
+    """Build and save the draft accounting voucher, auto-mapping its ledgers
+    from Tally history.
+
+    Idempotent: `create_voucher_from_invoice` returns the existing voucher for
+    this invoice rather than making a second one. It never gates the invoice
+    status — review, mapping and approval stay in Invoice Processing. Never
+    raises: a missing date or unmappable ledger just leaves a draft (or no
+    voucher) for a person to finish, not an extraction failure.
+    """
+    # Local import: voucher_factory imports this module, so a top-level import
+    # would be circular.
+    from app.services.voucher_factory import create_voucher_from_invoice
+
+    try:
+        create_voucher_from_invoice(db, invoice.company_id, invoice.id)
+    except Exception as exc:  # noqa: BLE001 - a mapping gap is not an extraction failure
+        logger.info(
+            "Voucher not prepared during extraction: company=%s invoice=%s (%s)",
+            invoice.company_id,
+            invoice.id,
+            type(exc).__name__,
+        )
+
+
 def process_invoice(
     db: Session,
     invoice: Invoice,
     *,
     document: Document | None = None,
     extractor: InvoiceExtractor | None = None,
+    prepare_voucher: bool = False,
 ) -> tuple[Invoice, ExtractionResult]:
     """Run extraction for one existing invoice and apply its lifecycle.
 
@@ -701,6 +727,18 @@ def process_invoice(
             extraction_method=result.extraction_method,
         )
         mapping_review_required = False
+
+    # Inbox flow only: once fields are read, save the draft accounting voucher
+    # now (idempotent) with ledgers auto-mapped from Tally history, so the
+    # Invoice Processing table shows its entry details without opening the row.
+    # Done for a clean read and for one that needs review, so every dated
+    # invoice gets its voucher. The voucher's completeness does NOT gate the
+    # invoice: review/mapping/approval stay in Invoice Processing.
+    if prepare_voucher and result.outcome in (
+        ExtractionOutcome.PROCESSED,
+        ExtractionOutcome.NEEDS_REVIEW,
+    ):
+        _prepare_invoice_voucher(db, invoice)
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
@@ -836,12 +874,20 @@ def _find_extraction_invoice(
 
 
 def process_document(
-    db: Session, company_id: uuid.UUID, document_id: uuid.UUID
+    db: Session,
+    company_id: uuid.UUID,
+    document_id: uuid.UUID,
+    *,
+    prepare_voucher: bool = False,
 ) -> tuple[Document, ExtractionResult, Invoice | None]:
     """Attempt automatic extraction for a document.
 
     Returns the document, the extraction result and the invoice the result was
     applied to. When no provider is configured nothing is created or changed.
+
+    `prepare_voucher` is the Document Inbox flow: it also builds the accounting
+    voucher and auto-maps ledgers, so the invoice is only PROCESSED when that
+    voucher is complete. The plain extraction endpoint leaves it False.
     """
     document = get_document(db, company_id, document_id)
     extractor = get_extractor()
@@ -888,7 +934,7 @@ def process_document(
         )
 
     invoice, result = process_invoice(
-        db, invoice, document=document, extractor=extractor
+        db, invoice, document=document, extractor=extractor, prepare_voucher=prepare_voucher
     )
     return document, result, invoice
 

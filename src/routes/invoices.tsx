@@ -1,6 +1,16 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Check, Save, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronsUpDown,
+  Loader2,
+  Save,
+  X,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   PageHeader,
   Section,
@@ -12,7 +22,9 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useCompany } from "@/lib/store";
+import { useCompany, useStore } from "@/lib/store";
+import { useTallyMappingSync } from "@/lib/queries/tally";
+import { periodMonthStart } from "@/lib/constants";
 import { useDocuments } from "@/lib/queries/documents";
 import { documentsApi } from "@/lib/api/documents";
 import {
@@ -21,10 +33,10 @@ import {
   mappingNeedsReview,
   toInvoicePayload,
   type InvoiceFormValues,
+  type UiInvoice,
 } from "@/lib/api/invoices";
 import {
   useConfirmVendorMapping,
-  useCreateInvoice,
   useDeleteInvoice,
   useInvoiceLineItems,
   useInvoices,
@@ -36,6 +48,21 @@ import { useVendors } from "@/lib/queries/vendors";
 import { VendorMappingPanel } from "@/components/pal/vendor-mapping";
 import { InvoiceVoucherPanel } from "@/components/pal/invoice-voucher";
 import { InvoiceLineItemsPanel } from "@/components/pal/invoice-line-items";
+import { VoucherReview } from "@/components/pal/voucher-review";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog";
+import {
+  useVouchers,
+  usePostVoucherToTally,
+  useCreateVoucherFromInvoice,
+} from "@/lib/queries/vouchers";
+import type { Voucher } from "@/lib/api/vouchers";
+import { compareMoney, fmtDate, fmtMoney } from "@/lib/format";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -52,24 +79,229 @@ export const Route = createFileRoute("/invoices")({
 
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 
+/** A voucher's ledger/voucher mapping is complete only when every line has a
+ * ledger, it balances, and it carries no blocking validation error. */
+function ledgerMapped(voucher: Voucher | undefined): boolean {
+  if (!voucher) return false;
+  if (voucher.lines.some((l) => !l.ledgerId)) return false;
+  if (!voucher.isBalanced) return false;
+  return !voucher.validationIssues.some((i) => i.severity === "ERROR");
+}
+
+function tallyLabel(voucher: Voucher | undefined): string {
+  if (!voucher) return "Not posted";
+  if (voucher.status === "POSTED") return "Posted";
+  if (voucher.status === "POSTING_FAILED") return "Posting failed";
+  if (voucher.status === "APPROVED" || voucher.status === "AWAITING_IMPORT_CONFIRMATION")
+    return "Ready";
+  return "Not posted";
+}
+
+/** The single row status that drives the badge, manual-check flag and posting
+ * gate. Nothing is invented: it reads the persisted invoice and voucher state. */
+function rowStatus(invoice: UiInvoice, voucher: Voucher | undefined): string {
+  if (voucher?.status === "POSTED") return "Posted to Tally";
+  if (invoice.status === "FAILED" || voucher?.status === "POSTING_FAILED") return "Failed";
+  if (invoice.status === "DRAFT" || invoice.status === "PROCESSING") return "Processing";
+  const vendorOk =
+    invoice.vendorMappingStatus === "MATCHED" || invoice.vendorMappingStatus === "CONFIRMED";
+  if (invoice.status === "NEEDS_REVIEW" || !vendorOk || !ledgerMapped(voucher))
+    return "Needs Review";
+  if (voucher?.status === "APPROVED" || voucher?.status === "AWAITING_IMPORT_CONFIRMATION")
+    return "Approved";
+  return "Ready to Approve";
+}
+
+/** Plain-language reasons a row still needs a manual check. Reads the same
+ * persisted state as rowStatus; nothing is invented. */
+function reviewReasons(invoice: UiInvoice, voucher: Voucher | undefined): string[] {
+  const reasons: string[] = [];
+  if (invoice.status === "NEEDS_REVIEW") {
+    reasons.push(invoice.validationIssues[0] ?? "Extracted fields need review");
+  }
+  const vendorOk =
+    invoice.vendorMappingStatus === "MATCHED" || invoice.vendorMappingStatus === "CONFIRMED";
+  if (!vendorOk) {
+    reasons.push(
+      invoice.vendorMappingStatus === "UNMAPPED"
+        ? "Vendor not mapped"
+        : "Vendor mapping needs confirmation",
+    );
+  }
+  if (!voucher) {
+    // A voucher needs a date; PAL never invents one. So the only reason a dated
+    // invoice has no voucher is a transient auto-prepare in flight.
+    reasons.push(
+      invoice.invoiceDate
+        ? "Accounting voucher is being prepared"
+        : "Invoice date missing — add it to prepare the accounting voucher",
+    );
+  } else {
+    if (voucher.lines.some((l) => !l.ledgerId)) reasons.push("A voucher line has no ledger");
+    else if (!voucher.isBalanced) reasons.push("Voucher is not balanced");
+    const error = voucher.validationIssues.find((i) => i.severity === "ERROR");
+    if (error) reasons.push(error.message);
+  }
+  return reasons;
+}
+
+/** Posting is allowed only once a voucher is approved; a failed attempt may be
+ * retried. The backend enforces the same rule, so this only gates the button. */
+function canPost(voucher: Voucher | undefined): boolean {
+  return voucher?.status === "APPROVED" || voucher?.status === "POSTING_FAILED";
+}
+
+/** Official Tally app icon, served from public/. */
+function TallyMark({ className }: { className?: string }) {
+  return <img src="/tally.png" alt="" className={cn("h-4 w-4", className)} />;
+}
+
+/** A clickable column header: first click sorts ascending, next toggles. */
+function SortHeader({
+  sort,
+  onSort,
+  col,
+  label,
+  align,
+  thClass,
+}: {
+  sort: { key: string; dir: "asc" | "desc" };
+  onSort: (key: string) => void;
+  col: string;
+  label: string;
+  align?: "right";
+  thClass?: string;
+}) {
+  const active = sort.key === col;
+  const Icon = !active ? ChevronsUpDown : sort.dir === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <th className={cn("px-3 py-2", thClass)}>
+      <button
+        type="button"
+        onClick={() => onSort(col)}
+        className={cn(
+          "inline-flex items-center gap-1 font-medium hover:text-foreground",
+          active && "text-foreground",
+          align === "right" && "w-full justify-end",
+        )}
+      >
+        {label}
+        <Icon className={cn("h-3 w-3", !active && "opacity-40")} />
+      </button>
+    </th>
+  );
+}
+
+/**
+ * Post-to-Tally cell button. Three states, all visible rather than a single
+ * dead disabled button: posted (done), ready (approved, the branded action),
+ * and blocked (not yet approved — clicking opens the row so it can be approved).
+ */
+function PostToTallyButton({
+  voucher,
+  pending,
+  onPost,
+  onOpen,
+  onRepush,
+}: {
+  voucher: Voucher | undefined;
+  pending: boolean;
+  onPost: () => void;
+  onOpen: () => void;
+  onRepush: () => void;
+}) {
+  const base =
+    "inline-flex h-8 w-8 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-70";
+
+  if (voucher?.status === "POSTED") {
+    return (
+      <button
+        onClick={onRepush}
+        disabled={pending}
+        aria-label="Re-push to Tally"
+        title="Posted to Tally. Click to re-push (updates the existing voucher in Tally)."
+        className={cn(
+          base,
+          "border border-success/30 bg-success/10 text-success hover:bg-success/20",
+        )}
+      >
+        {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+      </button>
+    );
+  }
+
+  const retry = voucher?.status === "POSTING_FAILED";
+  if (canPost(voucher)) {
+    return (
+      <button
+        onClick={onPost}
+        disabled={pending}
+        aria-label={retry ? "Retry posting to Tally" : "Post to Tally"}
+        title={retry ? "Retry posting to Tally" : "Post this approved voucher into TallyPrime"}
+        className={cn(
+          base,
+          "bg-gradient-to-b from-primary to-primary/85 text-primary-foreground shadow-sm hover:to-primary",
+        )}
+      >
+        {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <TallyMark />}
+      </button>
+    );
+  }
+
+  // Not approved yet: still interactive. Open the row so the reviewer can
+  // approve, instead of presenting an inert greyed-out control.
+  return (
+    <button
+      onClick={onOpen}
+      aria-label="Approve the voucher first, then post to Tally"
+      title="Approve the voucher first, then post it to Tally"
+      className={cn(
+        base,
+        "border border-dashed border-input text-muted-foreground hover:bg-muted hover:text-foreground",
+      )}
+    >
+      <TallyMark className="opacity-60" />
+    </button>
+  );
+}
+
 function InvoicePage() {
   const navigate = useNavigate();
   const { inv } = Route.useSearch();
   const company = useCompany();
   const companyId = company?.id;
+  const { financialYear, period } = useStore();
+  const postingMonth = periodMonthStart(financialYear, period);
 
   const { data, isPending, isError, error, refetch } = useInvoices(companyId);
   const { data: documents } = useDocuments(companyId);
   const { data: vendors } = useVendors(companyId, true);
-  const createInvoice = useCreateInvoice(companyId);
   const updateInvoice = useUpdateInvoice(companyId);
   const deleteInvoice = useDeleteInvoice(companyId);
   const confirmMapping = useConfirmVendorMapping(companyId);
   const processInvoice = useProcessInvoice(companyId);
+  const { data: invoiceVouchers } = useVouchers(companyId, { sourceType: "INVOICE" });
+  const postToTally = usePostVoucherToTally(companyId);
+  const createVoucherFromInvoice = useCreateVoucherFromInvoice(companyId);
+  const mappingSync = useTallyMappingSync();
+  const learnedCompany = useRef<string | null>(null);
+
+  // On open, silently learn ledger mappings from Tally's old vouchers once per
+  // company, so invoices map to the ledger each vendor was historically booked
+  // to. A Tally failure is non-fatal: the page still works without it.
+  useEffect(() => {
+    if (!companyId || learnedCompany.current === companyId) return;
+    const tallyCompanyName = company?.legalName ?? company?.displayName ?? "";
+    if (!tallyCompanyName) return;
+    learnedCompany.current = companyId;
+    mappingSync.mutate({ companyId, tallyCompanyName });
+  }, [companyId, company?.legalName, company?.displayName, mappingSync]);
   const autoProcessed = useRef<Set<string>>(new Set());
+  const autoVoucher = useRef<Set<string>>(new Set());
 
   const invoices = data ?? [];
-  const invoice = invoices.find((i) => i.id === inv) ?? invoices[0];
+  // Without ?inv the processing table is shown; a row click sets it.
+  const invoice = inv ? invoices.find((i) => i.id === inv) : undefined;
   const matchPreview = useVendorMatch(
     companyId,
     invoice?.id,
@@ -78,6 +310,13 @@ function InvoicePage() {
   const lineItems = useInvoiceLineItems(companyId, invoice?.id);
   const [form, setForm] = useState<InvoiceFormValues | null>(null);
   const [dirty, setDirty] = useState(false);
+  // Voucher opened in the inline approve-and-post card from the list's Tally button.
+  const [reviewVoucherId, setReviewVoucherId] = useState<string | null>(null);
+  const [sort, setSort] = useState<{ key: string; dir: "asc" | "desc" }>({
+    key: "date",
+    dir: "desc",
+  });
+  const [batch, setBatch] = useState("All");
 
   useEffect(() => {
     setForm(invoice ? invoiceToForm(invoice) : null);
@@ -123,6 +362,24 @@ function InvoicePage() {
     invoice?.totalAmount,
     processInvoice.isPending,
   ]);
+
+  // Invoice Processing owns voucher creation. Auto-prepare a draft voucher for
+  // each extracted invoice that has none yet, so the Entry Details column fills
+  // in (ledgers auto-mapped from Tally history) without opening every row.
+  // Idempotent and guarded to run once per invoice; invoices with no date are
+  // skipped because the backend will not invent a voucher date.
+  useEffect(() => {
+    if (!companyId) return;
+    const withVoucher = new Set((invoiceVouchers ?? []).map((v) => v.sourceId));
+    for (const i of invoices) {
+      if (i.status !== "PROCESSED" && i.status !== "NEEDS_REVIEW") continue;
+      if (!i.invoiceDate) continue;
+      if (withVoucher.has(i.id) || autoVoucher.current.has(i.id)) continue;
+      autoVoucher.current.add(i.id);
+      createVoucherFromInvoice.mutate({ invoiceId: i.id });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [companyId, invoices, invoiceVouchers]);
 
   const sourceDocument = useMemo(
     () => documents?.find((d) => d.id === invoice?.documentId) ?? null,
@@ -183,95 +440,279 @@ function InvoicePage() {
     );
   }
 
-  if (!invoices.length || !inv || !invoice || !form) {
-    const unlinked = (documents ?? []).filter((d) => !invoices.some((i) => i.documentId === d.id));
+  if (!inv || !invoice || !form) {
+    const voucherByInvoice = new Map<string, Voucher>();
+    for (const v of invoiceVouchers ?? []) {
+      if (v.sourceId && !voucherByInvoice.has(v.sourceId)) voucherByInvoice.set(v.sourceId, v);
+    }
+
+    // Batch code lives on the source document; map each invoice to it so the
+    // table can be filtered to one upload batch.
+    const batchByDoc = new Map((documents ?? []).map((d) => [d.id, d.batchCode]));
+    const batchOf = (i: UiInvoice) => (i.documentId ? batchByDoc.get(i.documentId) : null) ?? null;
+    // Only batches that actually back an invoice — bank-upload batches live in
+    // the same documents table but must not appear here.
+    const batchCodes = Array.from(
+      new Set(invoices.map((i) => batchOf(i)).filter(Boolean)),
+    ) as string[];
+
+    // Failed rows are hidden from the table; the records stay in the backend.
+    const rows = invoices.filter(
+      (i) =>
+        rowStatus(i, voucherByInvoice.get(i.id)) !== "Failed" &&
+        (batch === "All" || batchOf(i) === batch),
+    );
+
+    // Comparable value per sortable column. Money is compared with compareMoney
+    // (never Number()); everything else compares as its displayed string.
+    const sortText = (i: UiInvoice): string => {
+      const voucher = voucherByInvoice.get(i.id);
+      switch (sort.key) {
+        case "inv":
+          return i.invoiceNumber ?? "";
+        case "vendor":
+          return i.vendorName ?? "";
+        case "date":
+          return i.invoiceDate ?? "";
+        case "vmap":
+          return (vendors ?? []).find((v) => v.id === i.vendorId)?.name ?? "";
+        case "ledger":
+          return voucher?.voucherNumber ?? "";
+        case "status":
+          return rowStatus(i, voucher);
+        case "check":
+          return rowStatus(i, voucher) === "Needs Review" ? "Yes" : "No";
+        case "tally":
+          return tallyLabel(voucher);
+        default:
+          return "";
+      }
+    };
+    const visible = [...rows].sort((a, b) => {
+      const d = sort.dir === "asc" ? 1 : -1;
+      if (sort.key === "amount") return compareMoney(a.totalAmount, b.totalAmount) * d;
+      return sortText(a).localeCompare(sortText(b)) * d;
+    });
+
+    const toggleSort = (key: string) =>
+      setSort((s) => ({ key, dir: s.key === key && s.dir === "asc" ? "desc" : "asc" }));
+
+    const postRow = async (voucher: Voucher) => {
+      try {
+        const result = await postToTally.mutateAsync({ id: voucher.id, postingMonth });
+        if (result.success) {
+          toast.success(result.already_posted ? "Already posted to Tally" : "Posted to Tally");
+        } else {
+          toast.error(result.message || "Tally posting failed");
+        }
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not post to Tally");
+      }
+    };
+
+    const repushRow = async (voucher: Voucher) => {
+      if (
+        !window.confirm(
+          `Re-push voucher ${voucher.voucherNumber} to Tally? Tally updates the existing voucher (matched by REMOTEID); it does not create a duplicate.`,
+        )
+      )
+        return;
+      try {
+        const result = await postToTally.mutateAsync({
+          id: voucher.id,
+          postingMonth,
+          force: true,
+        });
+        if (result.success) {
+          toast.success("Re-pushed to Tally");
+        } else {
+          toast.error(result.message || "Tally re-push failed");
+        }
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not re-push to Tally");
+      }
+    };
+
     return (
       <>
-        <PageHeader title="Invoice Processing" description="Review and enter invoice data." />
+        <PageHeader
+          title="Invoice Processing"
+          description="Batch-processed invoices. Open a row to review; post approved ones to Tally."
+          actions={
+            <select
+              aria-label="Filter by batch code"
+              className={selectCls}
+              value={batch}
+              onChange={(e) => setBatch(e.target.value)}
+            >
+              <option value="All">All batches</option>
+              {batchCodes.map((code) => (
+                <option key={code} value={code}>
+                  {code}
+                </option>
+              ))}
+            </select>
+          }
+        />
         <InfoNotice>
-          Create a draft from a document and its blank fields are read automatically. Values are
-          stored as read or typed; missing fields stay blank and nothing is inferred or corrected.
+          Upload documents in the Document Inbox to process a batch. Each row shows the extracted
+          invoice and its mapping exactly as read — nothing is inferred. Rows needing a check must
+          be opened and corrected before they can be approved and posted.
         </InfoNotice>
-        <div className="mb-4 rounded-md border bg-card p-4">
-          <div className="flex flex-col items-center justify-center gap-2 py-4 text-center">
-            <p className="text-sm font-medium text-foreground">
-              {!invoices.length
-                ? "No invoices for this company"
-                : invoices.every((i) => i.status === "PROCESSED")
-                  ? "All invoices processed"
-                  : "Select an invoice"}
-            </p>
-            <p className="text-xs text-muted-foreground">
-              {unlinked.length
-                ? "Choose a document below to start entering invoice data."
-                : "Upload a document in the Document Inbox first."}
-            </p>
+
+        {!visible.length ? (
+          <div className="rounded-md border bg-card p-4">
+            <EmptyState
+              title="No invoices for this company"
+              hint="Upload documents in the Document Inbox to process a batch."
+            />
           </div>
-          {unlinked.length > 0 && (
-            <div className="mt-2 flex flex-wrap items-center justify-center gap-2">
-              <span className="text-sm text-muted-foreground">Create an invoice from</span>
-              <select
-                aria-label="Select document"
-                className={selectCls}
-                value=""
-                onChange={async (e) => {
-                  if (!e.target.value) return;
-                  try {
-                    const created = await createInvoice.mutateAsync({
-                      document_id: e.target.value,
-                    });
-                    navigate({ to: "/invoices", search: { inv: created.id } });
-                    toast.success("Invoice draft created");
-                  } catch (err) {
-                    toast.error(err instanceof Error ? err.message : "Could not create invoice");
-                  }
-                }}
-              >
-                <option value="">Choose a document…</option>
-                {unlinked.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-        </div>
-        {invoices.length > 0 && (
-          <div className="mb-4 rounded-md border bg-card">
-            <table className="w-full text-sm">
+        ) : (
+          <div className="overflow-x-auto rounded-md border bg-card">
+            <table className="w-full min-w-[960px] text-sm">
               <thead>
                 <tr className="border-b text-left text-xs text-muted-foreground">
-                  <th className="px-4 py-2">Invoice</th>
-                  <th className="px-4 py-2">Vendor</th>
-                  <th className="px-4 py-2">Status</th>
-                  <th className="px-4 py-2"></th>
+                  <SortHeader sort={sort} onSort={toggleSort} col="inv" label="Invoice No." />
+                  <SortHeader sort={sort} onSort={toggleSort} col="vendor" label="Vendor" />
+                  <SortHeader sort={sort} onSort={toggleSort} col="date" label="Date" />
+                  <SortHeader
+                    sort={sort}
+                    onSort={toggleSort}
+                    col="amount"
+                    label="Amount"
+                    align="right"
+                  />
+                  <SortHeader
+                    sort={sort}
+                    onSort={toggleSort}
+                    col="ledger"
+                    label="Entry Details"
+                    thClass="min-w-[300px]"
+                  />
+                  <SortHeader sort={sort} onSort={toggleSort} col="status" label="Status" />
+                  <SortHeader sort={sort} onSort={toggleSort} col="tally" label="Tally" />
+                  <th className="px-3 py-2 text-right">Action</th>
                 </tr>
               </thead>
               <tbody>
-                {invoices.map((i) => (
-                  <tr key={i.id} className="border-b last:border-0 hover:bg-muted/40">
-                    <td className="px-4 py-2 font-medium">{i.invoiceNumber || "Unnumbered"}</td>
-                    <td className="px-4 py-2 text-muted-foreground">{i.vendorName || "—"}</td>
-                    <td className="px-4 py-2">
-                      <StatusBadge status={i.status.replace("_", " ")} />
-                    </td>
-                    <td className="px-4 py-2 text-right">
-                      {i.status !== "PROCESSED" && (
-                        <button
-                          className="text-xs text-primary underline"
-                          onClick={() => navigate({ to: "/invoices", search: { inv: i.id } })}
-                        >
-                          Open
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
+                {visible.map((i) => {
+                  const voucher = voucherByInvoice.get(i.id);
+                  const status = rowStatus(i, voucher);
+                  const entryLines = [...(voucher?.lines ?? [])].sort(
+                    (a, b) => a.lineNumber - b.lineNumber,
+                  );
+                  const open = () => navigate({ to: "/invoices", search: { inv: i.id } });
+                  return (
+                    <tr
+                      key={i.id}
+                      className="cursor-pointer border-b last:border-0 hover:bg-muted/40"
+                      onClick={open}
+                    >
+                      <td className="px-3 py-2 font-medium">{i.invoiceNumber || "Unnumbered"}</td>
+                      <td className="px-3 py-2 text-muted-foreground">{i.vendorName || "—"}</td>
+                      <td className="px-3 py-2 num">
+                        {i.invoiceDate ? fmtDate(i.invoiceDate) : "—"}
+                      </td>
+                      <td className="px-3 py-2 num text-right font-bold">
+                        {fmtMoney(i.totalAmount)}
+                      </td>
+                      <td className="px-3 py-2">
+                        {voucher ? (
+                          <div className="flex flex-col leading-tight">
+                            <span className="num font-semibold">{voucher.voucherNumber}</span>
+                            {entryLines.map((l) => (
+                              <span key={l.id} className="text-xs text-muted-foreground">
+                                {l.ledgerName || "—"} —{" "}
+                                <span
+                                  className={cn(
+                                    "num font-medium",
+                                    l.side === "Dr" ? "text-success" : "text-destructive",
+                                  )}
+                                >
+                                  ₹{fmtMoney(l.amount)} {l.side}
+                                </span>
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          "—"
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        {status === "Needs Review" ? (
+                          <div className="flex items-start gap-1.5 text-warning">
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+                            <ul className="list-disc space-y-0.5 pl-4 text-xs">
+                              {(reviewReasons(i, voucher).length
+                                ? reviewReasons(i, voucher)
+                                : ["Manual check required"]
+                              ).map((r) => (
+                                <li key={r}>{r}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : (
+                          <StatusBadge status={status} />
+                        )}
+                        {voucher?.status === "POSTED" && (
+                          <div className="mt-1 text-xs text-muted-foreground">
+                            {voucher.postingReference && (
+                              <div className="num">Ref {voucher.postingReference}</div>
+                            )}
+                            {voucher.postedAt && (
+                              <div>
+                                {fmtDate(voucher.postedAt)}{" "}
+                                {new Date(voucher.postedAt).toLocaleTimeString([], {
+                                  hour: "2-digit",
+                                  minute: "2-digit",
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="px-3 py-2">
+                        <StatusBadge status={tallyLabel(voucher)} />
+                      </td>
+                      <td className="px-3 py-2 text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-end">
+                          <PostToTallyButton
+                            voucher={voucher}
+                            pending={postToTally.isPending}
+                            onPost={() => voucher && postRow(voucher)}
+                            onRepush={() => voucher && repushRow(voucher)}
+                            onOpen={() => (voucher ? setReviewVoucherId(voucher.id) : open())}
+                          />
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
+        <Dialog
+          open={Boolean(reviewVoucherId)}
+          onOpenChange={(o) => !o && setReviewVoucherId(null)}
+        >
+          <DialogContent className="max-h-[90vh] max-w-5xl overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Approve &amp; post voucher</DialogTitle>
+              <DialogDescription>
+                Review the voucher, submit and approve it, then post it to Tally — all here.
+              </DialogDescription>
+            </DialogHeader>
+            {reviewVoucherId && (
+              <VoucherReview
+                companyId={companyId}
+                voucherId={reviewVoucherId}
+                onDeleted={() => setReviewVoucherId(null)}
+                approveAndPost
+              />
+            )}
+          </DialogContent>
+        </Dialog>
       </>
     );
   }

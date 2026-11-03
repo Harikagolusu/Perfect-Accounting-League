@@ -28,11 +28,12 @@ from decimal import Decimal
 
 from sqlalchemy.orm import Session
 
+from app.models.bank import BankTransaction
 from app.models.invoice import Invoice
 from app.models.invoice_line_item import InvoiceLineItem
 from app.models.ledger import Ledger
 from app.schemas.voucher import LedgerSuggestion
-from app.services.ai import AIProviderError, get_ai_provider
+from app.services.ai import AIProviderError, get_ai_provider, get_reasoning_provider
 from app.services.ledger import is_posting_head_candidate
 
 logger = logging.getLogger(__name__)
@@ -207,4 +208,93 @@ def suggest_ledger_with_ai(
     )
 
 
-__all__ = ["suggest_ledger_with_ai"]
+_BANK_SYSTEM_PROMPT = (
+    "You are an Indian accounting assistant. You map one bank transaction to "
+    "exactly one counterparty ledger from a company's Tally ledger master. You "
+    "never invent a ledger name: you may only return a name that appears "
+    "verbatim in the supplied list, or null when none of them fits."
+)
+
+
+def _bank_context(transaction: BankTransaction) -> str:
+    is_credit = transaction.credit_amount > transaction.debit_amount
+    amount = transaction.credit_amount if is_credit else transaction.debit_amount
+    direction = (
+        "Money received into the bank account"
+        if is_credit
+        else "Money paid out of the bank account"
+    )
+    parts = [direction, f"Amount: {amount}"]
+    if transaction.description:
+        parts.append(f"Narration: {transaction.description}")
+    if transaction.reference_number:
+        parts.append(f"Reference/UTR: {transaction.reference_number}")
+    if transaction.counterparty_name:
+        parts.append(f"Counterparty: {transaction.counterparty_name}")
+    return "\n".join(parts)
+
+
+def suggest_bank_ledger_with_ai(
+    db: Session,
+    company_id: uuid.UUID,
+    *,
+    transaction: BankTransaction,
+    ledgers: list[Ledger],
+) -> LedgerSuggestion | None:
+    """Pick one active ledger for a bank transaction's counterparty side, or None.
+
+    The counterparty side is the accounting head the money came from or went to
+    — the mirror of the invoice expense/sales head — so it reuses the same
+    posting-head filtering, resolution and honesty rules.
+    """
+    candidates = [ledger for ledger in ledgers if is_posting_head_candidate(ledger)]
+    if not candidates or len(candidates) > _MAX_CANDIDATES:
+        return None
+
+    # Reasoning model: on real statements deepseek-chat returns null here (empty
+    # dropdown), while the reasoner picks a usable, reviewer-confirmed ledger.
+    provider = get_reasoning_provider()
+    if not provider.is_configured():
+        return None
+
+    prompt = (
+        "Pick the single best counterparty ledger for this bank transaction.\n\n"
+        f"{_bank_context(transaction)}\n\n"
+        "Available ledgers. Each line is '- NAME (group)'; the group is context "
+        "only, never part of the name:\n"
+        f"{_candidate_lines(candidates)}\n\n"
+        'Reply with JSON only: {"ledger_name": "<one NAME copied exactly, '
+        'without its (group), or null>", "reason": "<one short sentence>"}'
+    )
+
+    try:
+        response = provider.generate_from_text(
+            prompt,
+            system_prompt=_BANK_SYSTEM_PROMPT,
+            temperature=0.0,
+            json_mode=True,
+        )
+    except AIProviderError as exc:
+        logger.info("AI bank ledger suggestion unavailable: %s", exc.code)
+        return None
+
+    name, reason = _parse_choice(response.text)
+    if not name:
+        return None
+
+    ledger = _resolve_choice(name, candidates)
+    if ledger is None:
+        logger.info("AI bank ledger suggestion rejected, not a candidate: %r", name)
+        return None
+
+    return LedgerSuggestion(
+        purpose="COUNTERPARTY",
+        ledger_id=ledger.id,
+        ledger_name=ledger.name,
+        source="AI_SUGGESTION",
+        reason=reason or "Selected by AI from the company ledger master.",
+        code="AI_SUGGESTED_LEDGER",
+    )
+
+
+__all__ = ["suggest_bank_ledger_with_ai", "suggest_ledger_with_ai"]

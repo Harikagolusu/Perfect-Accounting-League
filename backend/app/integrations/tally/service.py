@@ -25,6 +25,7 @@ from app.integrations.tally.parser import (
 from app.integrations.tally.xml import (
     VoucherImportLine,
     build_company_collection_request,
+    build_gst_voucher_collection_request,
     build_ledger_collection_request,
     build_voucher_collection_request,
     build_voucher_import_request,
@@ -95,6 +96,8 @@ class TallyService:
         narration: str | None,
         lines: list[VoucherImportLine],
         remote_id: str,
+        reference: str | None = None,
+        reference_date: str | None = None,
     ) -> TallyImportResult:
         """Import one voucher into TallyPrime and report what Tally said.
 
@@ -119,6 +122,8 @@ class TallyService:
             narration=narration,
             lines=lines,
             remote_id=remote_id,
+            reference=reference,
+            reference_date=reference_date,
         )
         logger.info("Posting voucher %s to TallyPrime", voucher_number)
         # Request and response carry the company's ledger names and amounts, so
@@ -158,6 +163,40 @@ class TallyService:
                 message="No vouchers were returned by TallyPrime.",
             )
         return result
+
+    def get_gst_vouchers(
+        self,
+        company: str | None = None,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> TallyVoucherResult:
+        """Read vouchers for the GST working with a lighter, date-scoped fetch.
+
+        ``from_date``/``to_date`` are Tally's ``YYYYMMDD`` form. Fetches only
+        the fields GST needs, avoiding the c0000005 crash the full voucher fetch
+        triggers on some TallyPrime builds. Read-only.
+        """
+        if company is not None:
+            company = company.strip()
+            if not company:
+                raise TallyConfigurationError("Company name must not be blank.")
+        else:
+            companies = self.get_companies()
+            if not companies:
+                return TallyVoucherResult(
+                    company=None,
+                    vouchers=[],
+                    message="No company is loaded in TallyPrime.",
+                )
+            company = companies[0].name
+
+        raw = self._client.post_xml(
+            build_gst_voucher_collection_request(
+                company, from_date=from_date, to_date=to_date
+            )
+        )
+        return parse_vouchers(raw, company=company)
 
     def close(self) -> None:
         self._client.close()
