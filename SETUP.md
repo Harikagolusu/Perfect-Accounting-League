@@ -8,14 +8,69 @@ Repository: <https://github.com/Harikagolusu/Perfect-Accounting-League.git>
 
 ---
 
-## 1. Prerequisites
+## 1. Install the required tools
 
-Install these first:
+You need four tools: **Git**, **Node.js**, **Python**, and **PostgreSQL**. If your
+machine has none of them, install them first. After installing, **open a new
+terminal** so the updated PATH is picked up.
 
-- **Node.js** 18 or newer (and npm)
-- **Python** 3.12 or newer
-- **PostgreSQL** 14 or newer (running locally)
-- A **DeepSeek API key** — create one at <https://platform.deepseek.com/api_keys>
+### Windows
+
+Windows 10/11 ships with `winget`. In PowerShell:
+
+```powershell
+winget install Git.Git
+winget install OpenJS.NodeJS.LTS
+winget install Python.Python.3.12
+winget install PostgreSQL.PostgreSQL.16
+```
+
+If `winget` is not available, download and run the installers directly:
+
+- Git — <https://git-scm.com/download/win>
+- Node.js LTS — <https://nodejs.org/en/download>
+- Python 3.12 — <https://www.python.org/downloads/windows/> (tick **"Add
+  python.exe to PATH"** in the installer)
+- PostgreSQL 16 — <https://www.postgresql.org/download/windows/> (set a password
+  for the `postgres` user and remember it)
+
+The PostgreSQL tools (`psql`, `createdb`) may not be on PATH. If step 3d fails
+with "command not found", add `C:\Program Files\PostgreSQL\16\bin` to your PATH,
+or run those commands from the **"SQL Shell (psql)"** app the installer adds.
+
+### macOS (Homebrew)
+
+```sh
+brew install git node python@3.12 postgresql@16
+brew services start postgresql@16
+```
+
+### Linux (Debian/Ubuntu)
+
+```sh
+sudo apt update
+sudo apt install -y git nodejs npm python3.12 python3.12-venv postgresql
+```
+
+### Verify
+
+Open a new terminal and confirm each tool is found:
+
+```sh
+git --version
+node -v
+python --version
+pip --version
+psql --version
+```
+
+If any command is "not found", that tool is not installed or not on PATH — fix
+that before continuing.
+
+### DeepSeek key
+
+Create your own API key at <https://platform.deepseek.com/api_keys>. You set it
+in step 3c. No key, no extraction.
 
 ---
 
