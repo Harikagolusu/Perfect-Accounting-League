@@ -83,6 +83,14 @@ cd Perfect-Accounting-League
 
 The frontend lives at the repository root; the backend is in `backend/`.
 
+### Windows quick start
+
+Once the tools in section 1 are installed, you can skip steps 3 and 4: from the
+repository root, double-click **`setup.bat`** (or run it in a terminal). It
+installs backend and frontend dependencies, asks for your DeepSeek key, creates
+and migrates the database, and starts both servers. It is safe to re-run. To do
+it manually instead, follow steps 3 and 4 below.
+
 ---
 
 ## 3. Backend (FastAPI)
