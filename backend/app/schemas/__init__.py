@@ -15,6 +15,10 @@ from app.schemas.bank import (
     ProcessStatementResponse,
 )
 from app.schemas.company import CompanyCreate, CompanyResponse, CompanyUpdate
+from app.schemas.company_settings import (
+    CompanySettingsResponse,
+    CompanySettingsUpdate,
+)
 from app.schemas.document import DocumentResponse
 from app.schemas.exports import ExportIssueResponse, ExportPreviewResponse
 from app.schemas.invoice import (
@@ -57,6 +61,8 @@ __all__ = [
     "BankTransactionResponse",
     "CompanyCreate",
     "CompanyResponse",
+    "CompanySettingsResponse",
+    "CompanySettingsUpdate",
     "CompanyUpdate",
     "DocumentResponse",
     "ExportIssueResponse",

@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Plus, Pencil, History, Trash2 } from "lucide-react";
+import { Plus, Pencil, History, Trash2, RefreshCw } from "lucide-react";
 import { PageHeader, StatusBadge, Field, KV, EmptyState } from "@/components/pal/common";
 import { DataTable, FilterSelect } from "@/components/pal/data-table";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,7 @@ import {
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { useCompany } from "@/lib/store";
 import { useAccountingAudit } from "@/lib/queries/accountingAudit";
+import { useTallyVendorSync } from "@/lib/queries/tally";
 import { fmtDate, GSTIN_RE, PAN_RE } from "@/lib/format";
 import {
   useCreateVendor,
@@ -73,7 +74,7 @@ function VendorDialog({ initial, onClose }: { initial: Vendor | null; onClose: (
     try {
       if (wasExisting) await updateVendor.mutateAsync(v);
       else await createVendor.mutateAsync({ ...v, id: "" });
-      toast.success(wasExisting ? "Vendor updated" : "Vendor added");
+      toast.success(wasExisting ? "Vendor updated" : "Vendor added and its ledger created in Tally");
       onClose();
     } catch (e2) {
       toast.error(e2 instanceof Error ? e2.message : "Could not save vendor");
@@ -159,6 +160,7 @@ function VendorsPage() {
   const { data: audit = [] } = useAccountingAudit(companyId);
   const vendorActivity = audit.filter((a) => a.module === "Vendor Master");
   const deactivate = useDeactivateVendor(companyId);
+  const vendorSync = useTallyVendorSync();
   const [status, setStatus] = useState("All");
   const [editing, setEditing] = useState<Vendor | null | undefined>(undefined);
   const [history, setHistory] = useState<Vendor | null>(null);
@@ -174,16 +176,43 @@ function VendorsPage() {
     }
   };
 
+  const onSync = () => {
+    const tallyCompanyName = company?.legalName || company?.displayName || "";
+    if (!companyId || !tallyCompanyName) return;
+    vendorSync.mutate(
+      { companyId, tallyCompanyName },
+      {
+        onSuccess: (r) =>
+          r.success
+            ? toast.success(
+                `Vendor sync complete — ${r.vendors_created} added, ${r.vendors_updated} updated`,
+              )
+            : toast.error(`Vendor sync failed: ${r.error_message}`),
+        onError: (e) => toast.error(e.message),
+      },
+    );
+  };
+
   return (
     <>
       <PageHeader
         title="Vendor Master"
         description={`Vendors and ledger grouping for ${company?.displayName ?? "the selected company"}.`}
         actions={
-          <Button onClick={() => setEditing(null)} disabled={!companyId}>
-            <Plus />
-            Add Vendor
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              onClick={onSync}
+              disabled={!companyId || vendorSync.isPending}
+            >
+              <RefreshCw className={vendorSync.isPending ? "animate-spin" : undefined} />
+              {vendorSync.isPending ? "Syncing…" : "Sync from Tally"}
+            </Button>
+            <Button onClick={() => setEditing(null)} disabled={!companyId}>
+              <Plus />
+              Add Vendor
+            </Button>
+          </>
         }
       />
       {!companyId ? (

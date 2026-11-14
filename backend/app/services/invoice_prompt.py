@@ -28,6 +28,7 @@ Rules:
 - Do not calculate taxes. Do not verify or change a total. Do not apply any
   tax, TDS or accounting rule.
 - Extract the vendor as printed. Do not match it to a vendor master record.
+- buyer_name is the "Bill To" / buyer / customer name as printed.
 - If the document is clearly not an invoice (for example a bank statement,
   receipt, delivery note or letter), set is_invoice to false and return null
   for every data field.
@@ -48,6 +49,7 @@ Return one JSON object with exactly these keys:
   "vendor_name": null,
   "vendor_gstin": null,
   "vendor_pan": null,
+  "buyer_name": null,
   "buyer_gstin": null,
   "place_of_supply": null,
   "po_number": null,
@@ -157,6 +159,7 @@ Return one JSON object with exactly these keys:
   "vendor_name": null,
   "vendor_gstin": null,
   "vendor_pan": null,
+  "buyer_name": null,
   "buyer_gstin": null,
   "place_of_supply": null,
   "po_number": null,

@@ -112,6 +112,8 @@ export interface InvoiceDto {
   document_id: string;
   /** Derived server-side from the stored figures; recomputed on every read. */
   validation_issues?: string[];
+  /** Why the last extraction failed or needs a person; null when clean. */
+  extraction_message?: string | null;
   vendor_id: string | null;
   suggested_vendor_id: string | null;
   previous_vendor_id: string | null;
@@ -124,8 +126,11 @@ export interface InvoiceDto {
   vendor_gstin: string | null;
   vendor_pan: string | null;
   buyer_gstin: string | null;
+  buyer_name?: string | null;
   po_number: string | null;
   currency: string;
+  /** INR per one unit of `currency`; null for INR invoices. */
+  exchange_rate?: string | null;
   direction: InvoiceDirection;
   taxable_amount: string | null;
   cgst_amount: string | null;
@@ -151,8 +156,10 @@ export interface InvoiceWriteDto {
   vendor_gstin?: string | null;
   vendor_pan?: string | null;
   buyer_gstin?: string | null;
+  buyer_name?: string | null;
   po_number?: string | null;
   currency?: string;
+  exchange_rate?: string | null;
   direction?: InvoiceDirection;
   taxable_amount?: string | null;
   cgst_amount?: string | null;
@@ -189,8 +196,10 @@ export interface InvoiceFormValues {
   vendorGstin: string;
   vendorPan: string;
   buyerGstin: string;
+  buyerName: string;
   poNumber: string;
   currency: string;
+  exchangeRate: string;
   direction: InvoiceDirection;
   taxableAmount: string;
   cgstAmount: string;
@@ -214,6 +223,7 @@ export const toInvoice = (dto: InvoiceDto) => ({
   vendorMappingStatus: dto.vendor_mapping_status,
   vendorMatchMethod: dto.vendor_match_method,
   validationIssues: dto.validation_issues ?? [],
+  extractionMessage: dto.extraction_message ?? null,
   invoiceNumber: dto.invoice_number,
   invoiceDate: dto.invoice_date,
   dueDate: dto.due_date,
@@ -221,8 +231,10 @@ export const toInvoice = (dto: InvoiceDto) => ({
   vendorGstin: dto.vendor_gstin,
   vendorPan: dto.vendor_pan,
   buyerGstin: dto.buyer_gstin,
+  buyerName: dto.buyer_name ?? "",
   poNumber: dto.po_number,
   currency: dto.currency,
+  exchangeRate: dto.exchange_rate ?? null,
   direction: dto.direction,
   taxableAmount: dto.taxable_amount,
   cgstAmount: dto.cgst_amount,
@@ -273,8 +285,10 @@ export const toInvoicePayload = (form: Partial<InvoiceFormValues>): InvoiceWrite
   if ("vendorGstin" in form) payload.vendor_gstin = optional(form.vendorGstin);
   if ("vendorPan" in form) payload.vendor_pan = optional(form.vendorPan);
   if ("buyerGstin" in form) payload.buyer_gstin = optional(form.buyerGstin);
+  if ("buyerName" in form) payload.buyer_name = optional(form.buyerName);
   if ("poNumber" in form) payload.po_number = optional(form.poNumber);
   if ("currency" in form && form.currency) payload.currency = form.currency.trim().toUpperCase();
+  if ("exchangeRate" in form) payload.exchange_rate = optional(form.exchangeRate);
   if ("direction" in form && form.direction) payload.direction = form.direction;
   if ("taxableAmount" in form) payload.taxable_amount = optional(form.taxableAmount);
   if ("cgstAmount" in form) payload.cgst_amount = optional(form.cgstAmount);
@@ -295,8 +309,10 @@ export const invoiceToForm = (invoice: UiInvoice): InvoiceFormValues => ({
   vendorGstin: blank(invoice.vendorGstin),
   vendorPan: blank(invoice.vendorPan),
   buyerGstin: blank(invoice.buyerGstin),
+  buyerName: blank(invoice.buyerName),
   poNumber: blank(invoice.poNumber),
   currency: invoice.currency,
+  exchangeRate: blank(invoice.exchangeRate),
   direction: invoice.direction,
   taxableAmount: blank(invoice.taxableAmount),
   cgstAmount: blank(invoice.cgstAmount),

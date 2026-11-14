@@ -20,15 +20,19 @@ from app.integrations.tally.parser import (
     parse_companies,
     parse_import_result,
     parse_ledgers,
+    parse_stock_items,
+    parse_voucher_references,
     parse_vouchers,
 )
 from app.integrations.tally.xml import (
     VoucherImportLine,
     build_company_collection_request,
-    build_gst_voucher_collection_request,
     build_ledger_collection_request,
+    build_ledger_import_request,
+    build_stock_item_collection_request,
     build_voucher_collection_request,
     build_voucher_import_request,
+    build_voucher_register_request,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,6 +138,32 @@ class TallyService:
         logger.debug("Tally import response for %s:\n%s", voucher_number, raw)
         return parse_import_result(raw)
 
+    def create_ledger(
+        self,
+        *,
+        name: str,
+        parent: str,
+        company: str | None = None,
+        gstin: str | None = None,
+    ) -> TallyImportResult:
+        """Create one ledger master in TallyPrime and report what Tally said.
+
+        Raises TallyError on a transport/HTTP/XML failure; a 200 that Tally
+        rejected comes back as a result with errors/exceptions set (see
+        ``TallyImportResult.accepted``), not an exception.
+        """
+        payload = build_ledger_import_request(
+            company=company.strip() if company else None,
+            name=name,
+            parent=parent,
+            gstin=gstin,
+        )
+        logger.info("Creating ledger %r in TallyPrime", name)
+        logger.debug("Tally ledger import request for %r:\n%s", name, payload)
+        raw = self._client.post_xml(payload)
+        logger.debug("Tally ledger import response for %r:\n%s", name, raw)
+        return parse_import_result(raw)
+
     def get_vouchers(self, company: str | None = None) -> TallyVoucherResult:
         """Read accounting vouchers for ``company`` or the first loaded company.
 
@@ -170,12 +200,15 @@ class TallyService:
         *,
         from_date: str | None = None,
         to_date: str | None = None,
+        with_inventory: bool = False,
     ) -> TallyVoucherResult:
-        """Read vouchers for the GST working with a lighter, date-scoped fetch.
+        """Read every voucher for the GST working; the caller filters by date.
 
-        ``from_date``/``to_date`` are Tally's ``YYYYMMDD`` form. Fetches only
-        the fields GST needs, avoiding the c0000005 crash the full voucher fetch
-        triggers on some TallyPrime builds. Read-only.
+        ``from_date``/``to_date`` are accepted for the caller's convenience but
+        not sent to Tally: the Day Book export honoured them on paper yet, on
+        real builds, returned only the current date's single voucher. The full
+        voucher collection returns the whole period, and
+        ``compute_tally_gst_working`` filters it by ``voucher.date``. Read-only.
         """
         if company is not None:
             company = company.strip()
@@ -192,11 +225,33 @@ class TallyService:
             company = companies[0].name
 
         raw = self._client.post_xml(
-            build_gst_voucher_collection_request(
+            build_voucher_collection_request(company, with_inventory=with_inventory)
+        )
+        return parse_vouchers(raw, company=company)
+
+    def get_stock_items(self, company: str) -> dict[str, str]:
+        """Read stock item name -> HSN/SAC code for a company. Read-only."""
+        raw = self._client.post_xml(build_stock_item_collection_request(company))
+        return parse_stock_items(raw)
+
+    def get_voucher_references(
+        self,
+        company: str,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> dict[str, str]:
+        """Read voucher GUID -> Supplier Invoice No. (REFERENCE) for a period.
+
+        Uses the Voucher Register report, the only export that exposes REFERENCE
+        for every voucher and honours the date range. Read-only.
+        """
+        raw = self._client.post_xml(
+            build_voucher_register_request(
                 company, from_date=from_date, to_date=to_date
             )
         )
-        return parse_vouchers(raw, company=company)
+        return parse_voucher_references(raw)
 
     def close(self) -> None:
         self._client.close()

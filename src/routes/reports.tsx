@@ -14,12 +14,15 @@ import {
 } from "@/components/ui/dialog";
 import { FilterSelect } from "@/components/pal/data-table";
 import { useCompany, useScoped, useStore } from "@/lib/store";
-import type { BankTransaction } from "@/lib/types";
+import { useBankStatements } from "@/lib/queries/bankStatements";
+import { useBankAccounts } from "@/lib/queries/bankAccounts";
 import { useDocuments } from "@/lib/queries/documents";
 import { useVendors } from "@/lib/queries/vendors";
 import { useAccountingAudit } from "@/lib/queries/accountingAudit";
+import { useGstWorking } from "@/lib/queries/gst";
+import { useTallyTdsWorkingReport } from "@/lib/queries/tally";
+import { useInvoices } from "@/lib/queries/invoices";
 import { exportFile, type ExportFormat } from "@/lib/export";
-import { tdsDue } from "@/lib/tds";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -37,17 +40,26 @@ function ReportsPage() {
   const company = useCompany();
   const { data: docs = [] } = useDocuments(company?.id);
   const { data: vendors = [] } = useVendors(company?.id, true);
-  const tds = useScoped(s.tds),
-    reco = useScoped(s.reco);
-  // Bank data is persisted per statement (see Bank Statements). A combined
-  // period report over the API is not wired yet, so this stays empty.
-  const bank: BankTransaction[] = [];
+  const reco = useScoped(s.reco);
+  const { data: statements = [] } = useBankStatements(company?.id);
+  const { data: bankAccounts = [] } = useBankAccounts(company?.id);
   const { data: audit = [] } = useAccountingAudit(company?.id);
   const [q, setQ] = useState("");
   const [type, setType] = useState("All");
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
+  // Real GSTR-1/GSTR-3B working from the backend (same /gst/working the GST
+  // Workings page uses), so the GST Working Report shows computed numbers.
+  const { data: gstWorking } = useGstWorking(company?.id, from || undefined, to || undefined);
+  // TDS working from TallyPrime, same source the TDS Workings page uses. The
+  // chosen date range, or the whole financial year when no range is set.
+  const tdsName = company?.legalName ?? company?.displayName;
+  const fyStart = Number(s.financialYear.match(/\d{4}/)?.[0]);
+  const tdsFrom = from || (fyStart ? `${fyStart}-04-01` : undefined);
+  const tdsTo = to || (fyStart ? `${fyStart + 1}-03-31` : undefined);
+  const { data: tdsWorking } = useTallyTdsWorkingReport(company?.id, tdsName, tdsFrom, tdsTo);
+  const { data: invoices = [] } = useInvoices(company?.id);
   const inRange = (d: string) => (!from || d >= from) && (!to || d.slice(0, 10) <= to);
 
   if (!company) {
@@ -87,44 +99,54 @@ function ReportsPage() {
       name: "Purchase Register Report",
       cat: "Processing",
       build: () =>
-        reco
-          .filter((r) => r.booksTaxable != null && inRange(r.invoiceDate))
-          .map((r) => ({
-            Supplier: r.supplier,
-            GSTIN: r.gstin,
-            InvoiceNo: r.invoiceNo,
-            Date: r.invoiceDate,
-            Taxable: r.booksTaxable,
-            GST: r.booksGst,
+        invoices
+          .filter((i) => i.direction === "PURCHASE" && i.invoiceDate && inRange(i.invoiceDate))
+          .map((i) => ({
+            Supplier: i.vendorName,
+            GSTIN: i.vendorGstin,
+            InvoiceNo: i.invoiceNumber,
+            Date: i.invoiceDate,
+            Taxable: Number(i.taxableAmount) || 0,
+            GST:
+              (Number(i.igstAmount) || 0) +
+              (Number(i.cgstAmount) || 0) +
+              (Number(i.sgstAmount) || 0),
           })),
     },
     {
       name: "GST Working Report",
       cat: "Tax",
-      build: () =>
-        reco
-          .filter((r) => inRange(r.invoiceDate))
-          .map((r) => ({
-            Supplier: r.supplier,
-            Taxable: r.booksTaxable,
-            GST: r.booksGst,
-            Period: s.period,
-          })),
+      build: () => {
+        const w = gstWorking;
+        if (!w) return [];
+        const rows = (section: string, list: typeof w.gstr1) =>
+          list.map((r) => ({
+            Section: section,
+            Category: r.category,
+            Taxable: Number(r.taxable),
+            IGST: Number(r.igst),
+            CGST: Number(r.cgst),
+            SGST: Number(r.sgst),
+          }));
+        return [...rows("GSTR-1", w.gstr1), ...rows("GSTR-3B", w.gstr3b)];
+      },
     },
     {
       name: "TDS Working Report",
       cat: "Tax",
-      build: () =>
-        tds
-          .filter((t) => inRange(t.voucherDate))
-          .map((t) => ({
-            Voucher: t.voucherNo,
-            Vendor: t.vendor,
-            Section: t.section,
-            Base: t.base,
-            Due: tdsDue(t),
-            Deducted: t.deducted,
-          })),
+      build: () => {
+        if (!tdsWorking || !tdsWorking.success) return [];
+        return tdsWorking.rows.map((t) => ({
+          Date: t.voucher_date,
+          Voucher: t.voucher_number,
+          Vendor: t.party_name,
+          PAN: t.pan,
+          Section: t.section,
+          Base: Number(t.base),
+          TDS: Number(t.tds),
+          Rate: Number(t.rate),
+        }));
+      },
     },
     {
       name: "GST Reconciliation Report",
@@ -143,17 +165,24 @@ function ReportsPage() {
     {
       name: "Bank Statement Report",
       cat: "Processing",
-      build: () =>
-        bank
-          .filter((b) => inRange(b.date))
-          .map((b) => ({
-            Date: b.date,
-            Narration: b.cleanNarration,
-            Debit: b.debit,
-            Credit: b.credit,
-            Ledger: b.ledger,
-            Status: b.status,
-          })),
+      build: () => {
+        const acct = (id: string) => bankAccounts.find((a) => a.id === id);
+        return statements
+          .filter((st) => inRange(st.statementStartDate ?? st.statementEndDate ?? ""))
+          .map((st) => {
+            const a = acct(st.bankAccountId);
+            return {
+              BankAccount: a ? `${a.bankName} · ${a.accountName}` : st.bankAccountId,
+              AccountNo: a?.maskedAccountNumber ?? "—",
+              PeriodStart: st.statementStartDate ?? "—",
+              PeriodEnd: st.statementEndDate ?? "—",
+              Opening: st.openingBalance ?? "—",
+              Closing: st.closingBalance ?? "—",
+              Currency: st.currency,
+              Status: st.status,
+            };
+          });
+      },
     },
     {
       name: "Vendor Ledger Grouping Report",

@@ -15,6 +15,7 @@ import { Route as BankRouteImport } from './routes/bank'
 import { Route as GstRouteImport } from './routes/gst'
 import { Route as InboxRouteImport } from './routes/inbox'
 import { Route as InvoicesRouteImport } from './routes/invoices'
+import { Route as ProfileRouteImport } from './routes/profile'
 import { Route as ReconciliationRouteImport } from './routes/reconciliation'
 import { Route as ReportsRouteImport } from './routes/reports'
 import { Route as ReviewRouteImport } from './routes/review'
@@ -54,6 +55,11 @@ const InboxRoute = InboxRouteImport.update({
 const InvoicesRoute = InvoicesRouteImport.update({
   id: '/invoices',
   path: '/invoices',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ProfileRoute = ProfileRouteImport.update({
+  id: '/profile',
+  path: '/profile',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ReconciliationRoute = ReconciliationRouteImport.update({
@@ -114,6 +120,7 @@ export interface FileRoutesByFullPath {
   '/gst': typeof GstRoute
   '/inbox': typeof InboxRoute
   '/invoices': typeof InvoicesRoute
+  '/profile': typeof ProfileRoute
   '/reconciliation': typeof ReconciliationRoute
   '/reports': typeof ReportsRoute
   '/review': typeof ReviewRoute
@@ -132,6 +139,7 @@ export interface FileRoutesByTo {
   '/gst': typeof GstRoute
   '/inbox': typeof InboxRoute
   '/invoices': typeof InvoicesRoute
+  '/profile': typeof ProfileRoute
   '/reconciliation': typeof ReconciliationRoute
   '/reports': typeof ReportsRoute
   '/review': typeof ReviewRoute
@@ -151,6 +159,7 @@ export interface FileRoutesById {
   '/gst': typeof GstRoute
   '/inbox': typeof InboxRoute
   '/invoices': typeof InvoicesRoute
+  '/profile': typeof ProfileRoute
   '/reconciliation': typeof ReconciliationRoute
   '/reports': typeof ReportsRoute
   '/review': typeof ReviewRoute
@@ -171,6 +180,7 @@ export interface FileRouteTypes {
     | '/gst'
     | '/inbox'
     | '/invoices'
+    | '/profile'
     | '/reconciliation'
     | '/reports'
     | '/review'
@@ -189,6 +199,7 @@ export interface FileRouteTypes {
     | '/gst'
     | '/inbox'
     | '/invoices'
+    | '/profile'
     | '/reconciliation'
     | '/reports'
     | '/review'
@@ -207,6 +218,7 @@ export interface FileRouteTypes {
     | '/gst'
     | '/inbox'
     | '/invoices'
+    | '/profile'
     | '/reconciliation'
     | '/reports'
     | '/review'
@@ -226,6 +238,7 @@ export interface RootRouteChildren {
   GstRoute: typeof GstRoute
   InboxRoute: typeof InboxRoute
   InvoicesRoute: typeof InvoicesRoute
+  ProfileRoute: typeof ProfileRoute
   ReconciliationRoute: typeof ReconciliationRoute
   ReportsRoute: typeof ReportsRoute
   ReviewRoute: typeof ReviewRoute
@@ -280,6 +293,13 @@ declare module '@tanstack/react-router' {
       path: '/invoices'
       fullPath: '/invoices'
       preLoaderRoute: typeof InvoicesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/profile': {
+      id: '/profile'
+      path: '/profile'
+      fullPath: '/profile'
+      preLoaderRoute: typeof ProfileRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/reconciliation': {
@@ -362,6 +382,7 @@ const rootRouteChildren: RootRouteChildren = {
   GstRoute: GstRoute,
   InboxRoute: InboxRoute,
   InvoicesRoute: InvoicesRoute,
+  ProfileRoute: ProfileRoute,
   ReconciliationRoute: ReconciliationRoute,
   ReportsRoute: ReportsRoute,
   ReviewRoute: ReviewRoute,

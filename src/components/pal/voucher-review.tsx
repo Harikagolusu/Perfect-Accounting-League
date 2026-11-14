@@ -166,16 +166,16 @@ function SlideToPost({
         )}
         style={{
           width: x + KNOB,
-          transition: dragging ? "background-color 150ms" : `width 300ms ${ease}, background-color 150ms`,
+          transition: dragging
+            ? "background-color 150ms"
+            : `width 300ms ${ease}, background-color 150ms`,
         }}
       />
       <span
         className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1 text-sm font-medium text-muted-foreground transition-colors"
         style={{ opacity: 1 - progress * 0.9 }}
       >
-        {!pending && !armed && (
-          <ChevronsRight className="h-4 w-4 animate-pulse text-primary/60" />
-        )}
+        {!pending && !armed && <ChevronsRight className="h-4 w-4 animate-pulse text-primary/60" />}
         {label}
       </span>
       <button
@@ -200,7 +200,9 @@ function SlideToPost({
         className={cn(
           "relative z-10 flex h-10 w-10 touch-none items-center justify-center rounded-full text-primary-foreground shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
           "bg-gradient-to-b",
-          armed ? "from-success to-success/85 ring-2 ring-success/40" : "from-primary to-primary/85",
+          armed
+            ? "from-success to-success/85 ring-2 ring-success/40"
+            : "from-primary to-primary/85",
           off ? "cursor-default" : "cursor-grab active:cursor-grabbing",
         )}
       >
@@ -315,6 +317,11 @@ export function VoucherReview({
   };
 
   const save = async () => {
+    const unmapped = resolvedLines.findIndex((line) => !line.ledgerId && !line.ledgerName.trim());
+    if (unmapped >= 0) {
+      toast.error(`Line ${unmapped + 1} has no ledger. Select one before saving.`);
+      return;
+    }
     try {
       await updateVoucher.mutateAsync({
         id: voucher.id,
@@ -381,7 +388,10 @@ export function VoucherReview({
           return;
         }
       }
-      await approve.mutateAsync({ id: voucher.id, body: { actor, comment: comment.trim() || null } });
+      await approve.mutateAsync({
+        id: voucher.id,
+        body: { actor, comment: comment.trim() || null },
+      });
       toast.success("Voucher approved — slide to post to Tally.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not approve the voucher");
@@ -498,7 +508,9 @@ export function VoucherReview({
         </div>
       )}
 
-      <div className="rounded border">
+      {/* Scrolls sideways rather than squeezing the inputs: a squeezed Amount
+          box cut figures like 1,08,500.00 down to "10". */}
+      <div className="overflow-x-auto rounded border">
         <table className="w-full text-sm">
           <thead className="bg-muted/50 text-left text-xs text-muted-foreground">
             <tr>
@@ -549,7 +561,7 @@ export function VoucherReview({
                 <td className="p-2 text-right">
                   {editable ? (
                     <Input
-                      className="num h-9 text-right"
+                      className="num h-9 w-36 min-w-36 text-right"
                       inputMode="decimal"
                       value={line.amount}
                       onChange={(event) => setLine(index, { amount: event.target.value })}
@@ -770,7 +782,8 @@ export function VoucherReview({
         {voucher.status === "POSTED" && (
           <span className="flex items-center gap-1.5 text-xs text-success">
             <CheckCircle2 className="h-4 w-4" />
-            Posted to Tally
+            Accounted in Tally
+            {voucher.postedAt ? ` on ${fmtDate(voucher.postedAt)}` : ""}
             {voucher.postingReference ? ` · ${voucher.postingReference}` : ""}
           </span>
         )}

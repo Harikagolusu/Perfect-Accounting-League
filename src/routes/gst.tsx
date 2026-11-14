@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
-import { Play, Download, CheckCheck, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Play, Download, RefreshCw } from "lucide-react";
 import {
   PageHeader,
   Section,
@@ -15,10 +15,13 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useCompany, useStore } from "@/lib/store";
 import { useTallyGstWorking } from "@/lib/queries/tally";
+import { useGstWorking } from "@/lib/queries/gst";
+import type { GstWorkingRowDto } from "@/lib/api/gst";
 import { FINANCIAL_YEARS, PERIODS, periodMonthStart } from "@/lib/constants";
 import { useVendors } from "@/lib/queries/vendors";
 import { fmtINR } from "@/lib/format";
-import { exportFile, exportSheets } from "@/lib/export";
+import { exportFile, downloadBlob } from "@/lib/export";
+import { tallyApi } from "@/lib/api/tally";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 import { IndianRupee, Receipt, ShieldCheck, Ban } from "lucide-react";
@@ -30,6 +33,21 @@ export const Route = createFileRoute("/gst")({
 
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 type Row = { category: string; taxable: number; igst: number; cgst: number; sgst: number };
+
+const TALLY_SOURCE = "TallyPrime vouchers";
+const BOOKS_SOURCE = "Books + Processed Invoices";
+const num = (v: string) => Number(v) || 0;
+
+/** Fill rows from a backend working, matching on the category label. */
+const applyWorking = (rows: Row[], dto: GstWorkingRowDto[]): Row[] => {
+  const by = new Map(dto.map((d) => [d.category, d]));
+  return rows.map((r) => {
+    const d = by.get(r.category);
+    return d
+      ? { ...r, taxable: num(d.taxable), igst: num(d.igst), cgst: num(d.cgst), sgst: num(d.sgst) }
+      : r;
+  });
+};
 
 const emptyR1 = (): Row[] => [
   { category: "B2B - Registered", taxable: 0, igst: 0, cgst: 0, sgst: 0 },
@@ -114,22 +132,53 @@ function GSTPage() {
   const [r1, setR1] = useState(emptyR1);
   const [r3, setR3] = useState(emptyR3);
   const [key, setKey] = useState(company?.id ?? "");
-  const [source, setSource] = useState("Books + Processed Invoices");
+  const [source, setSource] = useState(TALLY_SOURCE);
   const [status, setStatus] = useState<"Draft" | "Generated" | "Reviewed">("Draft");
+  // True once a manual Tally pull has filled the tables, so the Books auto-fill
+  // does not overwrite it. Cleared when the period, company or source changes.
+  const [tallyFilled, setTallyFilled] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const gstSync = useTallyGstWorking();
+  // Last company|period auto-synced from Tally, so the auto-sync fires once per
+  // period rather than on every render.
+  const autoSyncedKey = useRef("");
+
+  // The selected FY + tax period as an inclusive [start, end] date range.
+  const start = periodMonthStart(s.financialYear, s.period);
+  let end: string | undefined;
+  if (start) {
+    const y = Number(start.slice(0, 4));
+    const m = Number(start.slice(5, 7));
+    const lastDay = new Date(y, m, 0).getDate();
+    end = `${start.slice(0, 7)}-${String(lastDay).padStart(2, "0")}`;
+  }
+
+  // Working computed from PAL's own processed invoices (buyer GSTIN + place of
+  // supply), the only source that can split GSTR-1 by B2B/B2C/export/nil.
+  const fromBooks = source === BOOKS_SOURCE;
+  const fromTally = source === TALLY_SOURCE;
+  // Under Tally we still need the invoice-derived GSTR-1 (Tally vouchers carry
+  // no customer GSTIN), so fetch Books for either source.
+  const books = useGstWorking(company?.id, start, end, fromBooks || fromTally);
+  useEffect(() => {
+    if (!books.data) return;
+    if (fromBooks) {
+      setR1((rows) => applyWorking(rows, books.data!.gstr1));
+      // GSTR-3B from Books only until a manual Tally pull supplies the totals.
+      if (!tallyFilled) setR3((rows) => applyWorking(rows, books.data!.gstr3b));
+      setStatus("Generated");
+    } else if (fromTally) {
+      // GSTR-1 from Books; GSTR-3B is filled by the Tally sync, not here.
+      setR1((rows) => applyWorking(rows, books.data!.gstr1));
+    }
+  }, [fromBooks, fromTally, tallyFilled, books.data]);
+  // A new period or company means the pulled Tally numbers no longer apply, so
+  // let Books take over again until the next manual sync.
+  useEffect(() => setTallyFilled(false), [start, end, company?.id]);
 
   const syncFromTally = () => {
     const name = company?.legalName ?? company?.displayName ?? "";
     if (!company || !name) return toast.error("This company has no name to match in Tally.");
-    const start = periodMonthStart(s.financialYear, s.period);
-    let end: string | undefined;
-    if (start) {
-      const y = Number(start.slice(0, 4));
-      const m = Number(start.slice(5, 7));
-      const lastDay = new Date(y, m, 0).getDate();
-      end = `${start.slice(0, 7)}-${String(lastDay).padStart(2, "0")}`;
-    }
-    const num = (v: string) => Number(v) || 0;
     gstSync.mutate(
       { companyId: company.id, tallyCompanyName: name, fromDate: start, toDate: end },
       {
@@ -137,13 +186,9 @@ function GSTPage() {
           if (!d.success) return toast.error(`Tally sync failed: ${d.error_message}`);
           const o = d.outward;
           const i = d.inward_itc;
-          setR1((rows) =>
-            rows.map((r) =>
-              r.category === "B2B - Registered"
-                ? { ...r, taxable: num(o.taxable), igst: num(o.igst), cgst: num(o.cgst), sgst: num(o.sgst) }
-                : r,
-            ),
-          );
+          // Tally supplies GSTR-3B totals only. The GSTR-1 category split (B2B/
+          // B2C/export/nil) needs buyer GSTIN + place of supply, which Tally
+          // vouchers do not carry, so it comes from the Books source instead.
           setR3((rows) =>
             rows.map((r) => {
               if (r.category === "3.1(a) Outward taxable supplies")
@@ -154,18 +199,58 @@ function GSTPage() {
             }),
           );
           setStatus("Generated");
-          toast.success(`Pulled ${d.vouchers_used} voucher(s) from Tally`);
+          setTallyFilled(true);
+          if (d.vouchers_used === 0 && d.vouchers_fetched > 0) {
+            toast.warning(
+              `Tally returned ${d.vouchers_fetched} voucher(s), but none fall in ${s.period} ${s.financialYear}. Check the Tax Period.`,
+            );
+          } else {
+            toast.success(`Pulled ${d.vouchers_used} voucher(s) from Tally`);
+          }
         },
         onError: (e) => toast.error(e.message),
       },
     );
   };
 
+  // Build and download the full working as .xlsx in the client's layout. The
+  // workbook is generated server-side from the same Tally vouchers, so it always
+  // matches the on-screen GSTR-3B totals.
+  const downloadWorkbook = async () => {
+    const name = company?.legalName ?? company?.displayName ?? "";
+    if (!company || !name) return toast.error("This company has no name to match in Tally.");
+    setDownloading(true);
+    try {
+      const file = await tallyApi.gstWorkbook(company.id, name, start, end);
+      downloadBlob(file.filename, file.blob);
+      setStatus("Generated");
+      toast.success(`Downloaded ${file.filename}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not build the workbook.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  // TallyPrime is the primary source: when it is selected, pull the period's
+  // vouchers automatically (once per company+period) so the working generates
+  // itself, the same way the Books source auto-fills.
+  useEffect(() => {
+    if (source !== TALLY_SOURCE || !company || !start || gstSync.isPending) return;
+    const k = `${company.id}|${start}|${end ?? ""}`;
+    if (autoSyncedKey.current === k) return;
+    autoSyncedKey.current = k;
+    syncFromTally();
+    // syncFromTally is recreated each render; depend on the inputs it reads.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source, company?.id, start, end]);
+
   if (key !== (company?.id ?? "")) {
     setKey(company?.id ?? "");
     setR1(emptyR1());
     setR3(emptyR3());
     setStatus("Draft");
+    setTallyFilled(false);
   }
 
   if (!company) {
@@ -201,28 +286,13 @@ function GSTPage() {
               <RefreshCw className={gstSync.isPending ? "animate-spin" : undefined} />
               {gstSync.isPending ? "Pulling…" : "Sync from Tally"}
             </Button>
-            <Button
-              onClick={() => {
-                setStatus("Generated");
-                toast.success("Working marked as generated from the values entered here");
-              }}
-            >
-              <Play />
-              Generate Working
+            <Button onClick={downloadWorkbook} disabled={downloading}>
+              <Play className={downloading ? "animate-spin" : undefined} />
+              {downloading ? "Generating…" : "Generate Working"}
             </Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                exportSheets(`GST Working ${company.displayName} ${s.period}`, [
-                  { name: "GSTR-1", rows: r1 },
-                  { name: "GSTR-3B", rows: r3 },
-                  { name: "Exceptions", rows: exceptions },
-                ]);
-                toast.success("3 CSV sheets downloaded");
-              }}
-            >
+            <Button variant="outline" onClick={downloadWorkbook} disabled={downloading}>
               <Download />
-              Export Excel (CSV)
+              Export Excel (.xlsx)
             </Button>
             <Button
               variant="outline"
@@ -234,23 +304,16 @@ function GSTPage() {
               <Download />
               Download Report
             </Button>
-            <Button
-              variant="secondary"
-              disabled={status === "Draft"}
-              onClick={() => {
-                setStatus("Reviewed");
-                toast.success("Marked as reviewed");
-              }}
-            >
-              <CheckCheck />
-              Mark as Reviewed
-            </Button>
           </>
         }
       />
       <InfoNotice>
-        Sync from Tally totals output GST and input ITC from the period's vouchers; everything stays
-        editable. PAL does not access the GST portal or file returns.
+        {fromBooks
+          ? `GSTR-1 and GSTR-3B are computed from ${books.data?.invoices_used ?? 0} processed invoice(s) in this period; every cell stays editable. Reverse charge and ineligible ITC need a manual entry.`
+          : fromTally
+            ? `GSTR-3B totals come from the period's Tally vouchers; the GSTR-1 split comes from ${books.data?.invoices_used ?? 0} processed invoice(s), since Tally vouchers carry no customer GSTIN. Every cell stays editable.`
+            : "Everything stays editable."}{" "}
+        PAL does not access the GST portal or file returns.
       </InfoNotice>
       <div className="mb-4 flex flex-wrap items-end gap-3">
         <Field label="Company">
@@ -289,8 +352,15 @@ function GSTPage() {
           </select>
         </Field>
         <Field label="Data Source">
-          <select className={selectCls} value={source} onChange={(e) => setSource(e.target.value)}>
-            {["Books + Processed Invoices", "Books only", "Uploaded Sales Register"].map((x) => (
+          <select
+            className={selectCls}
+            value={source}
+            onChange={(e) => {
+              setSource(e.target.value);
+              setTallyFilled(false);
+            }}
+          >
+            {[TALLY_SOURCE, "Books + Processed Invoices", "Books only", "Uploaded Sales Register"].map((x) => (
               <option key={x}>{x}</option>
             ))}
           </select>

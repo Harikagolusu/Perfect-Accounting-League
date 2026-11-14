@@ -30,6 +30,9 @@ export interface BankStatementDto {
   document_id: string | null;
   statement_start_date: string | null;
   statement_end_date: string | null;
+  /** Actual span of the statement's transactions; null when it has none. */
+  first_transaction_date?: string | null;
+  last_transaction_date?: string | null;
   opening_balance: string | null;
   closing_balance: string | null;
   currency: string;
@@ -167,6 +170,8 @@ export const toBankStatement = (dto: BankStatementDto) => ({
   documentId: dto.document_id,
   statementStartDate: dto.statement_start_date,
   statementEndDate: dto.statement_end_date,
+  firstTransactionDate: dto.first_transaction_date ?? null,
+  lastTransactionDate: dto.last_transaction_date ?? null,
   openingBalance: dto.opening_balance,
   closingBalance: dto.closing_balance,
   currency: dto.currency,
@@ -311,11 +316,16 @@ export const bankStatementsApi = {
     apiFetch<ProcessStatementResultDto>(`${base(companyId)}/${statementId}/process`, {
       method: "POST",
     }),
-  /** Direct upload: read a document, match its account and create the statement. */
-  ingestDocument: (companyId: string, documentId: string) =>
-    apiFetch<IngestStatementResultDto>(`${base(companyId)}/ingest-document/${documentId}`, {
-      method: "POST",
-    }),
+  /**
+   * Direct upload: read a document, match its account and create the statement.
+   * `bankAccountId` is the user's pick after an unmatched read; it skips matching.
+   */
+  ingestDocument: (companyId: string, documentId: string, bankAccountId?: string) =>
+    apiFetch<IngestStatementResultDto>(
+      `${base(companyId)}/ingest-document/${documentId}`,
+      { method: "POST" },
+      { bank_account_id: bankAccountId },
+    ),
   listTransactions: (
     companyId: string,
     statementId: string,
@@ -330,9 +340,7 @@ export const bankStatementsApi = {
     apiFetch<BankTransactionDto>(`${base(companyId)}/${statementId}/transactions/${transactionId}`),
   /** Deterministic ledger name per transaction id, for the review table column. */
   listLedgerSuggestions: (companyId: string, statementId: string) =>
-    apiFetch<Record<string, string | null>>(
-      `${base(companyId)}/${statementId}/ledger-suggestions`,
-    ),
+    apiFetch<Record<string, string | null>>(`${base(companyId)}/${statementId}/ledger-suggestions`),
   createTransaction: (companyId: string, statementId: string, body: BankTransactionWriteDto) =>
     apiFetch<BankTransactionDto>(`${base(companyId)}/${statementId}/transactions`, {
       method: "POST",

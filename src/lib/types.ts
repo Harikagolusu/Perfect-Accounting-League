@@ -107,6 +107,7 @@ export interface Invoice {
   vendorGstin: string;
   vendorPan: string;
   buyerGstin: string;
+  buyerName: string;
   poNumber: string;
   cgst: number;
   sgst: number;

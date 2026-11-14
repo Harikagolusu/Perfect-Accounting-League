@@ -73,7 +73,8 @@ def _vendor(
 def _document(client: TestClient, company_id: str, name: str = "invoice.pdf") -> dict[str, Any]:
     response = client.post(
         f"{COMPANIES_URL}/{company_id}/documents",
-        files={"file": (name, PDF_BYTES, "application/pdf")},
+        # Unique bytes per upload: an identical file is flagged as a re-upload.
+        files={"file": (name, PDF_BYTES + f"\n%{uuid.uuid4()}\n".encode(), "application/pdf")},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -300,6 +301,105 @@ def test_multiple_vendors_with_the_same_gstin_are_ambiguous(
         uuid.UUID(first["id"]),
         uuid.UUID(second["id"]),
     }
+
+
+def test_shared_gstin_resolved_by_exact_printed_name(
+    client: TestClient, db: Session
+) -> None:
+    """Tally keeps "Google Ads" and "Google India Private Limited" on one GSTIN;
+    the printed name picks the vendor when it names exactly one of them."""
+    company = _company(client)
+    _vendor(client, company["id"], name="Google Ads", gstin=GSTIN_A)
+    india = _vendor(client, company["id"], name="Google India Private Limited", gstin=GSTIN_A)
+
+    result = match_vendor(
+        db, uuid.UUID(company["id"]), "GOOGLE INDIA PVT LTD", GSTIN_A, None
+    )
+
+    assert result.status is VendorMatchStatus.MATCHED
+    assert result.reason == "EXACT_GSTIN"
+    assert result.vendor is not None and result.vendor.id == uuid.UUID(india["id"])
+    assert result.requires_confirmation is False
+
+
+def test_other_state_gstin_matches_by_embedded_pan(client: TestClient, db: Session) -> None:
+    """Airtel Karnataka's bill finds the Airtel vendor registered in MP: same PAN,
+    even when the AI read a product line as the vendor name."""
+    company = _company(client)
+    airtel = _vendor(client, company["id"], name="Bharti Airtel Limited", gstin="23AAACB2894G2ZU")
+    _vendor(client, company["id"], name="Airtel", gstin=None)
+
+    result = match_vendor(
+        db, uuid.UUID(company["id"]), "FIXEDLINE AND BROADBAND SERVICES", "29AAACB2894G1ZJ", None
+    )
+
+    assert result.status is VendorMatchStatus.MATCHED
+    assert result.method is VendorMatchMethod.EXACT_PAN
+    assert result.vendor is not None and result.vendor.id == uuid.UUID(airtel["id"])
+    assert result.requires_confirmation is False
+
+
+def test_exact_gstin_beats_same_pan_in_other_state(client: TestClient, db: Session) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="Airtel MP", gstin="23AAACB2894G2ZU")
+    ka = _vendor(client, company["id"], name="Airtel KA", gstin="29AAACB2894G1ZJ")
+
+    result = match_vendor(db, uuid.UUID(company["id"]), "Airtel", "29AAACB2894G1ZJ", None)
+
+    assert result.status is VendorMatchStatus.MATCHED
+    assert result.vendor is not None and result.vendor.id == uuid.UUID(ka["id"])
+
+
+def test_same_pan_in_two_states_with_unknown_state_is_ambiguous(
+    client: TestClient, db: Session
+) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="Airtel MP", gstin="23AAACB2894G2ZU")
+    _vendor(client, company["id"], name="Airtel DL", gstin="07AAACB2894G1ZQ")
+
+    result = match_vendor(db, uuid.UUID(company["id"]), "Airtel", "29AAACB2894G1ZJ", None)
+
+    assert result.status is VendorMatchStatus.AMBIGUOUS
+
+
+def test_unregistered_vendor_with_identical_name_needs_no_confirmation(
+    client: TestClient, db: Session
+) -> None:
+    """Foreign suppliers like "Anthropic, PBC" have no GSTIN; the same printed
+    name on a master vendor is matched outright."""
+    company = _company(client)
+    vendor = _vendor(client, company["id"], name="Anthropic, PBC")
+
+    result = match_vendor(db, uuid.UUID(company["id"]), "anthropic,  PBC", None, None)
+
+    assert result.status is VendorMatchStatus.MATCHED
+    assert result.vendor is not None and result.vendor.id == uuid.UUID(vendor["id"])
+    assert result.requires_confirmation is False
+
+
+def test_registered_vendor_matched_by_name_only_still_needs_confirmation(
+    client: TestClient, db: Session
+) -> None:
+    """The vendor has a GSTIN but the invoice shows none: maybe a misread, ask."""
+    company = _company(client)
+    _vendor(client, company["id"], name="ABC Traders", gstin=GSTIN_A)
+
+    result = match_vendor(db, uuid.UUID(company["id"]), "ABC Traders", None, None)
+
+    assert result.requires_confirmation is True
+
+
+def test_shared_gstin_with_unrelated_name_stays_ambiguous(
+    client: TestClient, db: Session
+) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="Google Ads", gstin=GSTIN_A)
+    _vendor(client, company["id"], name="Google India Private Limited", gstin=GSTIN_A)
+
+    result = match_vendor(db, uuid.UUID(company["id"]), "Google Cloud", GSTIN_A, None)
+
+    assert result.status is VendorMatchStatus.AMBIGUOUS
+    assert result.reason == "MULTIPLE_GSTIN_MATCHES"
 
 
 def test_multiple_vendors_with_the_same_pan_are_ambiguous(
@@ -851,6 +951,7 @@ def test_previously_confirmed_name_mapping_is_reused(
     assert _confirm(client, company["id"], first["invoice_id"], vendor["id"]).status_code == 200
 
     second_document = _document(client, company["id"], "second.pdf")
+    extractor.values = {**extractor.values, "invoice_number": "MAP-002"}
     second = _process_document(client, company["id"], second_document["id"]).json()
 
     assert second["status"] == "PROCESSED"
@@ -1137,3 +1238,63 @@ def test_mapping_status_is_exposed_on_the_invoice_schema() -> None:
         "REJECTED",
         "AMBIGUOUS",
     }
+
+
+# ---------------------------------------------------------------------------
+# Duplicates and the stored review reason
+# ---------------------------------------------------------------------------
+
+
+def test_same_vendor_invoice_number_twice_is_flagged(
+    client: TestClient, extractor: FakeExtractor
+) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="ABC Traders Pvt Ltd", gstin=GSTIN_A)
+    extractor.values = _values(vendor_gstin=GSTIN_A)
+    first = _process_document(client, company["id"], _document(client, company["id"], "a.pdf")["id"]).json()
+    assert first["status"] == "PROCESSED"
+
+    second = _process_document(client, company["id"], _document(client, company["id"], "b.pdf")["id"]).json()
+
+    assert second["status"] == "NEEDS_REVIEW"
+    invoice = _get_invoice(client, company["id"], second["invoice_id"])
+    assert "MAP-001" in invoice["extraction_message"]
+    assert "a.pdf" in invoice["extraction_message"]
+
+
+def test_identical_file_uploaded_twice_is_flagged(
+    client: TestClient, extractor: FakeExtractor
+) -> None:
+    company = _company(client)
+    _vendor(client, company["id"], name="ABC Traders Pvt Ltd", gstin=GSTIN_A)
+    url = f"{COMPANIES_URL}/{company['id']}/documents"
+    same = PDF_BYTES + b"\n%same\n"
+    first = client.post(url, files={"file": ("google.pdf", same, "application/pdf")}).json()
+    second = client.post(url, files={"file": ("google (1).pdf", same, "application/pdf")}).json()
+    extractor.values = _values(vendor_gstin=GSTIN_A)
+    _process_document(client, company["id"], first["id"])
+    extractor.values = _values(vendor_gstin=GSTIN_A, invoice_number="OTHER-9")
+
+    body = _process_document(client, company["id"], second["id"]).json()
+
+    assert body["status"] == "NEEDS_REVIEW"
+    invoice = _get_invoice(client, company["id"], body["invoice_id"])
+    assert 'already uploaded as "google.pdf"' in invoice["extraction_message"]
+
+
+def test_failure_reason_is_kept_and_cleared_on_clean_read(
+    client: TestClient, extractor: FakeExtractor
+) -> None:
+    company = _company(client)
+    document = _document(client, company["id"], "scan.pdf")
+    extractor.outcome = ExtractionOutcome.FAILED
+    failed = _process_document(client, company["id"], document["id"]).json()
+    assert failed["status"] == "FAILED"
+    assert _get_invoice(client, company["id"], failed["invoice_id"])["extraction_message"] == "Test extraction."
+
+    _vendor(client, company["id"], name="ABC Traders Pvt Ltd", gstin=GSTIN_A)
+    extractor.outcome = ExtractionOutcome.PROCESSED
+    extractor.values = _values(vendor_gstin=GSTIN_A)
+    again = _process_document(client, company["id"], document["id"]).json()
+    assert again["status"] == "PROCESSED"
+    assert _get_invoice(client, company["id"], again["invoice_id"])["extraction_message"] is None

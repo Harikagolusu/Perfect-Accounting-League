@@ -29,7 +29,7 @@ import time
 import uuid
 from dataclasses import replace
 
-from sqlalchemy import delete as sa_delete, select
+from sqlalchemy import delete as sa_delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.storage import StorageError, resolve_storage_path
@@ -42,7 +42,8 @@ from app.models.invoice import (
 )
 from app.models.invoice_line_item import InvoiceLineItem
 from app.models.vendor import Vendor, VendorStatus
-from app.models.voucher import AccountingEntityType
+from app.models.voucher import AccountingEntityType, VoucherSourceType
+from app.services.voucher_cleanup import VoucherInTallyError, delete_source_vouchers
 from app.schemas.invoice import InvoiceCreate, InvoiceUpdate
 from app.services.accounting_audit import record_event
 from app.services.company import get_company
@@ -69,6 +70,7 @@ from app.services.vendor_matching import (
     match_vendor,
     normalize_gstin,
     normalize_pan,
+    normalize_vendor_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,7 @@ _EXTRACTED_FIELDS = (
     "vendor_gstin",
     "vendor_pan",
     "buyer_gstin",
+    "buyer_name",
     "place_of_supply",
     "po_number",
     "currency",
@@ -330,8 +333,27 @@ def update_invoice(db: Session, invoice: Invoice, data: InvoiceUpdate) -> Invoic
             reason="Invoice status changed.",
         )
 
+    rate_changed = any(
+        field in payload and payload[field] != getattr(invoice, field)
+        # Bill-to changes re-run the "not billed to this company" check.
+        for field in ("currency", "exchange_rate", "buyer_name", "buyer_gstin")
+    )
     for field, value in payload.items():
         setattr(invoice, field, value)
+
+    if rate_changed:
+        # A draft built from the old rate or bill-to is stale; drop it so the
+        # next voucher build uses the new values. A voucher in Tally stays.
+        try:
+            delete_source_vouchers(
+                db,
+                invoice.company_id,
+                VoucherSourceType.INVOICE,
+                [invoice.id],
+                reason="Currency or exchange rate changed.",
+            )
+        except VoucherInTallyError:
+            pass
 
     db.commit()
     db.refresh(invoice)
@@ -339,9 +361,19 @@ def update_invoice(db: Session, invoice: Invoice, data: InvoiceUpdate) -> Invoic
 
 
 def delete_invoice(db: Session, company_id: uuid.UUID, invoice_id: uuid.UUID) -> Invoice:
-    """Delete an invoice. Its source document is deliberately left in place."""
+    """Delete an invoice and its draft voucher. Its source document is left in place.
+
+    Raises VoucherInTallyError (nothing changed) when its voucher is in Tally.
+    """
     invoice = get_invoice(db, company_id, invoice_id)
     document_id = invoice.document_id
+    delete_source_vouchers(
+        db,
+        company_id,
+        VoucherSourceType.INVOICE,
+        [invoice.id],
+        reason="Invoice deleted in Invoice Processing.",
+    )
     record_event(
         db,
         company_id=company_id,
@@ -754,13 +786,64 @@ def process_invoice(
         result.extraction_method,
         elapsed_ms,
     )
+    duplicate = (
+        _duplicate_message(db, invoice, document)
+        if result.outcome
+        in (ExtractionOutcome.PROCESSED, ExtractionOutcome.NEEDS_REVIEW)
+        else None
+    )
     return _finish(
         db,
         invoice,
         document,
         result,
         force_review=mapping_review_required,
+        duplicate=duplicate,
     )
+
+
+def _duplicate_message(db: Session, invoice: Invoice, document: Document) -> str | None:
+    """Say so when this file, or this vendor's invoice number, is already in PAL."""
+    from app.services.document import find_duplicate_document
+
+    same_file = find_duplicate_document(db, document)
+    if same_file is not None:
+        return (
+            f'Same file already uploaded as "{same_file.original_filename}". '
+            "Delete one of them so it isn't booked twice."
+        )
+
+    number = (invoice.invoice_number or "").strip()
+    if not number:
+        return None
+    others = db.execute(
+        select(Invoice, Document.original_filename)
+        .join(Document, Document.id == Invoice.document_id)
+        .where(
+            Invoice.company_id == invoice.company_id,
+            Invoice.id != invoice.id,
+            func.lower(func.trim(Invoice.invoice_number)) == number.lower(),
+        )
+    ).all()
+    for other, filename in others:
+        same_vendor = (
+            (invoice.vendor_id is not None and other.vendor_id == invoice.vendor_id)
+            or (
+                invoice.vendor_gstin is not None
+                and (other.vendor_gstin or "").upper() == invoice.vendor_gstin.upper()
+            )
+            or (
+                bool(invoice.vendor_name)
+                and normalize_vendor_name(other.vendor_name)
+                == normalize_vendor_name(invoice.vendor_name)
+            )
+        )
+        if same_vendor:
+            return (
+                f'Invoice {number} from this vendor is already in PAL ("{filename}"). '
+                "Check it isn't a duplicate before approving."
+            )
+    return None
 
 
 def _finish(
@@ -770,15 +853,26 @@ def _finish(
     result: ExtractionResult,
     *,
     force_review: bool = False,
+    duplicate: str | None = None,
 ) -> tuple[Invoice, ExtractionResult]:
     """Persist the final statuses for one extraction attempt.
 
     `force_review` lets vendor mapping escalate a clean extraction: a pending
     name suggestion or an ambiguous match is not a safe accounting assignment,
     so a person must look at it even though the document was read correctly.
+    `duplicate` does the same for a file or invoice number already in PAL.
+    The reason is kept on the invoice so the inbox can show it later.
     """
     if result.outcome is ExtractionOutcome.PROCESSED:
-        if force_review:
+        if duplicate:
+            invoice.status = InvoiceStatus.NEEDS_REVIEW
+            result = replace(
+                result,
+                outcome=ExtractionOutcome.NEEDS_REVIEW,
+                reason="POSSIBLE_DUPLICATE",
+                message=duplicate,
+            )
+        elif force_review:
             invoice.status = InvoiceStatus.NEEDS_REVIEW
             # Keep the API result consistent with the stored invoice: a
             # mapping that needs a person is not a fully processed invoice.
@@ -793,11 +887,21 @@ def _finish(
         document.status = DocumentStatus.PROCESSED
     elif result.outcome is ExtractionOutcome.NEEDS_REVIEW:
         invoice.status = InvoiceStatus.NEEDS_REVIEW
+        if duplicate:
+            result = replace(result, message=f"{duplicate} {result.message or ''}".strip())
         # Processing itself completed; a human now judges the result.
         document.status = DocumentStatus.PROCESSED
     else:
         invoice.status = InvoiceStatus.FAILED
         document.status = DocumentStatus.FAILED
+    # Mapping review has its own column and wording in the inbox; keep only the
+    # reasons nothing else records.
+    invoice.extraction_message = (
+        None
+        if invoice.status is InvoiceStatus.PROCESSED
+        or (result.reason == "VENDOR_MAPPING_REVIEW" and not duplicate)
+        else (result.message or None)
+    )
 
     db.commit()
     db.refresh(invoice)

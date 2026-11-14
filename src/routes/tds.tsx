@@ -1,18 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Download, AlertTriangle, Percent, IndianRupee, UserX, Settings2 } from "lucide-react";
+import { Download, AlertTriangle, Percent, IndianRupee, UserX, Settings2, RefreshCw } from "lucide-react";
 import { PageHeader, KPICard, InfoNotice, StatusBadge, KV, Field } from "@/components/pal/common";
 import { DataTable, FilterSelect } from "@/components/pal/data-table";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useScoped, useStore } from "@/lib/store";
-import { PERIODS, TDS_SECTIONS, tdsRates } from "@/lib/constants";
+import { useScoped, useStore, useCompany } from "@/lib/store";
+import { PERIODS, TDS_SECTIONS, tdsRates, periodMonthStart } from "@/lib/constants";
 import { fmtDate, fmtINR } from "@/lib/format";
 import { quarterOf, tdsDue, tdsVariance } from "@/lib/tds";
-import { exportFile } from "@/lib/export";
-import type { TDSWorking } from "@/lib/types";
+import { downloadBlob } from "@/lib/export";
+import { tallyApi } from "@/lib/api/tally";
+import { useTallyTdsWorking } from "@/lib/queries/tally";
+import type { TDSSection, TDSWorking } from "@/lib/types";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -25,7 +27,10 @@ const MONTHS: Record<string, string> = Object.fromEntries(PERIODS.map((p, i) => 
 
 function TDSPage() {
   const s = useStore();
+  const company = useCompany();
   const all = useScoped(s.tds);
+  const tdsSync = useTallyTdsWorking();
+  const [downloading, setDownloading] = useState(false);
   const [q, setQ] = useState("All");
   const [month, setMonth] = useState("All");
   const [vendor, setVendor] = useState("All");
@@ -43,14 +48,86 @@ function TDSPage() {
 
   const markReviewed = (id: string) => { s.setTds((x) => x.map((t) => (t.id === id ? { ...t, status: "Reviewed" } : t))); toast.success("Marked reviewed"); setOpen(null); };
 
+  const tallyName = () => company?.legalName ?? company?.displayName ?? "";
+  // Whole financial year (Apr–Mar) for the on-screen table; it filters by
+  // quarter and month client-side, so one sync fills every period.
+  const fyRange = () => {
+    const y = Number(s.financialYear.match(/\d{4}/)?.[0]);
+    return y ? { start: `${y}-04-01`, end: `${y + 1}-03-31` } : {};
+  };
+  // Selected tax-period month, for the downloaded workbook (the client doc is
+  // one month).
+  const monthRange = () => {
+    const start = periodMonthStart(s.financialYear, s.period);
+    if (!start) return {};
+    const y = Number(start.slice(0, 4)), m = Number(start.slice(5, 7));
+    return { start, end: `${start.slice(0, 7)}-${String(new Date(y, m, 0).getDate()).padStart(2, "0")}` };
+  };
+
+  // Sync the working from Tally vouchers, replacing this company's rows.
+  const syncFromTally = () => {
+    if (!company) return toast.error("Select a company first.");
+    const name = tallyName();
+    if (!name) return toast.error("This company has no name to match in Tally.");
+    const { start, end } = fyRange();
+    tdsSync.mutate(
+      { companyId: company.id, tallyCompanyName: name, fromDate: start, toDate: end },
+      {
+        onSuccess: (d) => {
+          if (!d.success) return toast.error(`Tally sync failed: ${d.error_message}`);
+          const rows: TDSWorking[] = d.rows.map((r, i) => ({
+            id: `${r.voucher_number || "v"}-${i}`,
+            companyId: company.id,
+            voucherDate: r.voucher_date ?? "",
+            voucherNo: r.voucher_number,
+            vendor: r.party_name,
+            pan: r.pan,
+            section: r.section as TDSSection,
+            gross: Number(r.base),
+            base: Number(r.base),
+            // Backend rate is a fraction (tds/base); the page uses a percent.
+            rate: Number(r.rate) * 100,
+            deducted: Number(r.tds),
+            status: r.status as TDSWorking["status"],
+          }));
+          s.setTds((prev) => [...prev.filter((t) => t.companyId !== company.id), ...rows]);
+          toast.success(`Synced ${rows.length} voucher(s) from Tally`);
+        },
+        onError: (e) => toast.error(e.message),
+      },
+    );
+  };
+
+  // Download the month's working as .xlsx in the client's three-sheet layout,
+  // built server-side from the same Tally vouchers.
+  const downloadWorkbook = async () => {
+    if (!company) return toast.error("Select a company first.");
+    const name = tallyName();
+    if (!name) return toast.error("This company has no name to match in Tally.");
+    const { start, end } = monthRange();
+    setDownloading(true);
+    try {
+      const file = await tallyApi.tdsWorkbook(company.id, name, start, end);
+      downloadBlob(file.filename, file.blob);
+      toast.success(`Downloaded ${file.filename}`);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not build the workbook.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
   return (
     <>
       <PageHeader title="TDS Workings" description="Section-wise TDS review against vendor payments."
         actions={<>
+          <Button variant="outline" onClick={syncFromTally} disabled={tdsSync.isPending}>
+            <RefreshCw className={tdsSync.isPending ? "animate-spin" : undefined} />{tdsSync.isPending ? "Syncing…" : "Sync from Tally"}
+          </Button>
           <Button variant="outline" onClick={() => setRules(true)}><Settings2 />Rule configuration</Button>
-          <Button onClick={() => { const n = exportFile("CSV", `TDS_Working_${s.financialYear}`, rows.map((t) => ({ VoucherDate: t.voucherDate, VoucherNo: t.voucherNo, Vendor: t.vendor, PAN: t.pan, Section: t.section, Gross: t.gross, Base: t.base, Rate: t.rate, Due: tdsDue(t), Deducted: t.deducted, Variance: tdsVariance(t), Status: t.status }))); toast.success(`Exported ${n} rows`); }}><Download />Export to Excel (CSV)</Button>
+          <Button onClick={downloadWorkbook} disabled={downloading}><Download />{downloading ? "Generating…" : "Export to Excel"}</Button>
         </>} />
-      <InfoNotice>Workings are not connected to the backend yet. Reference rates are shown for configuration only and are not statutory advice.</InfoNotice>
+      <InfoNotice>Sync reads this company's TDS deductions from TallyPrime for the financial year; Export to Excel downloads the selected month in the client's three-sheet format (Non Salary filled; Salary and PL sep are templates). The section is inferred from the ledger name — reference only, not statutory advice.</InfoNotice>
       <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <KPICard label="Base value" value={fmtINR(rows.reduce((a, t) => a + t.base, 0))} icon={IndianRupee} hint={`${rows.length} vouchers`} />
         <KPICard label="TDS due" value={fmtINR(rows.reduce((a, t) => a + tdsDue(t), 0))} icon={Percent} />

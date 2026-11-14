@@ -63,6 +63,8 @@ import {
 } from "@/lib/queries/vouchers";
 import type { Voucher } from "@/lib/api/vouchers";
 import { compareMoney, fmtDate, fmtMoney } from "@/lib/format";
+import { tableXlsx } from "@/lib/api/exports";
+import { downloadBlob } from "@/lib/export";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -90,7 +92,7 @@ function ledgerMapped(voucher: Voucher | undefined): boolean {
 
 function tallyLabel(voucher: Voucher | undefined): string {
   if (!voucher) return "Not posted";
-  if (voucher.status === "POSTED") return "Posted";
+  if (voucher.status === "POSTED") return "Accounted";
   if (voucher.status === "POSTING_FAILED") return "Posting failed";
   if (voucher.status === "APPROVED" || voucher.status === "AWAITING_IMPORT_CONFIRMATION")
     return "Ready";
@@ -143,6 +145,27 @@ function reviewReasons(invoice: UiInvoice, voucher: Voucher | undefined): string
     if (error) reasons.push(error.message);
   }
   return reasons;
+}
+
+/** Everything a reviewer must check, numbered, for the Excel report. Wider than
+ * reviewReasons: every extraction issue, every unmapped line and every voucher
+ * error or warning (TDS, AI-picked ledgers), not just the first. */
+function reviewDetail(invoice: UiInvoice, voucher: Voucher | undefined): string {
+  if (voucher?.status === "POSTED") return "";
+  const items: string[] = [];
+  if (invoice.status === "NEEDS_REVIEW") items.push(...invoice.validationIssues);
+  items.push(...reviewReasons(invoice, voucher).filter((r) => !items.includes(r)));
+  for (const line of voucher?.lines ?? []) {
+    if (!line.ledgerId)
+      items.push(`Line ${line.lineNumber} (₹${fmtMoney(line.amount)} ${line.side}) has no ledger`);
+  }
+  if (voucher && !voucher.isBalanced)
+    items.push(`Debit ₹${fmtMoney(voucher.totalDebit)} ≠ Credit ₹${fmtMoney(voucher.totalCredit)}`);
+  for (const issue of voucher?.validationIssues ?? []) {
+    const text = `${issue.severity === "ERROR" ? "Fix" : "Check"}: ${issue.message}`;
+    if (!items.includes(issue.message) && !items.includes(text)) items.push(text);
+  }
+  return [...new Set(items)].map((item, n) => `${n + 1}. ${item}`).join("\n");
 }
 
 /** Posting is allowed only once a voucher is approved; a failed attempt may be
@@ -317,6 +340,7 @@ function InvoicePage() {
     dir: "desc",
   });
   const [batch, setBatch] = useState("All");
+  const [view, setView] = useState<"All" | "Posted" | "Pending">("All");
 
   useEffect(() => {
     setForm(invoice ? invoiceToForm(invoice) : null);
@@ -456,12 +480,38 @@ function InvoicePage() {
       new Set(invoices.map((i) => batchOf(i)).filter(Boolean)),
     ) as string[];
 
+    // The top-bar month is the posting month. An invoice dated earlier posts on
+    // the 1st of the selected month, so a pending one shows in its own month and
+    // every later month until posted; a posted one shows in the month it is dated
+    // or was posted. Client case: July invoices uploaded in November must show
+    // under November. An undated invoice stays visible so it can be given a date.
+    const month = postingMonth?.slice(0, 7);
+    const inSelectedMonth = (i: UiInvoice) => {
+      if (!month || !i.invoiceDate) return true;
+      const dated = i.invoiceDate.slice(0, 7);
+      const voucher = voucherByInvoice.get(i.id);
+      if (voucher?.status === "POSTED")
+        return dated === month || voucher.postedAt?.slice(0, 7) === month;
+      return dated <= month;
+    };
+
     // Failed rows are hidden from the table; the records stay in the backend.
     const rows = invoices.filter(
       (i) =>
         rowStatus(i, voucherByInvoice.get(i.id)) !== "Failed" &&
-        (batch === "All" || batchOf(i) === batch),
+        (batch === "All" || batchOf(i) === batch) &&
+        inSelectedMonth(i),
     );
+    // Posted = in Tally; everything else still needs work. Counts follow the
+    // batch filter so the header answers "how much of this batch is done".
+    const isPosted = (i: UiInvoice) => voucherByInvoice.get(i.id)?.status === "POSTED";
+    const counts = {
+      All: rows.length,
+      Posted: rows.filter(isPosted).length,
+      Pending: rows.filter((i) => !isPosted(i)).length,
+    };
+    const viewRows =
+      view === "All" ? rows : rows.filter((i) => isPosted(i) === (view === "Posted"));
 
     // Comparable value per sortable column. Money is compared with compareMoney
     // (never Number()); everything else compares as its displayed string.
@@ -488,7 +538,7 @@ function InvoicePage() {
           return "";
       }
     };
-    const visible = [...rows].sort((a, b) => {
+    const visible = [...viewRows].sort((a, b) => {
       const d = sort.dir === "asc" ? 1 : -1;
       if (sort.key === "amount") return compareMoney(a.totalAmount, b.totalAmount) * d;
       return sortText(a).localeCompare(sortText(b)) * d;
@@ -507,6 +557,55 @@ function InvoicePage() {
         }
       } catch (e) {
         toast.error(e instanceof Error ? e.message : "Could not post to Tally");
+      }
+    };
+
+    const downloadExcel = async () => {
+      const line = (i: UiInvoice) => {
+        const voucher = voucherByInvoice.get(i.id);
+        return [
+          i.invoiceNumber ?? "",
+          i.vendorName ?? "",
+          i.invoiceDate ?? "",
+          // Excel needs a number to total the column; display elsewhere stays exact.
+          i.totalAmount ? Number(i.totalAmount) : null,
+          voucher?.voucherNumber ?? "",
+          rowStatus(i, voucher),
+          isPosted(i) ? "Posted" : "Pending",
+          batchOf(i) ?? "",
+          reviewDetail(i, voucher),
+        ];
+      };
+      try {
+        const file = await tableXlsx(`Invoice status ${view}`, [
+          {
+            name: "Summary",
+            columns: ["Status", "Invoices"],
+            rows: [
+              ["Posted", counts.Posted],
+              ["Pending", counts.Pending],
+              ["Total", counts.All],
+            ],
+          },
+          {
+            name: view === "All" ? "Invoices" : view,
+            columns: [
+              "Invoice No",
+              "Vendor",
+              "Date",
+              "Amount",
+              "Voucher No",
+              "Status",
+              "Posted / Pending",
+              "Batch",
+              "What to check",
+            ],
+            rows: visible.map(line),
+          },
+        ]);
+        downloadBlob(file.filename, file.blob);
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Could not create the Excel report");
       }
     };
 
@@ -554,16 +653,43 @@ function InvoicePage() {
             </select>
           }
         />
-        <InfoNotice>
-          Upload documents in the Document Inbox to process a batch. Each row shows the extracted
-          invoice and its mapping exactly as read — nothing is inferred. Rows needing a check must
-          be opened and corrected before they can be approved and posted.
-        </InfoNotice>
+        <div className="flex flex-wrap items-center gap-2">
+          {(["All", "Posted", "Pending"] as const).map((key) => (
+            <button
+              key={key}
+              type="button"
+              aria-pressed={view === key}
+              onClick={() => setView(key)}
+              className={cn(
+                "rounded-md border px-3 py-1.5 text-sm",
+                view === key
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "bg-card hover:bg-muted",
+              )}
+            >
+              {key === "All" ? "All" : key === "Posted" ? "Posted to Tally" : "Pending"}{" "}
+              <span className="num font-semibold">{counts[key]}</span>
+            </button>
+          ))}
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-auto"
+            disabled={!visible.length}
+            onClick={downloadExcel}
+          >
+            Download Excel
+          </Button>
+        </div>
 
         {!visible.length ? (
           <div className="rounded-md border bg-card p-4">
             <EmptyState
-              title="No invoices for this company"
+              title={
+                rows.length
+                  ? `No ${view.toLowerCase()} invoices`
+                  : `No invoices for ${period} (${financialYear})`
+              }
               hint="Upload documents in the Document Inbox to process a batch."
             />
           </div>
@@ -826,8 +952,10 @@ function InvoicePage() {
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[minmax(320px,2fr)_3fr]">
-        <Section title="Source Document" className="self-start xl:sticky xl:top-4">
+      {/* minmax(0,…) and min-w-0 keep a wide voucher table scrolling inside
+          its own box instead of widening the page under the sidebar. */}
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(320px,2fr)_minmax(0,3fr)]">
+        <Section title="Source Document" className="min-w-0 self-start xl:sticky xl:top-4">
           {sourceDocument ? (
             <>
               <div className="relative overflow-hidden rounded border bg-muted">
@@ -893,7 +1021,7 @@ function InvoicePage() {
           </div>
         </Section>
 
-        <div className="flex flex-col gap-4">
+        <div className="flex min-w-0 flex-col gap-4">
           <Section title="Invoice Fields">
             <fieldset disabled={processInvoice.isPending} className="contents">
               <div className="grid gap-3 md:grid-cols-3">
@@ -947,6 +1075,12 @@ function InvoicePage() {
                     onChange={(e) => set("vendorPan", e.target.value.toUpperCase())}
                   />
                 </Field>
+                <Field label="Bill To">
+                  <Input
+                    value={form.buyerName}
+                    onChange={(e) => set("buyerName", e.target.value)}
+                  />
+                </Field>
                 <Field label="Buyer GSTIN">
                   <Input
                     className="num"
@@ -964,6 +1098,17 @@ function InvoicePage() {
                     onChange={(e) => set("currency", e.target.value.toUpperCase())}
                   />
                 </Field>
+                {form.currency && form.currency !== "INR" && (
+                  <Field label={`Exchange rate (₹ per 1 ${form.currency})`}>
+                    <Input
+                      className="num"
+                      inputMode="decimal"
+                      placeholder="Fetched automatically if blank"
+                      value={form.exchangeRate}
+                      onChange={(e) => set("exchangeRate", e.target.value)}
+                    />
+                  </Field>
+                )}
                 {(
                   [
                     ["Taxable Amount", "taxableAmount"],

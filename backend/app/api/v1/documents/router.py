@@ -69,6 +69,10 @@ async def post_document(
     batch_code: str | None = Form(
         default=None, max_length=32, description="Shared code for one upload batch."
     ),
+    document_type: DocumentType = Form(
+        default=DocumentType.UNKNOWN,
+        description="Set by the Bank Statements page so statements stay out of the inbox.",
+    ),
     db: Session = Depends(get_db),
 ) -> DocumentResponse:
     max_bytes = get_settings().document_max_upload_bytes
@@ -90,6 +94,7 @@ async def post_document(
             content_type=file.content_type,
             data=data,
             batch_code=batch_code,
+            document_type=document_type,
         )
     except CompanyNotFoundError:
         raise HTTPException(

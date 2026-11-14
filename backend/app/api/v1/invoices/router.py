@@ -33,6 +33,7 @@ from app.services.exports.service import (
     invoice_export_preview,
 )
 from app.services.document import DocumentNotFoundError
+from app.services.voucher_cleanup import VoucherInTallyError
 from app.services.invoice import (
     InvoiceNotFoundError,
     VendorMappingConflictError,
@@ -391,8 +392,12 @@ def get_invoice_ledger_suggestion(
 def remove_invoice(
     invoice: Invoice = Depends(invoice_or_404), db: Session = Depends(get_db)
 ) -> Response:
-    """Deletes the invoice only. The source document stays in the inbox."""
-    delete_invoice(db, invoice.company_id, invoice.id)
+    """Deletes the invoice and its draft voucher. The source document stays in the inbox."""
+    try:
+        delete_invoice(db, invoice.company_id, invoice.id)
+    except VoucherInTallyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

@@ -168,6 +168,11 @@ class BankStatementResponse(TimestampedResponse):
     closing_balance: MoneyOut | None
     currency: str
     status: BankStatementStatus
+    #: Why the last extraction failed or needs a person (null when clean).
+    extraction_message: str | None = None
+    #: Actual span of the statement's transactions (null when it has none).
+    first_transaction_date: date | None = None
+    last_transaction_date: date | None = None
 
 
 class BankTransactionCreate(BaseModel):

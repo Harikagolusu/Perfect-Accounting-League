@@ -464,23 +464,164 @@ def test_delete_nonexistent_document_returns_404(
     assert response.status_code == 404
 
 
-def test_delete_document_referenced_by_invoice_returns_409(
-    client: TestClient, company: dict[str, Any]
+def _invoice_voucher(db: Session, company_id: str, invoice_id: str, status: Any) -> uuid.UUID:
+    from datetime import date
+
+    from app.models.voucher import Voucher, VoucherSourceType, VoucherType
+
+    voucher = Voucher(
+        company_id=uuid.UUID(company_id),
+        voucher_date=date(2026, 7, 31),
+        voucher_type=VoucherType.PURCHASE,
+        voucher_number=f"PV-{invoice_id[:8]}",
+        status=status,
+        source_type=VoucherSourceType.INVOICE,
+        source_id=uuid.UUID(invoice_id),
+        created_by="test",
+    )
+    db.add(voucher)
+    db.commit()
+    return voucher.id
+
+
+def test_delete_document_also_removes_its_invoice_and_draft_voucher(
+    client: TestClient, company: dict[str, Any], db: Session
 ) -> None:
-    """A document an invoice references (FK RESTRICT) must refuse with 409,
-    not crash with a 500 the browser reports as a CORS failure."""
+    """Extracted documents always have an invoice; Delete in the inbox must work."""
+    from app.models.voucher import Voucher, VoucherStatus
+
     created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
     invoice = client.post(
         f"/api/v1/companies/{company['id']}/invoices",
         json={"document_id": created["id"]},
+    ).json()
+    voucher_id = _invoice_voucher(db, company["id"], invoice["id"], VoucherStatus.DRAFT)
+
+    response = client.delete(f"{_documents_url(company['id'])}/{created['id']}")
+
+    assert response.status_code == 204, response.text
+    assert client.get(_documents_url(company["id"])).json() == []
+    assert (
+        client.get(f"/api/v1/companies/{company['id']}/invoices/{invoice['id']}").status_code
+        == 404
     )
-    assert invoice.status_code == 201
+    db.expire_all()
+    assert db.get(Voucher, voucher_id) is None
+
+
+def _bank_statement_with_txn(client: TestClient, company_id: str, document_id: str) -> str:
+    base = f"/api/v1/companies/{company_id}"
+    account = client.post(
+        f"{base}/bank-accounts",
+        json={"bank_name": "HDFC Bank", "account_number": "50100234567890"},
+    ).json()
+    statement = client.post(
+        f"{base}/bank-statements",
+        json={"bank_account_id": account["id"], "document_id": document_id},
+    ).json()
+    txn = client.post(
+        f"{base}/bank-statements/{statement['id']}/transactions",
+        json={
+            "transaction_date": "2026-03-10",
+            "description": "NEFT CR ACME LTD",
+            "credit_amount": "500.00",
+        },
+    )
+    assert txn.status_code == 201, txn.text
+    return txn.json()["id"]
+
+
+def test_delete_bank_statement_document_from_inbox(
+    client: TestClient, company: dict[str, Any], db: Session
+) -> None:
+    """A bank statement's file lives in the inbox too; deleting it must not 500."""
+    from app.models.bank import BankStatement
+
+    created = _upload(client, company["id"], PDF_BYTES, "hdfc.pdf", "application/pdf").json()
+    _bank_statement_with_txn(client, company["id"], created["id"])
+
+    response = client.delete(f"{_documents_url(company['id'])}/{created['id']}")
+
+    assert response.status_code == 204, response.text
+    assert client.get(_documents_url(company["id"])).json() == []
+    db.expire_all()
+    assert db.query(BankStatement).count() == 0
+
+
+def test_delete_bank_statement_document_refused_when_posted(
+    client: TestClient, company: dict[str, Any], db: Session
+) -> None:
+    from datetime import date
+
+    from app.models.voucher import Voucher, VoucherSourceType, VoucherStatus, VoucherType
+
+    created = _upload(client, company["id"], PDF_BYTES, "hdfc.pdf", "application/pdf").json()
+    txn_id = _bank_statement_with_txn(client, company["id"], created["id"])
+    db.add(
+        Voucher(
+            company_id=uuid.UUID(company["id"]),
+            voucher_date=date(2026, 3, 10),
+            voucher_type=VoucherType.RECEIPT,
+            voucher_number="RV-1",
+            status=VoucherStatus.POSTED,
+            source_type=VoucherSourceType.BANK_TRANSACTION,
+            source_id=uuid.UUID(txn_id),
+            created_by="test",
+        )
+    )
+    db.commit()
 
     response = client.delete(f"{_documents_url(company['id'])}/{created['id']}")
 
     assert response.status_code == 409
-    # The document is still listed because nothing was removed.
     assert any(d["id"] == created["id"] for d in client.get(_documents_url(company["id"])).json())
+
+
+def test_delete_invoice_removes_draft_voucher_and_refuses_posted(
+    client: TestClient, company: dict[str, Any], db: Session
+) -> None:
+    """Invoice Processing delete: no orphaned draft vouchers, never a posted one."""
+    from app.models.voucher import Voucher, VoucherStatus
+
+    base = f"/api/v1/companies/{company['id']}/invoices"
+    draft_doc = _upload(client, company["id"], PDF_BYTES, "a.pdf", "application/pdf").json()
+    draft_inv = client.post(base, json={"document_id": draft_doc["id"]}).json()
+    draft_voucher = _invoice_voucher(db, company["id"], draft_inv["id"], VoucherStatus.DRAFT)
+    posted_doc = _upload(client, company["id"], PDF_BYTES, "b.pdf", "application/pdf").json()
+    posted_inv = client.post(base, json={"document_id": posted_doc["id"]}).json()
+    _invoice_voucher(db, company["id"], posted_inv["id"], VoucherStatus.POSTED)
+
+    assert client.delete(f"{base}/{draft_inv['id']}").status_code == 204
+    db.expire_all()
+    assert db.get(Voucher, draft_voucher) is None
+
+    refused = client.delete(f"{base}/{posted_inv['id']}")
+    assert refused.status_code == 409
+    assert client.get(f"{base}/{posted_inv['id']}").status_code == 200
+
+
+def test_delete_document_refused_when_voucher_posted_to_tally(
+    client: TestClient, company: dict[str, Any], db: Session
+) -> None:
+    """Never orphan an entry that is already in Tally: 409, nothing removed."""
+    from app.models.voucher import VoucherStatus
+
+    created = _upload(client, company["id"], PDF_BYTES, "invoice.pdf", "application/pdf").json()
+    invoice = client.post(
+        f"/api/v1/companies/{company['id']}/invoices",
+        json={"document_id": created["id"]},
+    ).json()
+    _invoice_voucher(db, company["id"], invoice["id"], VoucherStatus.POSTED)
+
+    response = client.delete(f"{_documents_url(company['id'])}/{created['id']}")
+
+    assert response.status_code == 409
+    assert "Tally" in response.json()["detail"]
+    assert any(d["id"] == created["id"] for d in client.get(_documents_url(company["id"])).json())
+    assert (
+        client.get(f"/api/v1/companies/{company['id']}/invoices/{invoice['id']}").status_code
+        == 200
+    )
 
 
 # --- Company isolation -----------------------------------------------------
@@ -590,3 +731,19 @@ def test_upload_without_batch_code_stores_null(
     response = _upload(client, company["id"], PDF_BYTES, "c.pdf", "application/pdf")
     assert response.status_code == 201
     assert response.json()["batch_code"] is None
+
+
+def test_bank_page_upload_is_tagged_and_inbox_default_stays_unknown(
+    client: TestClient, company: dict[str, Any]
+) -> None:
+    """Client report: bank statements showed in the invoice Document Inbox.
+    The Bank Statements page tags its uploads so the inbox can leave them out."""
+    bank = client.post(
+        _documents_url(company["id"]),
+        files={"file": ("hsbc.pdf", PDF_BYTES, "application/pdf")},
+        data={"document_type": "BANK_STATEMENT"},
+    )
+    inbox = _upload(client, company["id"], PDF_BYTES + b" ", "inv.pdf", "application/pdf")
+
+    assert bank.json()["document_type"] == "BANK_STATEMENT"
+    assert inbox.json()["document_type"] == "UNKNOWN"

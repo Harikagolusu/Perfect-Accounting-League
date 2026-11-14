@@ -12,6 +12,7 @@ from typing import NoReturn
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.api.v1.deps import get_actor
@@ -38,16 +39,24 @@ from app.schemas.tally import (
     TallyStatusResponse,
     TallySyncRequest,
     TallySyncResponse,
+    TallyTdsWorkingResponse,
+    TallyTdsWorkingRow,
+    TallyVendorSyncResponse,
 )
 from app.services.company import CompanyNotFoundError
 from app.services.tally_mapping_sync import sync_tally_accounting_mappings
+from app.services.gst_export import build_gst_workbook, gst_workbook_filename
+from app.services.tds_export import build_tds_workbook, tds_workbook_filename
 from app.services.tally_sync import (
+    compute_tally_gst_detail,
     compute_tally_gst_working,
+    compute_tally_tds_working,
     get_latest_sync,
     sync_tally_bank_accounts,
     sync_tally_bank_data,
     sync_tally_companies,
     sync_tally_ledgers,
+    sync_tally_vendors,
 )
 
 router = APIRouter()
@@ -290,6 +299,33 @@ def tally_sync_bank_accounts(
 
 
 @router.post(
+    "/sync/{company_id}/vendors",
+    response_model=TallyVendorSyncResponse,
+    summary="Import Tally Sundry Creditors ledgers as PAL vendors",
+)
+def tally_sync_vendors(
+    company_id: UUID,
+    body: TallySyncRequest,
+    db: Session = Depends(get_db),
+) -> TallyVendorSyncResponse:
+    """Create a vendor per Tally creditor ledger; matched by name, never deleted."""
+    try:
+        result = sync_tally_vendors(db, company_id, body.tally_company_name)
+    except CompanyNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    return TallyVendorSyncResponse(
+        success=result.success,
+        company_id=company_id,
+        tally_company_name=result.tally_company_name,
+        vendors_fetched=result.vendors_fetched,
+        vendors_created=result.vendors_created,
+        vendors_updated=result.vendors_updated,
+        vendors_unchanged=result.vendors_unchanged,
+        error_message=result.error_message,
+    )
+
+
+@router.post(
     "/sync/{company_id}/bank-data",
     response_model=TallyBankDataSyncResponse,
     summary="Sync Tally bank accounts and bank transactions into PAL",
@@ -389,6 +425,158 @@ def tally_gst_working(
         vouchers_fetched=result.vouchers_fetched,
         vouchers_used=result.vouchers_used,
         error_message=result.error_message,
+    )
+
+
+_XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+@router.post(
+    "/sync/{company_id}/gst-working/export",
+    summary="Download the GST working as .xlsx in the client's eleven-sheet layout",
+)
+def tally_gst_working_export(
+    company_id: UUID,
+    body: TallyBankDataSyncRequest,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Build the GST working workbook from Tally vouchers for the period.
+
+    Read-only: nothing is written to Tally or stored in PAL. Sales, Purchase and
+    the Abstract totals are filled from the vouchers; the sheets needing data PAL
+    does not hold are empty, labelled templates.
+    """
+    if body.from_date and body.to_date and body.to_date < body.from_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The end date must not be before the start date.",
+        )
+    try:
+        detail = compute_tally_gst_detail(
+            db,
+            company_id,
+            body.tally_company_name,
+            from_date=body.from_date,
+            to_date=body.to_date,
+            with_gstin=True,
+            with_reference=True,
+            with_hsn=True,
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    if not detail.success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=detail.error_message or "Could not read vouchers from TallyPrime.",
+        )
+    data = build_gst_workbook(
+        detail,
+        company_name=body.tally_company_name,
+        from_date=body.from_date,
+    )
+    filename = gst_workbook_filename(body.from_date)
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post(
+    "/sync/{company_id}/tds-working",
+    response_model=TallyTdsWorkingResponse,
+    summary="TDS deducted per voucher from Tally for a period (Non Salary)",
+)
+def tally_tds_working(
+    company_id: UUID,
+    body: TallyBankDataSyncRequest,
+    db: Session = Depends(get_db),
+) -> TallyTdsWorkingResponse:
+    """Read TDS deductions from Tally vouchers for a period.
+
+    Read-only: nothing is written to Tally or PAL. A Tally failure returns HTTP
+    200 with success=False so the UI can show it.
+    """
+    if body.from_date and body.to_date and body.to_date < body.from_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The end date must not be before the start date.",
+        )
+    try:
+        result = compute_tally_tds_working(
+            db, company_id, body.tally_company_name,
+            from_date=body.from_date, to_date=body.to_date,
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    return TallyTdsWorkingResponse(
+        success=result.success,
+        company_id=company_id,
+        tally_company_name=result.tally_company_name,
+        from_date=result.from_date,
+        to_date=result.to_date,
+        rows=[
+            TallyTdsWorkingRow(
+                voucher_date=row.voucher_date,
+                voucher_number=row.voucher_number or "",
+                party_name=row.party_name or "",
+                pan=row.pan or "",
+                section=row.section,
+                base=row.base,
+                tds=row.tds,
+                rate=row.rate,
+                status=row.status,
+                computed=row.computed,
+            )
+            for row in result.lines
+        ],
+        total_tds=result.total_tds,
+        vouchers_fetched=result.vouchers_fetched,
+        vouchers_used=result.vouchers_used,
+        error_message=result.error_message,
+    )
+
+
+@router.post(
+    "/sync/{company_id}/tds-working/export",
+    summary="Download the TDS working as .xlsx in the client's three-sheet layout",
+)
+def tally_tds_working_export(
+    company_id: UUID,
+    body: TallyBankDataSyncRequest,
+    db: Session = Depends(get_db),
+) -> Response:
+    """Build the TDS working workbook from Tally vouchers for the period.
+
+    Read-only. Non Salary is filled from the vouchers; Salary and PL sep need
+    data PAL does not hold and are empty, labelled templates.
+    """
+    if body.from_date and body.to_date and body.to_date < body.from_date:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="The end date must not be before the start date.",
+        )
+    try:
+        result = compute_tally_tds_working(
+            db, company_id, body.tally_company_name,
+            from_date=body.from_date, to_date=body.to_date,
+            with_reference=True,  # export needs the Supplier Invoice No. column
+        )
+    except CompanyNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Company not found")
+    if not result.success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=result.error_message or "Could not read vouchers from TallyPrime.",
+        )
+    data = build_tds_workbook(
+        result.lines, company_name=body.tally_company_name, from_date=body.from_date
+    )
+    filename = tds_workbook_filename(body.from_date)
+    return Response(
+        content=data,
+        media_type=_XLSX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 

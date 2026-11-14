@@ -1,5 +1,5 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   FileStack,
   CheckCircle2,
@@ -7,7 +7,6 @@ import {
   XCircle,
   Users,
   AlertTriangle,
-  Upload,
   Landmark,
   GitCompareArrows,
   Calculator,
@@ -24,23 +23,13 @@ import {
   YAxis,
   Legend,
 } from "recharts";
-import { EmptyState, KPICard, PageHeader, Section, StatusBadge } from "@/components/pal/common";
+import { EmptyState, InfoNotice, KPICard, PageHeader, Section, StatusBadge } from "@/components/pal/common";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { FileUploadDropzone } from "@/components/pal/dropzone";
 import { useCompany, useScoped, useStore } from "@/lib/store";
-import { useDocuments, useUploadDocuments } from "@/lib/queries/documents";
+import { useDocuments } from "@/lib/queries/documents";
 import { useVendors } from "@/lib/queries/vendors";
 import { useAccountingAudit } from "@/lib/queries/accountingAudit";
 import { seo } from "@/lib/seo";
-import { toast } from "sonner";
 
 export const Route = createFileRoute("/")({
   head: () =>
@@ -55,13 +44,11 @@ function Dashboard() {
   const s = useStore();
   const company = useCompany();
   const navigate = useNavigate();
-  const { data: docs = [], refetch: refetchDocuments } = useDocuments(company?.id);
+  const { data: docs = [] } = useDocuments(company?.id);
   const { data: vendors = [] } = useVendors(company?.id, true);
-  const uploadDocuments = useUploadDocuments(company?.id);
   const reco = useScoped(s.reco);
   const reviews = useScoped(s.reviews);
   const { data: audit = [] } = useAccountingAudit(company?.id);
-  const [upload, setUpload] = useState(false);
 
   const activity = useMemo(() => {
     const days = Array.from({ length: 14 }, (_, index) => {
@@ -113,30 +100,68 @@ function Dashboard() {
   const exceptions = reco.filter((r) => r.status !== "Exact Match").length;
   const count = (st: string) => reco.filter((r) => r.status === st).length;
 
-  const addFiles = async (files: File[]) => {
-    try {
-      const saved = await uploadDocuments.mutateAsync(files);
-      await refetchDocuments();
-      toast.success(
-        `${saved.length} file${saved.length === 1 ? "" : "s"} uploaded to ${company.displayName}`,
-      );
-      setUpload(false);
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Upload failed");
-    }
-  };
+  // Viewer: a read-only dashboard — document KPIs, the processing chart and the
+  // activity feed only. No action tiles. Partner and Accountant get the full view.
+  if (s.role === "Viewer") {
+    return (
+      <>
+        <PageHeader
+          title="Dashboard"
+          description={`Read-only overview of document processing for ${company.displayName}.`}
+        />
+        <InfoNotice>
+          {company.displayName} · {s.financialYear} · {s.period}. You have read-only access.
+        </InfoNotice>
+        <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <KPICard label="Total Documents" value={docs.length} hint="received" icon={FileStack} />
+          <KPICard label="Processed" value={processed} hint="successfully" icon={CheckCircle2} tone="success" />
+          <KPICard label="Pending Review" value={pending} hint="in workflow" icon={Clock} tone="warning" />
+          <KPICard label="Need Attention" value={failed} hint="failed" icon={AlertTriangle} tone="danger" />
+        </div>
+        <div className="mt-4 grid gap-4 xl:grid-cols-3">
+          <Section title="Recent Processing Activity" className="xl:col-span-2">
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={activity}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border)" vertical={false} />
+                  <XAxis dataKey="date" fontSize={11} stroke="var(--muted-foreground)" />
+                  <YAxis fontSize={11} stroke="var(--muted-foreground)" allowDecimals={false} />
+                  <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: "1px solid var(--border)" }} />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="processed" stackId="a" fill="var(--chart-1)" name="Processed" />
+                  <Bar dataKey="pending" stackId="a" fill="var(--chart-4)" name="Pending" />
+                  <Bar dataKey="failed" stackId="a" fill="var(--chart-5)" name="Failed" />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </Section>
+          <Section title="Recent Activity">
+            {audit.length ? (
+              <div className="divide-y">
+                {audit.slice(0, 6).map((e) => (
+                  <div key={e.id} className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm">
+                    <span>
+                      <b>{e.user}</b> <span className="text-muted-foreground">{e.action.toLowerCase()}</span>{" "}
+                      {e.recordId} <span className="text-muted-foreground">in {e.module}</span>
+                    </span>
+                    <span className="num text-xs text-muted-foreground">{e.timestamp}</span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <EmptyState title="No activity yet" hint="Actions you take are recorded and persist across sessions." />
+            )}
+          </Section>
+        </div>
+      </>
+    );
+  }
 
   return (
     <>
       <PageHeader
         title="Accounting Operations"
         description="Monitor document processing, accounting workflows, and tax reconciliation."
-        actions={
-          <Button onClick={() => setUpload(true)} disabled={uploadDocuments.isPending}>
-            <Upload />
-            Upload Documents
-          </Button>
-        }
       />
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
@@ -299,15 +324,6 @@ function Dashboard() {
             <Button
               variant="outline"
               className="justify-start"
-              onClick={() => setUpload(true)}
-              disabled={uploadDocuments.isPending}
-            >
-              <Upload />
-              Upload Documents
-            </Button>
-            <Button
-              variant="outline"
-              className="justify-start"
               onClick={() => navigate({ to: "/bank" })}
             >
               <Landmark />
@@ -373,28 +389,6 @@ function Dashboard() {
           )}
         </Section>
       </div>
-
-      <Dialog open={upload} onOpenChange={setUpload}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Upload documents</DialogTitle>
-            <DialogDescription>
-              Files are uploaded to the {company.displayName} inbox for {s.period},{" "}
-              {s.financialYear}.
-            </DialogDescription>
-          </DialogHeader>
-          <FileUploadDropzone onFiles={addFiles} />
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setUpload(false)}
-              disabled={uploadDocuments.isPending}
-            >
-              Cancel
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </>
   );
 }

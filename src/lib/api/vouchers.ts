@@ -391,7 +391,8 @@ export const voucherStatusLabel = (status: VoucherStatus): string =>
     REJECTED: "Rejected",
     APPROVED: "Approved",
     POSTING_IN_PROGRESS: "Posting in progress",
-    POSTED: "Posted",
+    // Shown as a remark so operators see the entry is in Tally and don't re-push.
+    POSTED: "Accounted",
     POSTING_FAILED: "Posting failed",
     AWAITING_IMPORT_CONFIRMATION: "Awaiting import confirmation",
     NEEDS_REVIEW: "Needs review",

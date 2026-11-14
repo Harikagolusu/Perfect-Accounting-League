@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Lock, Plus } from "lucide-react";
 import {
   PageHeader,
@@ -22,7 +22,10 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { AiKeySettings } from "@/components/pal/ai-key-settings";
 import { useStore } from "@/lib/store";
+import { useCompanySettings, useSaveCompanySettings } from "@/lib/queries/settings";
+import type { SettingsUser } from "@/lib/api/settings";
 import { tdsRates } from "@/lib/constants";
 import { EMAIL_RE } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -155,6 +158,7 @@ const SECTIONS: { id: string; title: string; fields?: FieldDef[] }[] = [
       },
     ],
   },
+  { id: "ai", title: "AI (DeepSeek)" },
   {
     id: "security",
     title: "Security Settings",
@@ -204,13 +208,37 @@ const ROLE_PERMS: Record<string, boolean[]> = {
 
 function SettingsPage() {
   const s = useStore();
+  const settingsQuery = useCompanySettings(s.companyId);
+  const saveSettings = useSaveCompanySettings(s.companyId);
   const [active, setActive] = useState("org");
   const [vals, setVals] = useState(DEFAULTS);
+  const [users, setUsers] = useState<SettingsUser[]>([]);
+  const [roles, setRoles] = useState<Record<string, boolean[]>>(ROLE_PERMS);
+  const [newUser, setNewUser] = useState("");
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [confirm, setConfirm] = useState(false);
-  const [users, setUsers] = useState<{ name: string; role: string; active: boolean }[]>([]);
-  const [newUser, setNewUser] = useState("");
+
+  // Last saved state, with defaults filling any key the stored document omits.
+  // Reset reverts to this, and it refills the whole form whenever the company
+  // or the fetched settings change.
+  const saved = useMemo(() => {
+    const d = settingsQuery.data?.data ?? {};
+    return {
+      fields: { ...DEFAULTS, ...(d.fields ?? {}) },
+      users: d.users ?? [],
+      roles: { ...ROLE_PERMS, ...(d.roles ?? {}) },
+    };
+  }, [settingsQuery.data]);
+  useEffect(() => {
+    setVals(saved.fields);
+    setUsers(saved.users);
+    setRoles(saved.roles);
+    setErrors({});
+  }, [saved]);
   const sec = SECTIONS.find((x) => x.id === active)!;
+  // Role policy mirrors the "Manage settings" permission, which only Partner
+  // holds: Viewer is denied outright, Accountant may view but not change.
+  const canManage = s.role === "Partner";
 
   if (s.role === "Viewer") {
     return (
@@ -246,12 +274,18 @@ function SettingsPage() {
     <>
       <PageHeader
         title="Settings"
-        description="Firm-wide configuration. Changes are kept in this browser session only."
+        description="Configuration for the selected company. Saved changes are kept on the server."
       />
       <InfoNotice>
         Passwords, API keys and credentials are never stored in the browser. Secrets will be managed
         by the backend.
       </InfoNotice>
+      {!canManage && (
+        <InfoNotice>
+          Read-only: your role ({s.role}) can view settings but not change them. Only a Partner can
+          manage settings.
+        </InfoNotice>
+      )}
       <div className="grid gap-4 lg:grid-cols-[240px_1fr]">
         <nav className="flex gap-1 overflow-x-auto rounded-md border bg-card p-2 lg:flex-col">
           {SECTIONS.map((x) => (
@@ -273,60 +307,199 @@ function SettingsPage() {
           ))}
         </nav>
         <Section title={sec.title}>
-          {sec.fields && (
-            <>
-              <div className="grid gap-4 md:grid-cols-2">
-                {sec.fields.map((f) =>
-                  f.type === "toggle" ? (
-                    <label
-                      key={f.key}
-                      className="flex items-center justify-between gap-3 rounded border p-3 text-sm"
-                    >
-                      {f.label}
-                      <Switch
-                        checked={!!vals[f.key]}
-                        onCheckedChange={(v) => setVals({ ...vals, [f.key]: v })}
-                      />
-                    </label>
-                  ) : f.type === "select" ? (
-                    <Field key={f.key} label={f.label}>
-                      <select
-                        className="h-9 rounded-md border border-input bg-background px-2 text-sm"
-                        value={String(vals[f.key])}
-                        onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })}
-                      >
-                        {f.options!.map((o) => (
-                          <option key={o}>{o}</option>
-                        ))}
-                      </select>
-                    </Field>
-                  ) : (
-                    <Field
-                      key={f.key}
-                      label={f.label + (f.required ? " *" : "")}
-                      error={errors[f.key]}
-                    >
-                      <Input
-                        type={f.type === "number" ? "number" : (f.type ?? "text")}
-                        value={String(vals[f.key] ?? "")}
-                        onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })}
-                      />
-                    </Field>
-                  ),
-                )}
-              </div>
-              {active === "email" && (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Mailbox OAuth connection will be completed by the backend.{" "}
-                  <StatusBadge status="Not connected" />
-                </p>
+          {/* Install-wide and saved on its own, so it skips the company Save. */}
+          {active === "ai" ? (
+            <AiKeySettings canManage={canManage} />
+          ) : (
+            <fieldset disabled={!canManage} className="min-w-0 space-y-4 border-0 p-0">
+              {sec.fields && (
+                <>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {sec.fields.map((f) =>
+                      f.type === "toggle" ? (
+                        <label
+                          key={f.key}
+                          className="flex items-center justify-between gap-3 rounded border p-3 text-sm"
+                        >
+                          {f.label}
+                          <Switch
+                            checked={!!vals[f.key]}
+                            onCheckedChange={(v) => setVals({ ...vals, [f.key]: v })}
+                          />
+                        </label>
+                      ) : f.type === "select" ? (
+                        <Field key={f.key} label={f.label}>
+                          <select
+                            className="h-9 rounded-md border border-input bg-background px-2 text-sm"
+                            value={String(vals[f.key])}
+                            onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })}
+                          >
+                            {f.options!.map((o) => (
+                              <option key={o}>{o}</option>
+                            ))}
+                          </select>
+                        </Field>
+                      ) : (
+                        <Field
+                          key={f.key}
+                          label={f.label + (f.required ? " *" : "")}
+                          error={errors[f.key]}
+                        >
+                          <Input
+                            type={f.type === "number" ? "number" : (f.type ?? "text")}
+                            value={String(vals[f.key] ?? "")}
+                            onChange={(e) => setVals({ ...vals, [f.key]: e.target.value })}
+                          />
+                        </Field>
+                      ),
+                    )}
+                  </div>
+                  {active === "email" && (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      Mailbox OAuth connection will be completed by the backend.{" "}
+                      <StatusBadge status="Not connected" />
+                    </p>
+                  )}
+                </>
               )}
-              <div className="mt-4 flex gap-2">
-                <Button onClick={() => validate() && setConfirm(true)}>Save changes</Button>
+              {active === "users" && (
+                <div>
+                  <div className="mb-3 flex gap-2">
+                    <Input
+                      placeholder="Full name"
+                      value={newUser}
+                      onChange={(e) => setNewUser(e.target.value)}
+                      className="h-9 max-w-xs"
+                    />
+                    <Button
+                      disabled={!newUser.trim()}
+                      onClick={() => {
+                        setUsers([
+                          ...users,
+                          { name: newUser.trim(), role: "Accountant", active: true },
+                        ]);
+                        setNewUser("");
+                        toast.success("User added. Click Save changes to persist.");
+                      }}
+                    >
+                      <Plus />
+                      Add user
+                    </Button>
+                  </div>
+                  {users.length ? (
+                    <table className="w-full text-sm">
+                      <thead className="text-xs text-muted-foreground">
+                        <tr>
+                          <th className="py-2 text-left">User</th>
+                          <th className="text-left">Role</th>
+                          <th className="text-left">Active</th>
+                          <th />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {users.map((u, i) => (
+                          <tr key={`${i}-${u.name}`} className="border-t">
+                            <td className="py-2">{u.name}</td>
+                            <td>
+                              <select
+                                className="h-8 rounded border border-input bg-background px-1 text-sm"
+                                value={u.role}
+                                onChange={(e) =>
+                                  setUsers(
+                                    users.map((x, j) =>
+                                      j === i ? { ...x, role: e.target.value } : x,
+                                    ),
+                                  )
+                                }
+                              >
+                                {Object.keys(roles).map((r) => (
+                                  <option key={r}>{r}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <Switch
+                                checked={u.active}
+                                onCheckedChange={(v) =>
+                                  setUsers(users.map((x, j) => (j === i ? { ...x, active: v } : x)))
+                                }
+                              />
+                            </td>
+                            <td className="text-right">
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => setUsers(users.filter((_, j) => j !== i))}
+                              >
+                                Remove
+                              </Button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <EmptyState
+                      title="No users configured"
+                      hint="User accounts and invitations will be provided by the backend."
+                    />
+                  )}
+                </div>
+              )}
+              {active === "roles" && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead className="text-xs text-muted-foreground">
+                      <tr>
+                        <th className="py-2 text-left">Role</th>
+                        {PERMS.map((p) => (
+                          <th key={p} className="px-2 text-center">
+                            {p}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(roles).map(([r, ps]) => (
+                        <tr key={r} className="border-t">
+                          <td className="py-2 font-medium">{r}</td>
+                          {PERMS.map((_, i) => (
+                            <td key={i} className="text-center">
+                              <Switch
+                                checked={!!ps[i]}
+                                onCheckedChange={(v) =>
+                                  setRoles({
+                                    ...roles,
+                                    [r]: PERMS.map((__, j) => (j === i ? v : !!ps[j])),
+                                  })
+                                }
+                              />
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="mt-3 text-xs text-muted-foreground">
+                    Permission enforcement is a backend responsibility and is not wired yet. Use the
+                    profile menu to preview the app as each role.
+                  </p>
+                </div>
+              )}
+              <div className="mt-4 flex gap-2 border-t pt-4">
+                <Button
+                  disabled={!s.companyId || saveSettings.isPending}
+                  onClick={() => validate() && setConfirm(true)}
+                >
+                  {saveSettings.isPending ? "Saving…" : "Save changes"}
+                </Button>
                 <Button
                   variant="outline"
+                  disabled={saveSettings.isPending}
                   onClick={() => {
-                    setVals(DEFAULTS);
+                    setVals(saved.fields);
+                    setUsers(saved.users);
+                    setRoles(saved.roles);
                     setErrors({});
                     toast.info("Changes discarded");
                   }}
@@ -334,111 +507,7 @@ function SettingsPage() {
                   Reset
                 </Button>
               </div>
-            </>
-          )}
-          {active === "users" && (
-            <div>
-              <div className="mb-3 flex gap-2">
-                <Input
-                  placeholder="Full name"
-                  value={newUser}
-                  onChange={(e) => setNewUser(e.target.value)}
-                  className="h-9 max-w-xs"
-                />
-                <Button
-                  disabled={!newUser.trim()}
-                  onClick={() => {
-                    setUsers([
-                      ...users,
-                      { name: newUser.trim(), role: "Accountant", active: true },
-                    ]);
-                    setNewUser("");
-                    toast.success("User added to this browser session");
-                  }}
-                >
-                  <Plus />
-                  Add user
-                </Button>
-              </div>
-              {users.length ? (
-                <table className="w-full text-sm">
-                  <thead className="text-xs text-muted-foreground">
-                    <tr>
-                      <th className="py-2 text-left">User</th>
-                      <th className="text-left">Role</th>
-                      <th className="text-left">Active</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.map((u, i) => (
-                      <tr key={u.name} className="border-t">
-                        <td className="py-2">{u.name}</td>
-                        <td>
-                          <select
-                            className="h-8 rounded border border-input bg-background px-1 text-sm"
-                            value={u.role}
-                            onChange={(e) =>
-                              setUsers(
-                                users.map((x, j) => (j === i ? { ...x, role: e.target.value } : x)),
-                              )
-                            }
-                          >
-                            {Object.keys(ROLE_PERMS).map((r) => (
-                              <option key={r}>{r}</option>
-                            ))}
-                          </select>
-                        </td>
-                        <td>
-                          <Switch
-                            checked={u.active}
-                            onCheckedChange={(v) =>
-                              setUsers(users.map((x, j) => (j === i ? { ...x, active: v } : x)))
-                            }
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <EmptyState
-                  title="No users configured"
-                  hint="User accounts and invitations will be provided by the backend."
-                />
-              )}
-            </div>
-          )}
-          {active === "roles" && (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="text-xs text-muted-foreground">
-                  <tr>
-                    <th className="py-2 text-left">Role</th>
-                    {PERMS.map((p) => (
-                      <th key={p} className="px-2 text-center">
-                        {p}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {Object.entries(ROLE_PERMS).map(([r, ps]) => (
-                    <tr key={r} className="border-t">
-                      <td className="py-2 font-medium">{r}</td>
-                      {ps.map((p, i) => (
-                        <td key={i} className="text-center">
-                          {p ? "✓" : "—"}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <p className="mt-3 text-xs text-muted-foreground">
-                Permissions are enforced server-side. Use the profile menu to preview the app as
-                each role.
-              </p>
-            </div>
+            </fieldset>
           )}
         </Section>
       </div>
@@ -447,15 +516,24 @@ function SettingsPage() {
           <AlertDialogHeader>
             <AlertDialogTitle>Save {sec.title.toLowerCase()}?</AlertDialogTitle>
             <AlertDialogDescription>
-              These changes apply for this browser session only.
+              This saves all settings for the selected company to the server.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
             <AlertDialogAction
-              onClick={() => {
-                toast.success("Settings saved");
-              }}
+              onClick={() =>
+                saveSettings.mutate(
+                  { fields: vals, users, roles },
+                  {
+                    onSuccess: () => {
+                      setConfirm(false);
+                      toast.success("Settings saved");
+                    },
+                    onError: (e) => toast.error(e.message),
+                  },
+                )
+              }
             >
               Save
             </AlertDialogAction>

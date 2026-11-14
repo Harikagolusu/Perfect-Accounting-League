@@ -117,6 +117,21 @@ export const exportsApi = {
   },
 };
 
+export type TableSheet = {
+  name: string;
+  columns: string[];
+  rows: (string | number | boolean | null)[][];
+};
+
+/** On-screen rows as a real .xlsx; the backend only formats, it stores nothing. */
+export function tableXlsx(filename: string, sheets: TableSheet[]): Promise<DownloadedFile> {
+  return apiDownload(`${API_V1_PREFIX}/exports/table.xlsx`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename, sheets }),
+  });
+}
+
 /** First exception message, suitable for a toast when nothing can be exported. */
 export function firstExportError(preview: ExportPreview): string | null {
   return preview.exceptions[0]?.message ?? null;

@@ -40,7 +40,9 @@ from app.models.bank import (
     BankTransaction,
     TransactionType,
 )
-from app.models.voucher import AccountingEntityType
+from app.models.document import DocumentType
+from app.models.voucher import AccountingEntityType, VoucherSourceType
+from app.services.voucher_cleanup import delete_source_vouchers
 from app.services.accounting_audit import record_event
 from app.schemas.bank import (
     BankAccountCreate,
@@ -297,10 +299,11 @@ def update_bank_statement(
 def delete_bank_statement(
     db: Session, company_id: uuid.UUID, statement_id: uuid.UUID
 ) -> BankStatement:
-    """Delete a statement and its transactions.
+    """Delete a statement, its transactions and their draft vouchers.
 
     The source document and the bank account are left alone: both outlive any
-    single statement.
+    single statement. Raises VoucherInTallyError (nothing changed) when a
+    transaction's voucher is already in Tally.
     """
     statement = get_bank_statement(db, company_id, statement_id)
     transactions = list(
@@ -309,6 +312,13 @@ def delete_bank_statement(
                 BankTransaction.bank_statement_id == statement_id
             )
         ).all()
+    )
+    delete_source_vouchers(
+        db,
+        company_id,
+        VoucherSourceType.BANK_TRANSACTION,
+        [t.id for t in transactions],
+        reason="Bank statement deleted.",
     )
     for transaction in transactions:
         db.delete(transaction)
@@ -601,6 +611,7 @@ def process_statement(
         # FAILED and keep any previously extracted rows — never wipe them and
         # claim PROCESSED, which is what hid these failures as empty successes.
         statement.status = BankStatementStatus.FAILED
+        statement.extraction_message = result.message or None
         db.commit()
         db.refresh(statement)
         return statement, result
@@ -626,12 +637,19 @@ def _finalize_extraction(
         if result.issues
         else BankStatementStatus.PROCESSED
     )
+    statement.extraction_message = (
+        " ".join(str(getattr(i, "message", i)) for i in result.issues)
+        if result.issues
+        else None
+    )
     db.commit()
     db.refresh(statement)
 
 
 #: Reported when a freshly read statement can't be tied to a bank account.
 INGEST_UNMATCHED = "BANK_ACCOUNT_UNMATCHED"
+#: Reported when the identical file already produced a statement.
+INGEST_DUPLICATE = "DUPLICATE_DOCUMENT"
 
 
 def _match_bank_account(
@@ -675,22 +693,121 @@ def _match_bank_account(
         ]
         if len(by_name) == 1:
             return by_name[0]
+        # Statements print "HDFC BANK LIMITED" or "State Bank of India" while Tally
+        # ledgers say "HDFC Bank Ltd" or "SBI Current A/c": compare the distinctive
+        # words only (aliases folded, filler words and numbers dropped), in either
+        # direction, and accept only a single match.
+        words = _bank_words(name)
+        if words:
+            by_words = []
+            for a in active:
+                own = _bank_words(a.bank_name) | _bank_words(a.ledger_name)
+                if own and (words <= own or own <= words):
+                    by_words.append(a)
+            if len(by_words) == 1:
+                return by_words[0]
     return None
 
 
+#: Words that say nothing about which bank or account a name means.
+_BANK_NAME_FILLER = {
+    "bank", "banking", "ltd", "limited", "the", "of", "and", "co", "pvt",
+    "private", "corporation", "corp", "india", "account", "ac", "acct",
+    "current", "savings", "saving", "ca", "sb", "od", "cc",
+}
+
+#: Full bank names folded to the short form Tally ledgers usually use. Longer
+#: names first, so "state bank of india" wins over "bank of india".
+_BANK_ALIASES = (
+    ("hongkong and shanghai banking corporation", "hsbc"),
+    ("hong kong and shanghai banking corporation", "hsbc"),
+    ("housing development finance corporation", "hdfc"),
+    ("state bank of india", "sbi"),
+    ("union bank of india", "ubi"),
+    ("central bank of india", "cbi"),
+    ("bank of maharashtra", "bom"),
+    ("indian overseas bank", "iob"),
+    ("punjab national bank", "pnb"),
+    ("bank of baroda", "bob"),
+    ("bank of india", "boi"),
+    ("kotak mahindra", "kotak"),
+    ("standard chartered", "scb"),
+)
+
+
+def _bank_words(text: str | None) -> set[str]:
+    cleaned = " ".join(
+        "".join(c if c.isalnum() else " " for c in (text or "").lower()).split()
+    )
+    for full, short in _BANK_ALIASES:
+        cleaned = cleaned.replace(full, short)
+    return {
+        w
+        for w in cleaned.split()
+        if len(w) > 1 and not w.isdigit() and w not in _BANK_NAME_FILLER
+    }
+
+
+def _has_real_number(account_number: str | None) -> bool:
+    return sum(c.isdigit() for c in (account_number or "")) >= 4
+
+
+def _remember_account_number(account: BankAccount, detected: str | None) -> None:
+    """Store the number a statement showed on an account Tally gave none for.
+
+    Tally imports carry a placeholder, so the first matched statement teaches
+    PAL the real number and every later month matches on it directly. A number
+    already on the account is never overwritten.
+    """
+    if _has_real_number(detected) and not _has_real_number(account.account_number):
+        account.account_number = (detected or "").strip()
+
+
 def ingest_bank_statement(
-    db: Session, company_id: uuid.UUID, document_id: uuid.UUID
+    db: Session,
+    company_id: uuid.UUID,
+    document_id: uuid.UUID,
+    bank_account_id: uuid.UUID | None = None,
 ) -> tuple[BankStatement | None, StatementExtractionResult]:
     """Extract an uploaded document, match it to an account, create its statement.
 
-    The direct-upload entry point: the user selects no account. The document is
-    read once; the account it belongs to is resolved from what the read found;
-    only then is the statement created. A failed read or an unmatched account
-    creates no statement and is reported for a human — nothing is guessed.
+    The direct-upload entry point: normally the user selects no account. The
+    document is read once; the account it belongs to is resolved from what the
+    read found; only then is the statement created. A failed read or an
+    unmatched account creates no statement and is reported for a human, who can
+    retry with `bank_account_id` set — nothing is guessed.
+
+    Raises BankAccountNotFoundError when `bank_account_id` is not this company's.
     """
     from app.core.storage import resolve_storage_path
 
     document = get_document(db, company_id, document_id)
+
+    # The same file already made a statement: a second one would double every
+    # transaction. Checked before the (paid) AI read.
+    from app.services.document import find_duplicate_document
+
+    earlier = find_duplicate_document(db, document)
+    if earlier is not None and db.scalar(
+        select(BankStatement.id).where(
+            BankStatement.company_id == company_id,
+            BankStatement.document_id == earlier.id,
+        )
+    ):
+        return None, StatementExtractionResult(
+            configured=True,
+            reason=INGEST_DUPLICATE,
+            message=(
+                f'This file was already uploaded as "{earlier.original_filename}" '
+                "and its statement exists. Delete this copy."
+            ),
+        )
+
+    chosen = (
+        get_bank_account(db, company_id, bank_account_id)
+        if bank_account_id is not None
+        else None
+    )
     extractor = get_statement_extractor()
     if not extractor.is_configured():
         return None, extractor.extract(None, b"")
@@ -700,21 +817,26 @@ def ingest_bank_statement(
     if not result.configured or result.reason is not None:
         return None, result
 
-    account = _match_bank_account(
+    account = chosen or _match_bank_account(
         db,
         company_id,
         account_number=result.detected_account_number,
         bank_name=result.detected_bank_name,
     )
     if account is None:
+        detected = ", ".join(
+            v for v in (result.detected_bank_name, result.detected_account_number) if v
+        )
         return None, replace(
             result,
             reason=INGEST_UNMATCHED,
             message=(
-                "Couldn't match this statement to a bank account. Sync the "
-                "account from Tally, or open the statement and set the account."
+                "Couldn't tell which bank account this statement belongs to"
+                + (f" (read: {detected})" if detected else "")
+                + ". Choose the account below and retry."
             ),
         )
+    _remember_account_number(account, result.detected_account_number)
 
     statement = BankStatement(
         company_id=company_id,
@@ -722,6 +844,8 @@ def ingest_bank_statement(
         document_id=document.id,
         status=BankStatementStatus.UPLOADED,
     )
+    # Keeps the file out of the invoice Document Inbox.
+    document.document_type = DocumentType.BANK_STATEMENT
     db.add(statement)
     db.commit()
     db.refresh(statement)

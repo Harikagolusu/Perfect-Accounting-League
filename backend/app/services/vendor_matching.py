@@ -268,6 +268,23 @@ def _has_confirmed_name(
     )
 
 
+def _vendor_pans(vendor: Vendor) -> set[str]:
+    """The PANs a vendor record carries: its own, and the one inside its GSTIN."""
+    pans = {normalize_pan(vendor.pan)}
+    gstin = normalize_gstin(vendor.gstin)
+    if gstin:
+        pans.add(gstin[2:12])
+    pans.discard(None)
+    return pans  # type: ignore[return-value]
+
+
+def _same_printed_name(a: str | None, b: str | None) -> bool:
+    def key(s: str | None) -> str:
+        return " ".join(unicodedata.normalize("NFKC", s or "").casefold().split())
+
+    return bool(key(a)) and key(a) == key(b)
+
+
 def match_vendor(
     db: Session,
     company_id: uuid.UUID,
@@ -324,7 +341,47 @@ def match_vendor(
         if normalized_name and normalize_vendor_name(vendor.name) == normalized_name
     ]
 
-    # Duplicate identifier rows are ambiguous, not an opportunity to pick one.
+    # Characters 3-12 of a GSTIN are the holder's PAN, so one company registered
+    # in several states shares it: Airtel Karnataka 29AAACB2894G1ZJ and Airtel
+    # MP 23AAACB2894G2ZU are the same supplier. Used only when nothing matched
+    # the printed GSTIN or PAN directly, so an exact GSTIN still wins, and only
+    # against master vendors: one PAL auto-created from an invoice may carry a
+    # misread name ("FIXEDLINE AND BROADBAND SERVICES") that must not spread.
+    if not gstin_matches and not pan_matches:
+        lookup_pan = normalized_pan or (normalized_gstin[2:12] if normalized_gstin else None)
+        if lookup_pan:
+            pan_matches = [
+                vendor
+                for vendor in vendors
+                if vendor.status == VendorStatus.ACTIVE and lookup_pan in _vendor_pans(vendor)
+            ]
+            if len(pan_matches) > 1 and normalized_name:
+                same_name = [
+                    vendor
+                    for vendor in pan_matches
+                    if normalize_vendor_name(vendor.name) == normalized_name
+                ]
+                if len(same_name) == 1:
+                    pan_matches = same_name
+
+    # Several vendors can legitimately share a GSTIN (Tally often keeps "Google
+    # Ads" and "Google India Private Limited" as separate ledgers). When the
+    # printed name is exactly one of them, GSTIN and name agree on a single
+    # vendor, so that is a strong match rather than a guess.
+    if len(gstin_matches) > 1 and normalized_name:
+        same_name = [
+            vendor
+            for vendor in gstin_matches
+            if normalize_vendor_name(vendor.name) == normalized_name
+        ]
+        if len(same_name) == 1:
+            return _matched(
+                same_name[0],
+                method=VendorMatchMethod.EXACT_GSTIN,
+                reason=MATCH_REASON_EXACT_GSTIN,
+            )
+
+    # Otherwise duplicate identifier rows are ambiguous, not an opportunity to pick one.
     if len(gstin_matches) > 1:
         return _ambiguous(
             MATCH_REASON_MULTIPLE_GSTIN, [*gstin_matches, *pan_matches, *name_matches]
@@ -379,7 +436,21 @@ def match_vendor(
 
     if len(name_matches) == 1:
         vendor = name_matches[0]
-        trusted = _has_confirmed_name(db, company_id, vendor.id, normalized_name)
+        # Unregistered and foreign suppliers (no GSTIN/PAN on either side) can
+        # only ever match by name. The very same printed name (case and spacing
+        # aside) on a vendor from the master (Tally or a person, not one PAL
+        # auto-created) is as good as it gets. "ABC Traders" vs "ABC Traders Pvt
+        # Ltd" still needs a person: they can be different firms.
+        unregistered = (
+            normalized_gstin is None
+            and normalized_pan is None
+            and not _vendor_pans(vendor)
+            and vendor.status == VendorStatus.ACTIVE
+            and _same_printed_name(vendor.name, cleaned_name)
+        )
+        trusted = unregistered or _has_confirmed_name(
+            db, company_id, vendor.id, normalized_name
+        )
         return _matched(
             vendor,
             method=VendorMatchMethod.NORMALIZED_NAME,

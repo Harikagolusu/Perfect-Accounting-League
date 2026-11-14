@@ -9,8 +9,10 @@ import {
   type TallyCompanySyncDto,
   type TallyMappingSyncDto,
   type TallyGstWorkingDto,
+  type TallyTdsWorkingDto,
   type TallyStatusDto,
   type TallySyncDto,
+  type TallyVendorSyncDto,
 } from "@/lib/api/tally";
 
 const isBrowser = typeof window !== "undefined";
@@ -30,12 +32,27 @@ export function useTallyStatus() {
   });
 }
 
+/** Names of companies currently loaded in TallyPrime (lower-cased); empty when Tally is down. */
+export function useTallyLoadedCompanies() {
+  return useQuery({
+    queryKey: ["tally", "companies"],
+    queryFn: async () => {
+      const res = await tallyApi.companies().catch(() => ({ companies: [] }));
+      return new Set(res.companies.map((c) => c.name.trim().toLowerCase()));
+    },
+    enabled: isBrowser,
+    staleTime: 15_000,
+    retry: false,
+  });
+}
+
 export function useTallyCompanySync() {
   const queryClient = useQueryClient();
   return useMutation<TallyCompanySyncDto, Error, void>({
     mutationFn: () => tallyApi.syncCompanies(),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["companies"] });
+      queryClient.invalidateQueries({ queryKey: ["tally", "companies"] });
       queryClient.invalidateQueries({ queryKey: tallyKeys.status() });
     },
   });
@@ -85,6 +102,34 @@ export function useTallyGstWorking() {
   });
 }
 
+/** Query binding for the Reports page: fetch the TDS working for a period. */
+export function useTallyTdsWorkingReport(
+  companyId: string | undefined,
+  tallyCompanyName: string | undefined,
+  dateFrom?: string,
+  dateTo?: string,
+  enabled = true,
+) {
+  return useQuery<TallyTdsWorkingDto>({
+    queryKey: ["tally", "tds-working", companyId ?? "", tallyCompanyName ?? "", dateFrom ?? "", dateTo ?? ""],
+    queryFn: () => tallyApi.tdsWorking(companyId!, tallyCompanyName!, dateFrom, dateTo),
+    enabled: isBrowser && !!companyId && !!tallyCompanyName && enabled,
+    staleTime: 30_000,
+    retry: false,
+  });
+}
+
+export function useTallyTdsWorking() {
+  return useMutation<
+    TallyTdsWorkingDto,
+    Error,
+    { companyId: string; tallyCompanyName: string; fromDate?: string; toDate?: string }
+  >({
+    mutationFn: ({ companyId, tallyCompanyName, fromDate, toDate }) =>
+      tallyApi.tdsWorking(companyId, tallyCompanyName, fromDate, toDate),
+  });
+}
+
 export function useTallyBankSync() {
   const queryClient = useQueryClient();
   return useMutation<TallyBankSyncDto, Error, { companyId: string; tallyCompanyName: string }>({
@@ -92,6 +137,17 @@ export function useTallyBankSync() {
       tallyApi.syncBankAccounts(companyId, tallyCompanyName),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["bankAccounts"] });
+    },
+  });
+}
+
+export function useTallyVendorSync() {
+  const queryClient = useQueryClient();
+  return useMutation<TallyVendorSyncDto, Error, { companyId: string; tallyCompanyName: string }>({
+    mutationFn: ({ companyId, tallyCompanyName }) =>
+      tallyApi.syncVendors(companyId, tallyCompanyName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["vendors"] });
     },
   });
 }

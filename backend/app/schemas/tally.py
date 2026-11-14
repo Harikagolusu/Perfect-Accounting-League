@@ -97,6 +97,19 @@ class TallyBankSyncResponse(BaseModel):
     error_message: str | None = None
 
 
+class TallyVendorSyncResponse(BaseModel):
+    """Result of one Tally creditor-ledger -> PAL vendor sync run."""
+
+    success: bool
+    company_id: uuid.UUID
+    tally_company_name: str
+    vendors_fetched: int
+    vendors_created: int
+    vendors_updated: int
+    vendors_unchanged: int
+    error_message: str | None = None
+
+
 class TallyMappingSyncResponse(BaseModel):
     """Result of one run that learns ledger mappings from Tally vouchers."""
 
@@ -142,6 +155,36 @@ class TallyGstWorkingResponse(BaseModel):
     to_date: date | None = None
     outward: GstComponentTotals = GstComponentTotals()
     inward_itc: GstComponentTotals = GstComponentTotals()
+    vouchers_fetched: int = 0
+    vouchers_used: int = 0
+    error_message: str | None = None
+
+
+class TallyTdsWorkingRow(BaseModel):
+    """One voucher's TDS deduction. Money serializes as decimal strings."""
+
+    voucher_date: date | None = None
+    voucher_number: str = ""
+    party_name: str = ""
+    pan: str = ""
+    section: str
+    base: Decimal = Decimal("0")
+    tds: Decimal = Decimal("0")
+    rate: Decimal = Decimal("0")
+    status: str
+    computed: bool = False
+
+
+class TallyTdsWorkingResponse(BaseModel):
+    """TDS deductions read from Tally vouchers for a period (Non Salary sheet)."""
+
+    success: bool
+    company_id: uuid.UUID
+    tally_company_name: str
+    from_date: date | None = None
+    to_date: date | None = None
+    rows: list[TallyTdsWorkingRow] = []
+    total_tds: Decimal = Decimal("0")
     vouchers_fetched: int = 0
     vouchers_used: int = 0
     error_message: str | None = None

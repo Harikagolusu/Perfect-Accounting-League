@@ -72,6 +72,10 @@ def no_real_ai_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     key sets its own with `monkeypatch.setenv` after this fixture runs.
     """
     monkeypatch.setenv("DEEPSEEK_API_KEY", "")
+    # A key saved from Settings lives in the database; read the test one.
+    monkeypatch.setattr(
+        "app.services.ai.key_store.session_factory", TestingSessionLocal
+    )
     # Deterministic page-limit behaviour regardless of a developer's .env.
     monkeypatch.setenv("INVOICE_MAX_PAGES", "10")
     get_settings.cache_clear()
@@ -79,6 +83,38 @@ def no_real_ai_key(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
         yield
     finally:
         get_settings.cache_clear()
+
+
+class _AcceptingTally:
+    """Stand-in TallyService: every ledger create is accepted, nothing is sent."""
+
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+
+    def create_ledger(self, **kwargs):
+        from app.integrations.tally.parser import TallyImportResult
+
+        self.created.append(kwargs)
+        return TallyImportResult(
+            created=1, altered=0, ignored=0, errors=0, exceptions=0,
+            cancelled=0, last_voucher_id=None, message=None,
+        )
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fake_tally_ledger_create(monkeypatch: pytest.MonkeyPatch) -> _AcceptingTally:
+    """Keep real TallyPrime out of ledger/vendor creation in every test.
+
+    Creating a ledger or vendor now mirrors it into Tally first (block
+    semantics). Tests get an accepting stub by default; a test that needs a
+    rejection passes its own `service=` or re-patches `get_tally_service`.
+    """
+    fake = _AcceptingTally()
+    monkeypatch.setattr("app.services.ledger.get_tally_service", lambda: fake)
+    return fake
 
 
 @pytest.fixture(autouse=True)

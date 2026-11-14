@@ -35,8 +35,10 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
 
     # --- CORS ----------------------------------------------------------
-    # Comma-separated list of allowed origins, e.g. "http://localhost:5173".
-    cors_origins: str = "http://localhost:5173"
+    # Comma-separated list of allowed origins. The Vite dev server runs on 8080
+    # (see vite config); 5173 is kept for Vite's own default. Override with the
+    # CORS_ORIGINS env var in other environments.
+    cors_origins: str = "http://localhost:5173,http://localhost:8080"
 
     # --- Document storage ----------------------------------------------
     # PAL runs inside the client's own environment, so uploaded documents are
@@ -59,6 +61,12 @@ class Settings(BaseSettings):
     # output; the reasoning model picks a usable ledger where deepseek-chat
     # returns null, and the small answer never hits the reasoning-budget trap.
     deepseek_reasoner_model: str = "deepseek-reasoner"
+
+    # --- Secrets saved from the UI ---------------------------------------
+    # Encrypts API keys saved on the Settings page. Required in production;
+    # elsewhere a key file is generated beside the storage folder. Changing it
+    # makes saved keys unreadable, so they must be entered again.
+    pal_secret_key: str = ""
 
     # --- Invoice extraction --------------------------------------------
     # Hard cap on PDF pages sent to the vision model. A document above this

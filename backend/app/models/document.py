@@ -88,6 +88,9 @@ class Document(Base):
     # Shared code for all files uploaded together in one batch, so the inbox can
     # be filtered to a single upload. Null for documents created before this.
     batch_code: Mapped[str | None] = mapped_column(String(32), index=True)
+    #: SHA-256 of the file bytes, to spot the same file uploaded twice. Null for
+    #: documents uploaded before it was recorded.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), index=True)
     document_type: Mapped[DocumentType] = mapped_column(
         DOCUMENT_TYPE_ENUM,
         nullable=False,

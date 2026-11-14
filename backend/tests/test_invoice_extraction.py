@@ -2322,9 +2322,40 @@ def test_line_items_with_null_description_are_skipped() -> None:
     ]
     # description=" " is cleaned to None by the field_validator, but test
     # the case where it genuinely arrives as None.
-    result = _collect_line_items(items)
+    result = _collect_line_items(items, [])
     assert len(result) == 1
     assert result[0]["description"] == "Valid item"
+
+
+def test_quantity_and_rate_contradicting_the_line_amount_are_dropped() -> None:
+    """Client report: an ₹8,812 air ticket was read as qty 4406 × rate 8812,
+    and the line showed ₹3,88,25,672. The amount stays; the pair is dropped."""
+    from app.services.invoice_extraction_validation import (
+        ExtractedLineItem,
+        _collect_line_items,
+    )
+
+    issues: list[str] = []
+    items = [
+        ExtractedLineItem(
+            description="AIR TICKET",
+            quantity=Decimal("4406"),
+            unit_rate=Decimal("8812"),
+            total_amount=Decimal("8812.00"),
+        ),
+        # A line discount keeps qty × rate within 2× of the amount: kept.
+        ExtractedLineItem(
+            description="Hotel",
+            quantity=Decimal("2"),
+            unit_rate=Decimal("1000"),
+            taxable_amount=Decimal("1800.00"),
+        ),
+    ]
+    result = _collect_line_items(items, issues)
+    assert result[0]["quantity"] is None and result[0]["unit_rate"] is None
+    assert result[0]["total_amount"] == Decimal("8812.00")
+    assert result[1]["quantity"] == Decimal("2")
+    assert len(issues) == 1 and "Line 1" in issues[0]
 
 
 def test_different_vendor_layout_two_column_header(
@@ -2364,3 +2395,42 @@ def test_different_vendor_layout_two_column_header(
     assert invoice["vendor_name"] == "ABC Supplies Pvt Ltd"
     assert invoice["igst_amount"] == "900.00"
     assert invoice["cgst_amount"] is None
+
+
+# --- Implied round-off -----------------------------------------------------
+
+
+def _validated(**fields: Any):
+    from app.services.invoice_extraction_validation import (
+        parse_extraction_payload,
+        validate_extraction,
+    )
+
+    payload = {"is_invoice": True, "invoice_number": "INV-1", "vendor_name": "Air Speed", **fields}
+    return validate_extraction(parse_extraction_payload(json.dumps(payload)))
+
+
+def test_unprinted_paise_rounding_becomes_round_off() -> None:
+    """Airspeed: 6809 + 612.81 + 612.81 = 8034.62, payable printed 8035.00."""
+    result = _validated(
+        taxable_amount="6809.00", cgst_amount="612.81", sgst_amount="612.81", total_amount="8035.00"
+    )
+    assert result.values["round_off"] == Decimal("0.38")
+    assert not any("Total amount" in issue for issue in result.issues)
+
+
+def test_gap_over_one_rupee_is_still_reported() -> None:
+    """Airtel: off by 285 is a misread, never silently absorbed."""
+    result = _validated(
+        taxable_amount="3714.00", cgst_amount="191.76", sgst_amount="191.76", total_amount="4382.52"
+    )
+    assert result.values["round_off"] is None
+    assert any("Total amount" in issue for issue in result.issues)
+
+
+def test_printed_round_off_is_kept_as_read() -> None:
+    result = _validated(
+        taxable_amount="100.00", igst_amount="18.00", round_off="0.10", total_amount="118.50"
+    )
+    assert result.values["round_off"] == Decimal("0.10")
+    assert any("Total amount" in issue for issue in result.issues)

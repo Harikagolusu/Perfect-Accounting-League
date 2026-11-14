@@ -7,11 +7,16 @@ confirm the provider is reachable and correctly configured.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
+from typing import Literal
 
-from app.core.config import get_settings
-from app.services.ai import AIProviderError, get_ai_provider
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
+
+from app.core.database import get_db
+from app.core.secrets import SecretKeyMissing
+from app.services.ai import AIProviderError, DeepSeekProvider, get_ai_provider
+from app.services.ai.key_store import current_key, delete_key, masked, save_key
 
 router = APIRouter()
 
@@ -57,14 +62,68 @@ def ai_status() -> AIStatusResponse:
     Does NOT make an external API call. Does NOT expose the API key or
     any secrets. Safe for health checks and startup probes.
     """
-    settings = get_settings()
     provider = get_ai_provider()
 
     return AIStatusResponse(
-        configured=settings.ai_configured,
+        # The provider resolves the saved key first, then the env var.
+        configured=provider.is_configured(),
         provider=provider.name,
         model=provider.model,
     )
+
+
+class AIKeyStatus(BaseModel):
+    """Whether a key is in use and where it came from. Never the key itself."""
+
+    configured: bool
+    source: Literal["settings", "environment"] | None
+    masked: str | None
+
+
+class AIKeyUpdate(BaseModel):
+    api_key: str = Field(..., min_length=8, max_length=256)
+
+
+def _key_status() -> AIKeyStatus:
+    key, source = current_key()
+    return AIKeyStatus(configured=bool(key), source=source, masked=masked(key))
+
+
+@router.get("/key", response_model=AIKeyStatus, tags=["ai"])
+def get_ai_key() -> AIKeyStatus:
+    return _key_status()
+
+
+@router.put("/key", response_model=AIKeyStatus, tags=["ai"])
+def put_ai_key(payload: AIKeyUpdate, db: Session = Depends(get_db)) -> AIKeyStatus:
+    """Verify the key with DeepSeek, then save it encrypted.
+
+    A key DeepSeek rejects is never stored, so a typo cannot silently switch
+    extraction off.
+    """
+    key = payload.api_key.strip()
+    try:
+        DeepSeekProvider(api_key=key).generate_text("Reply with OK.", max_tokens=5)
+    except AIProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="DeepSeek did not accept this key. Check it and try again.",
+        ) from exc
+    try:
+        save_key(db, key)
+    except SecretKeyMissing as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The server has no PAL_SECRET_KEY, so keys cannot be saved.",
+        ) from exc
+    return _key_status()
+
+
+@router.delete("/key", response_model=AIKeyStatus, tags=["ai"])
+def delete_ai_key(db: Session = Depends(get_db)) -> AIKeyStatus:
+    """Remove the saved key; the env var, if any, takes over again."""
+    delete_key(db)
+    return _key_status()
 
 
 @router.post("/test", response_model=AITestResponse, tags=["ai"])

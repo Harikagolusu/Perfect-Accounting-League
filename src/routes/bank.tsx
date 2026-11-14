@@ -23,7 +23,18 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { useCompany } from "@/lib/store";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { useCompany, useStore } from "@/lib/store";
+import { PERIODS, periodMonthStart } from "@/lib/constants";
 import { useTallyBankDataSync, useTallyMappingSync } from "@/lib/queries/tally";
 import { fmtDate, fmtMoney, compareMoney } from "@/lib/format";
 import { downloadBlob, exportFile } from "@/lib/export";
@@ -106,6 +117,9 @@ const MAX_BATCH = 10;
 function BankPage() {
   const company = useCompany();
   const companyId = company?.id;
+  const { financialYear, period, setPeriod } = useStore();
+  // "YYYY-MM" of the month picked in the top bar.
+  const selectedMonth = periodMonthStart(financialYear, period)?.slice(0, 7);
 
   const accountsQuery = useBankAccounts(companyId);
   const statementsQuery = useBankStatements(companyId);
@@ -142,8 +156,12 @@ function BankPage() {
       name: string;
       status: "queued" | "extracting" | "completed" | "review" | "failed";
       detail?: string;
+      /** Read fine but no account matched: offer an account picker and retry. */
+      unmatched?: boolean;
     }[]
   >([]);
+  const [retryPick, setRetryPick] = useState<Record<string, string>>({});
+  const [retryingId, setRetryingId] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [statementId, setStatementId] = useState("");
   const [batch, setBatch] = useState("All");
@@ -183,6 +201,7 @@ function BankPage() {
     setStatementId("");
     setStaged([]);
     setBatchItems([]);
+    setRetryPick({});
     setProgress(null);
     setPostedIds(new Set());
     setTallyCfg((c) => ({ ...c, tallyCompany: company?.legalName ?? "" }));
@@ -212,12 +231,37 @@ function BankPage() {
   }, [statements, documents]);
   const visibleStatements = useMemo(
     () =>
-      batch === "All"
-        ? statements
-        : statements.filter(
-            (st) => ((st.documentId ? batchByDoc.get(st.documentId) : null) ?? null) === batch,
-          ),
-    [statements, batch, batchByDoc],
+      statements.filter((st) => {
+        if (batch !== "All" && (st.documentId ? batchByDoc.get(st.documentId) : null) !== batch)
+          return false;
+        // Only statements with transactions in the top-bar month. The real
+        // transaction span is used, not the declared period: Tally-synced
+        // statements declare the whole FY and many uploads have no start date.
+        // A statement with no transactions (failed or empty) is not shown.
+        const start = st.firstTransactionDate?.slice(0, 7);
+        const end = st.lastTransactionDate?.slice(0, 7);
+        return (
+          !selectedMonth || (!!start && !!end && start <= selectedMonth && end >= selectedMonth)
+        );
+      }),
+    [statements, batch, batchByDoc, selectedMonth],
+  );
+  // Months that do have statements, so a statement uploaded for another month
+  // is not silently hidden by the top-bar month.
+  const otherMonths = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          statements
+            .filter(
+              (st) =>
+                batch === "All" || (st.documentId ? batchByDoc.get(st.documentId) : null) === batch,
+            )
+            .map((st) => st.firstTransactionDate?.slice(0, 7))
+            .filter((m): m is string => !!m && m !== selectedMonth),
+        ),
+      ).sort(),
+    [statements, batch, batchByDoc, selectedMonth],
   );
 
   // Keep a valid selection as statements (and the batch filter) come and go.
@@ -306,7 +350,12 @@ function BankPage() {
     const docs: { id: string; name: string }[] = [];
     try {
       for (const f of files) {
-        const [uploaded] = await uploadDocuments.mutateAsync({ files: [f], batchCode });
+        const [uploaded] = await uploadDocuments.mutateAsync({
+          files: [f],
+          batchCode,
+          // Tagged so the invoice Document Inbox never lists a bank statement.
+          documentType: "BANK_STATEMENT",
+        });
         docs.push({ id: uploaded.id, name: f.name });
       }
     } catch (e) {
@@ -330,6 +379,7 @@ function BankPage() {
                   ...it,
                   status,
                   detail: status === "completed" ? undefined : p.last.message,
+                  unmatched: p.last.reason === "BANK_ACCOUNT_UNMATCHED",
                 };
               }
               if (idx === p.done && p.done < p.total) return { ...it, status: "extracting" };
@@ -340,6 +390,19 @@ function BankPage() {
       });
       const firstCreated = results.find((r) => r.statementId);
       if (firstCreated?.statementId) setStatementId(firstCreated.statementId);
+      // Warn when an uploaded statement has no transactions in the top-bar month.
+      if (selectedMonth) {
+        const fresh = (await statementsQuery.refetch()).data ?? [];
+        const wrong = results.flatMap((r) => {
+          const st = fresh.find((x) => x.id === r.statementId);
+          const start = st?.firstTransactionDate?.slice(0, 7);
+          const end = st?.lastTransactionDate?.slice(0, 7);
+          if (!st || !start || !end || (start <= selectedMonth && end >= selectedMonth)) return [];
+          const name = docs.find((d) => d.id === r.documentId)?.name ?? "Statement";
+          return [{ name, start: st.firstTransactionDate!, end: st.lastTransactionDate! }];
+        });
+        if (wrong.length) setUploadMonthCheck(wrong);
+      }
       const needAttention = results.filter(
         (r) => !r.statementId || r.status !== "PROCESSED",
       ).length;
@@ -353,6 +416,35 @@ function BankPage() {
     } catch (e) {
       setProgress(null);
       toast.error(e instanceof Error ? e.message : "Extraction failed");
+    }
+  };
+
+  // Unmatched file: re-run ingest with the account the user picked. PAL also
+  // stores the statement's account number on it, so next month matches alone.
+  const retryWithAccount = async (documentId: string) => {
+    const bankAccountId = retryPick[documentId];
+    if (!bankAccountId) return toast.error("Choose the bank account first.");
+    setRetryingId(documentId);
+    try {
+      const [r] = await ingestBatch.mutateAsync({ documentIds: [documentId], bankAccountId });
+      const status = ingestCard(r);
+      setBatchItems((prev) =>
+        prev.map((it) =>
+          it.id === documentId
+            ? {
+                ...it,
+                status,
+                detail: status === "completed" ? undefined : r.message,
+                unmatched: r.reason === "BANK_ACCOUNT_UNMATCHED",
+              }
+            : it,
+        ),
+      );
+      if (r.statementId) setStatementId(r.statementId);
+      if (status === "failed") toast.error(r.message || "Extraction failed");
+      else toast.success("Statement extracted");
+    } finally {
+      setRetryingId(null);
     }
   };
 
@@ -501,6 +593,31 @@ function BankPage() {
     setPostingId(null);
   };
 
+  // Posting a transaction dated outside the month picked in the top bar is
+  // usually a wrong-period mistake, so ask first; the user may still continue.
+  const [uploadMonthCheck, setUploadMonthCheck] = useState<
+    { name: string; start: string; end: string }[] | null
+  >(null);
+  const [monthCheck, setMonthCheck] = useState<{
+    ids: string[];
+    clear: () => void;
+    single: boolean;
+    outside: UiBankTransaction[];
+  } | null>(null);
+  const runTallyPost = (ids: string[], clear: () => void, single: boolean) =>
+    single ? postOneToTally(ids[0]) : exportSelectedToTally(ids, clear);
+  const requestTallyPost = (ids: string[], clear: () => void, single = false) => {
+    const outside = transactions.filter(
+      (t) =>
+        ids.includes(t.id) &&
+        selectedMonth &&
+        t.transactionDate &&
+        !t.transactionDate.startsWith(selectedMonth),
+    );
+    if (outside.length) setMonthCheck({ ids, clear, single, outside });
+    else void runTallyPost(ids, clear, single);
+  };
+
   const exportClientBank = async () => {
     if (!companyId) return;
     setExportingClient(true);
@@ -647,7 +764,7 @@ function BankPage() {
           <button
             onClick={(e) => {
               e.stopPropagation();
-              void postOneToTally(r.id);
+              requestTallyPost([r.id], () => {}, true);
             }}
             disabled={postingTally}
             aria-label="Post to Tally"
@@ -883,6 +1000,37 @@ function BankPage() {
                   {it.detail && (it.status === "failed" || it.status === "review") && (
                     <p className="mt-0.5 text-xs text-muted-foreground">{it.detail}</p>
                   )}
+                  {it.status === "failed" && it.unmatched && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <select
+                        aria-label={`Bank account for ${it.name}`}
+                        className={selectCls + " min-w-56 flex-1"}
+                        value={retryPick[it.id] ?? ""}
+                        onChange={(e) => setRetryPick((p) => ({ ...p, [it.id]: e.target.value }))}
+                      >
+                        <option value="">Choose bank account…</option>
+                        {accounts
+                          .filter((a) => a.isActive)
+                          .map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.bankName}
+                            </option>
+                          ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        disabled={!retryPick[it.id] || retryingId !== null}
+                        onClick={() => retryWithAccount(it.id)}
+                      >
+                        {retryingId === it.id ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        )}
+                        Retry with this account
+                      </Button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
@@ -978,7 +1126,33 @@ function BankPage() {
                     </div>
                   </>
                 ) : (
-                  <p className="text-sm text-muted-foreground">No statements in this batch.</p>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <p>No statement with transactions in {period}.</p>
+                    {otherMonths.length > 0 && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>Statements found for:</span>
+                        {otherMonths.map((m) => {
+                          const name = PERIODS[(Number(m.slice(5, 7)) + 8) % 12];
+                          // Only months inside the selected FY can be switched to.
+                          const inFy = periodMonthStart(financialYear, name)?.startsWith(m);
+                          return inFy ? (
+                            <Button
+                              key={m}
+                              variant="outline"
+                              size="sm"
+                              onClick={() => setPeriod(name)}
+                            >
+                              {name} {m.slice(0, 4)}
+                            </Button>
+                          ) : (
+                            <span key={m}>
+                              {name} {m.slice(0, 4)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 )}
               </>
             )}
@@ -1001,7 +1175,7 @@ function BankPage() {
                   variant="outline"
                   className="h-7"
                   disabled={postingTally}
-                  onClick={() => exportSelectedToTally(ids, clear)}
+                  onClick={() => requestTallyPost(ids, clear)}
                 >
                   {postingTally ? <Loader2 className="animate-spin" /> : <Download />}
                   {postingTally ? "Posting…" : "Export to Tally"}
@@ -1502,6 +1676,81 @@ function BankPage() {
           )}
         </DialogContent>
       </Dialog>
+
+      <AlertDialog open={!!uploadMonthCheck} onOpenChange={(o) => !o && setUploadMonthCheck(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Statement not from {period}</AlertDialogTitle>
+            <AlertDialogDescription>
+              The uploaded statement has no transactions in {period} ({financialYear}), the month
+              selected at the top. Check that you uploaded the right month.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
+            {uploadMonthCheck?.map((w) => (
+              <li key={w.name} className="flex justify-between gap-3">
+                <span className="truncate">{w.name}</span>
+                <span className="num text-muted-foreground">
+                  {fmtDate(w.start)} – {fmtDate(w.end)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Stay on {period}</AlertDialogCancel>
+            {(() => {
+              // Offer a switch only when every file is from one month in this FY.
+              const months = new Set(uploadMonthCheck?.map((w) => w.start.slice(0, 7)));
+              const [m] = Array.from(months);
+              const name = m ? PERIODS[(Number(m.slice(5, 7)) + 8) % 12] : "";
+              const inFy = !!m && periodMonthStart(financialYear, name)?.startsWith(m);
+              return months.size === 1 && inFy ? (
+                <AlertDialogAction onClick={() => setPeriod(name)}>
+                  Switch to {name}
+                </AlertDialogAction>
+              ) : null;
+            })()}
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!monthCheck} onOpenChange={(o) => !o && setMonthCheck(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Not from {period}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {monthCheck?.outside.length} of {monthCheck?.ids.length} selected transaction(s) are
+              dated outside {period} ({financialYear}), the month selected at the top. Post them to
+              Tally anyway?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <ul className="max-h-48 space-y-1 overflow-y-auto text-sm">
+            {monthCheck?.outside.slice(0, 20).map((t) => (
+              <li key={t.id} className="flex justify-between gap-3">
+                <span className="num">{fmtDate(t.transactionDate)}</span>
+                <span className="truncate text-muted-foreground">{t.description || "—"}</span>
+              </li>
+            ))}
+            {(monthCheck?.outside.length ?? 0) > 20 && (
+              <li className="text-muted-foreground">
+                …and {(monthCheck?.outside.length ?? 0) - 20} more
+              </li>
+            )}
+          </ul>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (monthCheck)
+                  void runTallyPost(monthCheck.ids, monthCheck.clear, monthCheck.single);
+                setMonthCheck(null);
+              }}
+            >
+              Post anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }

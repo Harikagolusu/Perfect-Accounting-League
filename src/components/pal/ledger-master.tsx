@@ -44,7 +44,7 @@ export function LedgerMaster({ companyId }: { companyId: string }) {
       setName("");
       setLedgerType("");
       setParentGroup("");
-      toast.success("Ledger created");
+      toast.success("Ledger created in PAL and Tally");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Could not create the ledger");
     }

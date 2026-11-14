@@ -26,6 +26,7 @@ from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 from openai import RateLimitError as OpenAIRateLimitError
 
 from app.core.config import get_settings
+from app.services.ai.key_store import current_key
 from app.services.ai.provider import AIProvider, AIProviderError, AIResponse, ImageInput
 
 logger = logging.getLogger(__name__)
@@ -41,12 +42,13 @@ class DeepSeekProvider(AIProvider):
 
     name = "deepseek"
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
         settings = get_settings()
         # The key is held only so the client can be constructed. It is never
         # logged, serialised, or returned; `_api_key` is private and not part
-        # of the public surface.
-        self._api_key = settings.deepseek_api_key
+        # of the public surface. `api_key` lets Settings test a key before it
+        # is saved; otherwise the saved key wins over the env var.
+        self._api_key = api_key if api_key is not None else current_key()[0]
         self._base_url = settings.deepseek_base_url
         # `model` lets a caller pick a task-specific model (e.g. the reasoning
         # model for ledger matching); the configured default covers the rest.

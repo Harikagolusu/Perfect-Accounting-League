@@ -14,6 +14,7 @@ from app.schemas.ledger import LedgerCreate, LedgerResponse, LedgerUpdate
 from app.services.ledger import (
     LedgerConflictError,
     LedgerNotFoundError,
+    LedgerSyncError,
     create_ledger,
     deactivate_ledger,
     get_ledger,
@@ -71,6 +72,10 @@ def post_ledger(
     except LedgerConflictError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except LedgerSyncError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
         ) from exc
 
 

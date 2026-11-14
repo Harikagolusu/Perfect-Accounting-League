@@ -18,6 +18,7 @@ and an undeletable file is logged rather than blocking the user.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import uuid
 
@@ -33,8 +34,9 @@ from app.core.storage import (
 )
 from app.models.document import Document, DocumentStatus, DocumentType
 from app.models.invoice import Invoice
-from app.models.voucher import AccountingEntityType
+from app.models.voucher import AccountingEntityType, VoucherSourceType
 from app.services.accounting_audit import record_event
+from app.services.voucher_cleanup import VoucherInTallyError, delete_source_vouchers
 from app.services.company import get_company
 
 logger = logging.getLogger(__name__)
@@ -91,8 +93,12 @@ def create_document(
     content_type: str | None,
     data: bytes,
     batch_code: str | None = None,
+    document_type: DocumentType = DocumentType.UNKNOWN,
 ) -> Document:
     """Validate, store and record one uploaded file.
+
+    `document_type` is set only by a caller that knows it, such as the Bank
+    Statements page uploading a statement; the inbox leaves it UNKNOWN.
 
     Raises CompanyNotFoundError if the company does not exist, and
     UploadValidationError from `app.core.storage` if the file is unacceptable.
@@ -113,7 +119,8 @@ def create_document(
         file_type=validated.file_type,
         file_size=validated.size,
         batch_code=(batch_code or None),
-        document_type=DocumentType.UNKNOWN,
+        content_sha256=hashlib.sha256(data).hexdigest(),
+        document_type=document_type,
         status=DocumentStatus.UPLOADED,
     )
     try:
@@ -150,23 +157,95 @@ def create_document(
     return document
 
 
+def find_duplicate_document(db: Session, document: Document) -> Document | None:
+    """The oldest other document in this company with exactly the same bytes."""
+    if not document.content_sha256:
+        return None
+    return db.scalar(
+        select(Document)
+        .where(
+            Document.company_id == document.company_id,
+            Document.id != document.id,
+            Document.content_sha256 == document.content_sha256,
+        )
+        .order_by(Document.created_at)
+        .limit(1)
+    )
+
+
 def delete_document(db: Session, company_id: uuid.UUID, document_id: uuid.UUID) -> Document:
-    """Delete a document and its stored file, scoped to the owning company."""
+    """Delete a document and its stored file, scoped to the owning company.
+
+    Extraction gives almost every document an invoice (or, for a bank statement,
+    a statement with transactions) plus draft vouchers, so deleting from the
+    inbox removes those too. It is refused only when a voucher has already gone
+    to Tally: that must be reversed in Tally first.
+    """
+    from app.models.bank import BankStatement, BankTransaction
+
     document = get_document(db, company_id, document_id)
 
-    # The invoice FK is ondelete=RESTRICT, so deleting a referenced document
-    # would raise an IntegrityError (a 500 the browser reports as a CORS/network
-    # failure). Refuse cleanly instead and tell the caller what to remove first.
-    referenced = db.scalar(
-        select(Invoice.id).where(
-            Invoice.company_id == company_id, Invoice.document_id == document_id
-        ).limit(1)
+    invoices = list(
+        db.scalars(
+            select(Invoice).where(
+                Invoice.company_id == company_id, Invoice.document_id == document_id
+            )
+        ).all()
     )
-    if referenced is not None:
-        raise DocumentInUseError(
-            "This document has an invoice in Invoice Processing. "
-            "Delete that invoice first, then delete the document."
+    statements = list(
+        db.scalars(
+            select(BankStatement).where(
+                BankStatement.company_id == company_id,
+                BankStatement.document_id == document_id,
+            )
+        ).all()
+    )
+    transactions = (
+        list(
+            db.scalars(
+                select(BankTransaction).where(
+                    BankTransaction.bank_statement_id.in_([s.id for s in statements])
+                )
+            ).all()
         )
+        if statements
+        else []
+    )
+    reason = "Source document deleted from the inbox."
+    try:
+        delete_source_vouchers(
+            db, company_id, VoucherSourceType.INVOICE, [i.id for i in invoices], reason=reason
+        )
+        delete_source_vouchers(
+            db,
+            company_id,
+            VoucherSourceType.BANK_TRANSACTION,
+            [t.id for t in transactions],
+            reason=reason,
+        )
+    except VoucherInTallyError as exc:
+        db.rollback()
+        raise DocumentInUseError(str(exc)) from None
+
+    for transaction in transactions:
+        db.delete(transaction)
+    db.flush()
+    for statement in statements:
+        db.delete(statement)
+    for invoice in invoices:
+        record_event(
+            db,
+            company_id=company_id,
+            entity_type=AccountingEntityType.INVOICE,
+            entity_id=invoice.id,
+            event_type="INVOICE_DELETED",
+            previous_status=invoice.status.value,
+            reason="Source document deleted from the inbox.",
+        )
+        db.delete(invoice)
+    # Invoices and statements must be gone before the document row (both FKs
+    # are RESTRICT).
+    db.flush()
 
     relative_path = document.file_path
     removed = False

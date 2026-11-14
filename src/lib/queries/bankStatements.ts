@@ -318,9 +318,12 @@ export function useIngestBankStatementsBatch(companyId: string | undefined) {
   return useMutation({
     mutationFn: async ({
       documentIds,
+      bankAccountId,
       onProgress,
     }: {
       documentIds: string[];
+      /** Set only when retrying an unmatched file with the account the user chose. */
+      bankAccountId?: string;
       onProgress?: (p: BankIngestProgress) => void;
     }): Promise<BankIngestItemResult[]> => {
       const results: BankIngestItemResult[] = [];
@@ -332,6 +335,7 @@ export function useIngestBankStatementsBatch(companyId: string | undefined) {
           const r: IngestStatementResultDto = await bankStatementsApi.ingestDocument(
             companyId as string,
             documentId,
+            bankAccountId,
           );
           item = {
             documentId,

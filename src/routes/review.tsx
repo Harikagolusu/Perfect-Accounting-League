@@ -100,7 +100,7 @@ function PostedPage() {
                 <KV k="Date" v={fmtDate(open.voucherDate)} />
                 <KV k="Type" v={voucherTypeLabel(open.voucherType)} />
                 <KV k="Source" v={SOURCE_LABEL[open.sourceType]} />
-                <KV k="Status" v={<StatusBadge status="Posted" />} />
+                <KV k="Status" v={<StatusBadge status="Accounted" />} />
                 <KV k="Posted" v={open.postedAt ? fmtDate(open.postedAt) : "—"} />
                 <KV k="Tally reference" v={open.postingReference ?? "—"} />
               </div>

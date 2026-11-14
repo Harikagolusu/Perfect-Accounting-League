@@ -860,13 +860,17 @@ def test_approving_a_purchase_learns_the_vendor_party_ledger(client: TestClient)
     from tests.conftest import TestingSessionLocal
 
     company, ledgers = _company_with_ledgers(client)
-    vendor = _vendor(client, company["id"], creditor_ledger=None)
+    # No ledger carries this name, so the party line stays unmapped.
+    vendor = _vendor(
+        client, company["id"], name="Unlisted Supplier", creditor_ledger=None
+    )
     document = _document(client, company["id"])
     invoice = _invoice(
         client,
         company["id"],
         document["id"],
         vendor["id"],
+        vendor_name="Unlisted Supplier",
         cgst_amount="0.00",
         sgst_amount="0.00",
         total_amount="1000.00",
@@ -895,6 +899,31 @@ def test_approving_a_purchase_learns_the_vendor_party_ledger(client: TestClient)
 
     got = client.get(f"{_base(company['id'])}/vendors/{vendor['id']}").json()
     assert got["creditor_ledger"] == ledgers["party"]["name"]
+
+
+def test_party_line_matches_the_vendor_ledger_without_a_creditor_ledger(
+    client: TestClient,
+) -> None:
+    """Client report: the credit (party) line came up empty on every purchase
+    because the vendor had no creditor ledger set, though Tally had a ledger
+    with the vendor's name."""
+    company, ledgers = _company_with_ledgers(client)
+    vendor = _vendor(client, company["id"], creditor_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(client, company["id"], document["id"], vendor["id"])
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    party = next(
+        line
+        for line in voucher["lines"]
+        if line["side"] == "Cr" and line["line_type"] == "LEDGER"
+    )
+    assert party["ledger_id"] == ledgers["party"]["id"]
+    assert party["amount"] == "1180.00"
+    assert voucher["is_balanced"] is True
 
 
 # --- Automatic ledger selection from Tally-history mappings ----------------
@@ -951,6 +980,41 @@ def _expense_line(voucher: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def test_tally_history_mapping_matches_a_differently_spelled_vendor(
+    client: TestClient,
+) -> None:
+    """Client report: expense ledgers did not appear although Tally history had
+    them. The history is keyed on Tally's party ledger name, which differs from
+    the name printed on the invoice."""
+    company, _ = _company_with_ledgers(client, expense=False, party=False)
+    travel = _ledger(client, company["id"], "Travelling Expenses")
+    _ledger(client, company["id"], "KALASH TRAVELS PVT LTD", parent_group="Sundry Creditors")
+    _tally_mapping(
+        client,
+        company["id"],
+        vendor_id=None,
+        counterparty="KALASH TRAVELS PVT LTD",
+        ledger_id=travel["id"],
+    )
+    vendor = _vendor(
+        client,
+        company["id"],
+        name="Kalash Travels",
+        expense_ledger=None,
+        creditor_ledger=None,
+    )
+    document = _document(client, company["id"])
+    invoice = _invoice(
+        client, company["id"], document["id"], vendor["id"], vendor_name="Kalash Travels"
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert _expense_line(voucher)["ledger_id"] == travel["id"]
+
+
 def test_tally_history_mapping_is_selected_automatically(
     client: TestClient,
 ) -> None:
@@ -983,7 +1047,7 @@ def test_tally_history_mapping_is_selected_automatically(
 
 def test_reliable_mapping_raises_no_ledger_warning(client: TestClient) -> None:
     company, ledgers = _company_with_ledgers(client, expense=False)
-    rent = _ledger(client, company["id"], "Office Rent")
+    rent = _ledger(client, company["id"], "Stationery")
     vendor = _vendor(client, company["id"], expense_ledger=None)
     _tally_mapping(
         client,
@@ -1150,7 +1214,7 @@ def test_extraction_mismatch_stays_visible_after_auto_mapping(
 ) -> None:
     """Kalash Travels: a reliable ledger must not hide inconsistent amounts."""
     company, ledgers = _company_with_ledgers(client, expense=False)
-    rent = _ledger(client, company["id"], "Office Rent")
+    rent = _ledger(client, company["id"], "Stationery")
     vendor = _vendor(client, company["id"], expense_ledger=None)
     _tally_mapping(
         client, company["id"], vendor_id=vendor["id"], counterparty=None,
@@ -1344,6 +1408,61 @@ def test_unconfigured_ai_leaves_the_expense_ledger_unsuggested(
     assert not any(
         issue["code"] == "AI_SUGGESTED_LEDGER" for issue in body["exceptions"]
     )
+
+
+def test_reasoning_model_picks_the_expense_ledger_when_chat_returns_none(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Client ask: an expense ledger on every invoice. A null from the chat
+    model falls through to the reasoning model instead of an empty line."""
+    company, invoice = _ai_invoice_setup(client, "AI Retry Co")
+    chat = _FakeLedgerAI('{"ledger_name": null}')
+    reasoner = _FakeLedgerAI('{"ledger_name": "Freight Inward", "reason": "Freight."}')
+    monkeypatch.setattr("app.services.ledger_ai_suggestion.get_ai_provider", lambda: chat)
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_reasoning_provider", lambda: reasoner
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert _expense_line(voucher)["ledger_name"] == "Freight Inward"
+    assert chat.prompts and reasoner.prompts
+    assert voucher["status"] == "NEEDS_REVIEW"
+
+
+def test_ai_matches_a_misspelt_vendor_to_its_party_ledger(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    """Client ask: ledger names matched by AI when spelling differs too much
+    for name matching ("Kailash Tours" against "KALASH TRAVELS PVT LTD")."""
+    company, _ = _company_with_ledgers(client, party=False)
+    kalash = _ledger(
+        client, company["id"], "KALASH TRAVELS PVT LTD", parent_group="Sundry Creditors"
+    )
+    _ledger(client, company["id"], "Other Supplier", parent_group="Sundry Creditors")
+    vendor = _vendor(client, company["id"], name="Kailash Tours", creditor_ledger=None)
+    document = _document(client, company["id"])
+    invoice = _invoice(
+        client, company["id"], document["id"], vendor["id"], vendor_name="Kailash Tours"
+    )
+    provider = _FakeLedgerAI('{"ledger_name": "KALASH TRAVELS PVT LTD"}')
+    monkeypatch.setattr("app.services.ledger_ai_suggestion.get_ai_provider", lambda: provider)
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    party = next(
+        line
+        for line in voucher["lines"]
+        if line["side"] == "Cr" and line["line_type"] == "LEDGER"
+    )
+    assert party["ledger_id"] == kalash["id"]
+    # Only party ledgers were offered, closest name first.
+    assert "Freight Inward" not in provider.prompts[0]
+    assert voucher["status"] == "NEEDS_REVIEW"
 
 
 # --- Bank -> draft voucher -------------------------------------------------
@@ -1569,7 +1688,8 @@ def test_bank_request_clarification_is_recorded_and_filterable(
 def test_bank_missing_counterparty_routes_to_review(client: TestClient) -> None:
     company, ledgers = _company_with_ledgers(client)
     _, _, transaction = _bank_ready(
-        client, company["id"], counterparty_ledger=None, credit="500.00"
+        client, company["id"], counterparty_ledger=None, credit="500.00",
+        description="CASH DEPOSIT 104"
     )
     response = client.post(
         f"{_base(company['id'])}/vouchers/from-bank/{transaction['id']}"
@@ -1710,7 +1830,8 @@ def test_bank_ai_fallback_suggests_a_counterparty_ledger(
     """With no history at all, AI pre-selects a head and the voucher stays in review."""
     company, ledgers = _company_with_ledgers(client)
     _, statement, transaction = _bank_ready(
-        client, company["id"], counterparty_ledger=None, credit="500.00"
+        client, company["id"], counterparty_ledger=None, credit="500.00",
+        description="CASH DEPOSIT 104"
     )
     provider = _FakeLedgerAI(
         '{"ledger_name": "Freight Inward", "reason": "Matches freight narration."}'
@@ -1761,6 +1882,31 @@ def test_statement_ledger_suggestions_map_transactions_to_ledgers(
     assert body[confirmed["id"]] == "Deccan Freight Carriers"
     # The unmapped twin picks up the same ledger via similar-narration history.
     assert body[second["id"]] == "Deccan Freight Carriers"
+
+
+def test_statement_ledger_suggestions_use_the_ledger_master_without_history(
+    client: TestClient,
+) -> None:
+    """Client: no bank history yet, so the narration's party is matched to the
+    ledger master. Branch ledgers ("- Assam") lose to the plain one."""
+    company, _ = _company_with_ledgers(client)
+    for name in (
+        "TATA AIG General Insurance Co Ltd- Assam",
+        "Tata Aig General Insurance Company Limited",
+        "TATA AIG General Insurance Co Ltd",
+    ):
+        _ledger(client, company["id"], name, parent_group="Sundry Debtors")
+    _account, statement, transaction = _bank_ready(
+        client,
+        company["id"],
+        description="DEUTN52026090701040712 NEFT FROM TATA AIG GENERAL DEUT 2026/09/07",
+        counterparty_ledger=None,
+    )
+
+    body = client.get(
+        f"{_base(company['id'])}/bank-statements/{statement['id']}/ledger-suggestions"
+    ).json()
+    assert body[transaction["id"]] == "TATA AIG General Insurance Co Ltd"
 
 
 # --- End-to-end source workflows ------------------------------------------
@@ -2138,3 +2284,212 @@ def test_company_audit_endpoint_returns_only_own_events(client: TestClient) -> N
         and event["new_value"] == "Domestic Sales"
         for event in a_audit.json()
     )
+
+
+# --- Bill-to check -----------------------------------------------------------
+
+
+def test_invoice_billed_to_someone_else_is_flagged(client: TestClient) -> None:
+    """Client: a car invoice billed to another party was booked as theirs."""
+    company, _ = _company_with_ledgers(client, name="Bimakavach Insurance Broking Pvt Ltd")
+    vendor = _vendor(client, company["id"])
+    document = _document(client, company["id"])
+    other = _invoice(
+        client, company["id"], document["id"], vendor["id"],
+        buyer_gstin=None, buyer_name="Rahul Sharma",
+    )
+    ours = _invoice(
+        client, company["id"], _document(client, company["id"])["id"], vendor["id"],
+        invoice_number="INV-002", buyer_gstin=None,
+        buyer_name="BIMAKAVACH INSURANCE BROKING PRIVATE LIMITED",
+    )
+
+    flagged = client.post(f"{_base(company['id'])}/vouchers/from-invoice/{other['id']}").json()
+    clean = client.post(f"{_base(company['id'])}/vouchers/from-invoice/{ours['id']}").json()
+
+    assert flagged["status"] == "NEEDS_REVIEW"
+    assert any(
+        i["code"] == "BILL_TO_MISMATCH" and "Rahul Sharma" in i["message"]
+        for i in flagged["validation_issues"]
+    )
+    assert not any(i["code"] == "BILL_TO_MISMATCH" for i in clean["validation_issues"])
+
+    # Typing the bill-to on an existing invoice rebuilds the draft with the check.
+    patched = client.patch(
+        f"{_base(company['id'])}/invoices/{ours['id']}", json={"buyer_name": "Rahul Sharma"}
+    )
+    assert patched.status_code == 200, patched.text
+    rebuilt = client.post(f"{_base(company['id'])}/vouchers/from-invoice/{ours['id']}").json()
+    assert any(i["code"] == "BILL_TO_MISMATCH" for i in rebuilt["validation_issues"])
+
+
+# --- TDS on purchase vouchers ----------------------------------------------
+
+
+def _tds_invoice(client: TestClient, name: str, expense: str, **invoice: Any):
+    company, _ = _company_with_ledgers(client, name=name, expense=False)
+    _ledger(client, company["id"], expense)
+    vendor = _vendor(client, company["id"], expense_ledger=expense)
+    document = _document(client, company["id"])
+    created = _invoice(
+        client,
+        company["id"],
+        document["id"],
+        vendor["id"],
+        taxable_amount="100.00",
+        cgst_amount="9.00",
+        sgst_amount="9.00",
+        total_amount="118.00",
+        **invoice,
+    )
+    return company, created
+
+
+def _lines_by_ledger(voucher: dict[str, Any]) -> dict[str, tuple[str, str]]:
+    return {line["ledger_name"]: (line["side"], line["amount"]) for line in voucher["lines"]}
+
+
+def test_professional_charges_get_tds_and_the_party_gets_the_rest(
+    client: TestClient,
+) -> None:
+    """Client example: Professional charges Dr 100, GST Dr 18, TDS Cr 10,
+    party Cr 108."""
+    company, invoice = _tds_invoice(client, "TDS Pro Co", "Professional Charges")
+    tds_ledger = _ledger(client, company["id"], "TDS Payable 194J", parent_group="Duties & Taxes")
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    lines = _lines_by_ledger(voucher)
+    assert lines["Professional Charges"] == ("Dr", "100.00")
+    assert lines["TDS Payable 194J"] == ("Cr", "10.00")
+    assert lines["Deccan Freight Carriers"] == ("Cr", "108.00")
+    assert voucher["is_balanced"] is True
+    tds_line = next(l for l in voucher["lines"] if l["ledger_id"] == tds_ledger["id"])
+    assert tds_line["narration"] == "TDS u/s 194J @ 10%"
+    # A suggestion, so a person confirms it before posting.
+    assert voucher["status"] == "NEEDS_REVIEW"
+    assert any(i["code"] == "TDS_SUGGESTED" for i in voucher["validation_issues"])
+
+
+def test_ai_picks_the_tds_section_and_individual_contractors_pay_one_percent(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    company, invoice = _tds_invoice(
+        client, "TDS AI Co", "Freight Inward", vendor_pan="ABCPD1234F"
+    )
+    # Client's Tally has two contract TDS ledgers; the plainest one is chosen.
+    _ledger(client, company["id"], "TDS on Contract Section 393(1)", parent_group="Duties & Taxes")
+    _ledger(client, company["id"], "TDS on Contract", parent_group="Duties & Taxes")
+    provider = _FakeLedgerAI('{"ledger_name": "194C", "reason": "Transport contract."}')
+    monkeypatch.setattr("app.services.ledger_ai_suggestion.get_ai_provider", lambda: provider)
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    lines = _lines_by_ledger(voucher)
+    assert lines["TDS on Contract"] == ("Cr", "1.00")  # 1% of 100, PAN 4th letter P
+    assert lines["Deccan Freight Carriers"] == ("Cr", "117.00")
+    assert voucher["is_balanced"] is True
+
+
+def test_goods_purchase_gets_no_tds(client: TestClient, monkeypatch: Any) -> None:
+    company, invoice = _tds_invoice(client, "TDS Goods Co", "Purchase of Goods")
+    monkeypatch.setattr(
+        "app.services.ledger_ai_suggestion.get_ai_provider",
+        lambda: _FakeLedgerAI('{"ledger_name": null, "reason": "Goods."}'),
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert _lines_by_ledger(voucher)["Deccan Freight Carriers"] == ("Cr", "118.00")
+    assert not any(i["code"] == "TDS_SUGGESTED" for i in voucher["validation_issues"])
+
+
+# --- Foreign-currency invoices ---------------------------------------------
+
+
+def _usd_invoice(client: TestClient, name: str, **invoice: Any):
+    company, ledgers = _company_with_ledgers(client, name=name)
+    vendor = _vendor(client, company["id"])
+    document = _document(client, company["id"])
+    created = _invoice(
+        client,
+        company["id"],
+        document["id"],
+        vendor["id"],
+        currency="USD",
+        taxable_amount="101.30",
+        cgst_amount="0.00",
+        sgst_amount="0.00",
+        total_amount="101.30",
+        **invoice,
+    )
+    return company, ledgers, created
+
+
+def test_usd_invoice_is_booked_in_inr_at_the_entered_rate(client: TestClient) -> None:
+    """Client report: a USD 101.30 Twilio invoice was booked as Rs 101.30."""
+    company, ledgers, invoice = _usd_invoice(client, "FX Entered Co", exchange_rate="84.50")
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    amounts = {line["ledger_name"]: line["amount"] for line in voucher["lines"]}
+    assert amounts["Freight Inward"] == "8559.85"  # 101.30 x 84.50
+    assert amounts["Deccan Freight Carriers"] == "8559.85"
+    assert voucher["is_balanced"] is True
+    assert voucher["status"] == "NEEDS_REVIEW"
+    assert any(i["code"] == "FOREIGN_CURRENCY" for i in voucher["validation_issues"])
+
+
+def test_missing_rate_is_fetched_and_saved_on_the_invoice(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    from decimal import Decimal
+
+    company, _, invoice = _usd_invoice(client, "FX Fetch Co")
+    monkeypatch.setattr(
+        "app.services.voucher_factory.fetch_inr_rate", lambda currency, on: Decimal("83.000000")
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    assert _expense_line(voucher)["amount"] == "8407.90"
+    saved = client.get(f"{_base(company['id'])}/invoices/{invoice['id']}").json()
+    assert Decimal(saved["exchange_rate"]) == Decimal("83")
+
+
+def test_foreign_invoice_without_any_rate_gets_no_voucher(
+    client: TestClient, monkeypatch: Any
+) -> None:
+    company, _, invoice = _usd_invoice(client, "FX None Co")
+    monkeypatch.setattr("app.services.voucher_factory.fetch_inr_rate", lambda currency, on: None)
+
+    response = client.post(f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}")
+
+    assert response.status_code == 409
+    assert "exchange rate" in response.text.lower()
+
+
+def test_foreign_supplier_gets_no_194_tds(client: TestClient) -> None:
+    """Twilio (US) was given 194C because the ledger mentions advertisement."""
+    company, invoice = _tds_invoice(
+        client, "FX TDS Co", "Advertisement Expenses", currency="USD", exchange_rate="95.25"
+    )
+
+    voucher = client.post(
+        f"{_base(company['id'])}/vouchers/from-invoice/{invoice['id']}"
+    ).json()
+
+    codes = {i["code"] for i in voucher["validation_issues"]}
+    assert "TDS_SUGGESTED" not in codes
+    assert "TDS_NON_RESIDENT" in codes
+    assert all(line["line_type"] != "TAX" or line["side"] == "Dr" for line in voucher["lines"])

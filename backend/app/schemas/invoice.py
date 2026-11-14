@@ -56,10 +56,13 @@ class _InvoiceFields(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=15)
     vendor_pan: str | None = Field(default=None, max_length=10)
     buyer_gstin: str | None = Field(default=None, max_length=15)
+    buyer_name: str | None = Field(default=None, max_length=255)
     place_of_supply: str | None = Field(default=None, max_length=128)
     po_number: str | None = Field(default=None, max_length=128)
 
     currency: str = Field(default="INR", min_length=3, max_length=3)
+    #: INR per one unit of `currency`; only meaningful for a foreign invoice.
+    exchange_rate: Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=6)] | None = None
     direction: InvoiceDirection = InvoiceDirection.PURCHASE
 
     taxable_amount: NonNegativeMoney | None = None
@@ -139,9 +142,11 @@ class InvoiceResponse(TimestampedResponse):
     vendor_gstin: str | None
     vendor_pan: str | None
     buyer_gstin: str | None
+    buyer_name: str | None = None
     place_of_supply: str | None
     po_number: str | None
     currency: str
+    exchange_rate: MoneyOut | None = None
     direction: InvoiceDirection
 
     taxable_amount: MoneyOut | None
@@ -155,6 +160,8 @@ class InvoiceResponse(TimestampedResponse):
     total_amount: MoneyOut | None
 
     status: InvoiceStatus
+    #: Why the last extraction failed or needs a person (null when clean).
+    extraction_message: str | None = None
     source: InvoiceSource
 
     # Vendor mapping state. `vendor_id` is the only assigned vendor;

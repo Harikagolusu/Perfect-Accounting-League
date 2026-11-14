@@ -12,18 +12,27 @@ another company raises `VendorNotFoundError` exactly as a missing one does.
 
 import uuid
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.integrations.tally import TallyService
 from app.models.vendor import Vendor, VendorStatus
 from app.models.voucher import AccountingEntityType
 from app.schemas.vendor import VendorCreate, VendorUpdate
 from app.services.accounting_audit import record_event
 from app.services.company import get_company
+from app.services.ledger import sync_ledger_to_tally
+
+#: A vendor is a party, so its ledger lives under Sundry Creditors in Tally.
+_VENDOR_LEDGER_PARENT = "Sundry Creditors"
 
 
 class VendorNotFoundError(Exception):
     """Raised when a vendor id does not resolve within the given company."""
+
+
+class VendorConflictError(Exception):
+    """Raised when a vendor with the same name already exists in the company."""
 
 
 def list_vendors(
@@ -53,16 +62,49 @@ def get_vendor(db: Session, company_id: uuid.UUID, vendor_id: uuid.UUID) -> Vend
     return vendor
 
 
-def create_vendor(
-    db: Session, company_id: uuid.UUID, data: VendorCreate
-) -> Vendor:
-    """Create a vendor under `company_id`.
+def _assert_unique_vendor_name(
+    db: Session, company_id: uuid.UUID, name: str
+) -> None:
+    exists = db.scalar(
+        select(Vendor.id)
+        .where(
+            Vendor.company_id == company_id,
+            func.lower(Vendor.name) == name.strip().lower(),
+        )
+        .limit(1)
+    )
+    if exists is not None:
+        raise VendorConflictError("A vendor with this name already exists.")
 
-    Raises CompanyNotFoundError if the company does not exist, so a bad path
-    id returns 404 rather than a database integrity error.
+
+def create_vendor(
+    db: Session,
+    company_id: uuid.UUID,
+    data: VendorCreate,
+    *,
+    service: TallyService | None = None,
+) -> Vendor:
+    """Create a vendor under `company_id` and its creditor ledger in Tally.
+
+    Raises CompanyNotFoundError if the company does not exist (bad path id ->
+    404), VendorConflictError on a duplicate name, and LedgerSyncError if Tally
+    does not accept the creditor ledger. Block semantics: PAL persists only
+    after Tally accepts the ledger, mirroring `create_ledger`.
     """
-    get_company(db, company_id)
-    vendor = Vendor(company_id=company_id, **data.model_dump())
+    company = get_company(db, company_id)
+    _assert_unique_vendor_name(db, company_id, data.name)
+    sync_ledger_to_tally(
+        company,
+        name=data.name,
+        parent=_VENDOR_LEDGER_PARENT,
+        gstin=data.gstin,
+        service=service,
+    )
+    payload = data.model_dump()
+    # creditor_ledger is left as given: approval learning / Tally ledger sync
+    # link it, and pre-filling it would skip that review step.
+    payload["parent_group"] = payload.get("parent_group") or _VENDOR_LEDGER_PARENT
+    vendor = Vendor(company_id=company_id, **payload)
     db.add(vendor)
     record_event(
         db,

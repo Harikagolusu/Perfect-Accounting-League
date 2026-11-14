@@ -698,16 +698,18 @@ def _learn_vendor_party_ledger(
     the party ledger already exists in the Ledger Master."""
     if voucher.voucher_type is not VoucherType.PURCHASE:
         return
-    party = next(
+    # The party line is the largest credit ledger line; with TDS it is the
+    # total less TDS, so it no longer equals the invoice total.
+    party = max(
         (
             line
             for line in voucher.lines
             if line.line_type == "LEDGER"
             and line.side is VoucherSide.CR
             and line.ledger_id is not None
-            and line.amount == invoice.total_amount
         ),
-        None,
+        key=lambda line: line.amount,
+        default=None,
     )
     if party is None:
         return

@@ -14,11 +14,18 @@ from difflib import SequenceMatcher
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.integrations.tally import TallyError, TallyService, get_tally_service
 from app.models.ledger import Ledger, LedgerSource
 from app.models.voucher import AccountingEntityType
 from app.schemas.ledger import LedgerCreate, LedgerUpdate
 from app.services.accounting_audit import record_event
 from app.services.company import get_company
+
+#: Group a manually-added ledger lands in when the user picked none. Most
+#: hand-added ledgers are parties; Sundry Creditors always exists in Tally.
+#: shortcut: assume creditor when unspecified; revisit if users add expense
+#: ledgers without choosing a parent group.
+_DEFAULT_LEDGER_PARENT = "Sundry Creditors"
 
 
 class LedgerNotFoundError(Exception):
@@ -27,6 +34,46 @@ class LedgerNotFoundError(Exception):
 
 class LedgerConflictError(Exception):
     """Raised for a duplicate or otherwise conflicting ledger name/code."""
+
+
+class LedgerSyncError(Exception):
+    """Raised when TallyPrime did not accept a ledger create (offline/reject)."""
+
+
+def sync_ledger_to_tally(
+    company,
+    *,
+    name: str,
+    parent: str,
+    gstin: str | None = None,
+    service: TallyService | None = None,
+) -> None:
+    """Create a ledger master in TallyPrime, raising if Tally does not accept it.
+
+    Block semantics: the caller commits to PAL only after this returns cleanly.
+    The Tally company name follows the same precedence as voucher posting.
+    """
+    target_company = (
+        getattr(company, "legal_name", None) or getattr(company, "name", None) or ""
+    ).strip()
+    owned = service is None
+    svc = service or get_tally_service()
+    try:
+        result = svc.create_ledger(
+            name=name, parent=parent, company=target_company or None, gstin=gstin
+        )
+    except TallyError as exc:
+        raise LedgerSyncError(
+            f"TallyPrime did not accept the ledger '{name}': {exc}"
+        ) from exc
+    finally:
+        if owned:
+            svc.close()
+    if not result.accepted:
+        raise LedgerSyncError(
+            f"TallyPrime rejected the ledger '{name}': "
+            f"{result.message or 'see TallyPrime for details'}"
+        )
 
 
 def list_ledgers(
@@ -152,6 +199,9 @@ _NAME_SUFFIX_FORMS = (
 #: must beat the runner-up by. Both are deliberately strict: a wrong creditor
 #: ledger posts an invoice against the wrong party.
 _FUZZY_MIN_RATIO = 0.88
+
+#: The canonical legal suffix at the end of a comparison key.
+_LEGAL_SUFFIX_RE = re.compile(r"(pvtltd|ltd|llp)$")
 _FUZZY_MIN_MARGIN = 0.04
 
 
@@ -204,6 +254,13 @@ def match_ledger_by_name(
     if identical:
         return None
 
+    # Invoices often drop the legal suffix Tally keeps ("Kalash Travels" against
+    # "KALASH TRAVELS PVT LTD"). Equal once it is removed, and unique, is a match.
+    bare_target = _LEGAL_SUFFIX_RE.sub("", target)
+    bare = [ledger for ledger, key in keyed if bare_target and _LEGAL_SUFFIX_RE.sub("", key) == bare_target]
+    if len(bare) == 1:
+        return bare[0]
+
     scored = sorted(
         (
             (SequenceMatcher(None, target, key).ratio(), ledger)
@@ -239,10 +296,23 @@ def _assert_unique_name(
 
 
 def create_ledger(
-    db: Session, company_id: uuid.UUID, data: LedgerCreate, *, actor: str = "local-user"
+    db: Session,
+    company_id: uuid.UUID,
+    data: LedgerCreate,
+    *,
+    actor: str = "local-user",
+    service: TallyService | None = None,
 ) -> Ledger:
-    get_company(db, company_id)
+    company = get_company(db, company_id)
     _assert_unique_name(db, company_id, data.name)
+    # Block semantics: create in Tally first; only persist in PAL if Tally
+    # accepted it, so the two never diverge (raises LedgerSyncError otherwise).
+    sync_ledger_to_tally(
+        company,
+        name=data.name,
+        parent=data.parent_group or _DEFAULT_LEDGER_PARENT,
+        service=service,
+    )
     ledger = Ledger(company_id=company_id, **data.model_dump())
     db.add(ledger)
     db.flush()

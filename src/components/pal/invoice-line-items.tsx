@@ -12,7 +12,7 @@ import { Section, EmptyState } from "@/components/pal/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { fmtMoney } from "@/lib/format";
-import type { InvoiceLineItemWrite } from "@/lib/api/invoices";
+import type { InvoiceLineItemDto, InvoiceLineItemWrite } from "@/lib/api/invoices";
 import {
   useCreateLineItem,
   useDeleteLineItem,
@@ -47,6 +47,27 @@ function compute(d: Draft) {
     taxable: taxable.toFixed(2),
     tax: tax.toFixed(2),
     total: total.toFixed(2),
+  };
+}
+
+/** True once the reviewer changed a figure the amounts are computed from. */
+const repriced = (it: InvoiceLineItemDto, d: Draft) =>
+  d.quantity !== (it.quantity ?? "") ||
+  d.unit_rate !== (it.unit_rate ?? "") ||
+  d.gst_rate !== (it.gst_rate ?? "0");
+
+/**
+ * Amounts to show: the stored (extracted) ones until the reviewer reprices the
+ * row. Recomputing Qty × Unit Price on load turned a misread quantity into a
+ * crore-sized total and showed ₹0.00 for rows printed without a quantity.
+ */
+function amounts(it: InvoiceLineItemDto, d: Draft) {
+  if (repriced(it, d) || it.total_amount == null) return compute(d);
+  const taxable = it.taxable_amount ?? it.total_amount;
+  return {
+    taxable,
+    tax: (num(it.total_amount) - num(taxable)).toFixed(2),
+    total: it.total_amount,
   };
 }
 
@@ -90,17 +111,22 @@ export function InvoiceLineItemsPanel({
 
   const save = async (id: string) => {
     const d = drafts[id];
-    if (!d) return;
-    const c = compute(d);
+    const it = items.find((item) => item.id === id);
+    if (!d || !it) return;
     const body: InvoiceLineItemWrite = {
       description: d.description || "Item",
       hsn_sac: d.hsn_sac || null,
       quantity: d.quantity || null,
       unit_rate: d.unit_rate || null,
       gst_rate: d.gst_rate || null,
-      taxable_amount: d.quantity && d.unit_rate ? c.taxable : null,
-      total_amount: d.quantity && d.unit_rate ? c.total : null,
     };
+    // Only a repriced row gets new amounts; editing the description or HSN
+    // must not overwrite the amounts read from the invoice.
+    if (repriced(it, d) && d.quantity && d.unit_rate) {
+      const c = compute(d);
+      body.taxable_amount = c.taxable;
+      body.total_amount = c.total;
+    }
     try {
       await updateItem.mutateAsync({ id, body });
     } catch (e) {
@@ -160,7 +186,7 @@ export function InvoiceLineItemsPanel({
               {items.map((it) => {
                 const d = drafts[it.id];
                 if (!d) return null;
-                const c = compute(d);
+                const c = amounts(it, d);
                 return (
                   <tr key={it.id} className="border-t">
                     <td className="px-2 py-1.5">
@@ -240,8 +266,8 @@ export function InvoiceLineItemsPanel({
             </tbody>
           </table>
           <p className="mt-2 px-2 text-xs text-muted-foreground">
-            Tax Amount and Line Total are computed from Qty, Unit Price and Tax %, then stored with
-            the line.
+            Amounts are as read from the invoice. Changing Qty, Unit Price or Tax % recomputes
+            them, and the new values are stored with the line.
           </p>
         </div>
       )}

@@ -140,6 +140,7 @@ class ExtractedInvoice(BaseModel):
     vendor_gstin: str | None = Field(default=None, max_length=64)
     vendor_pan: str | None = Field(default=None, max_length=64)
     buyer_gstin: str | None = Field(default=None, max_length=64)
+    buyer_name: str | None = Field(default=None, max_length=255)
     place_of_supply: str | None = Field(default=None, max_length=128)
     po_number: str | None = Field(default=None, max_length=128)
 
@@ -165,6 +166,7 @@ class ExtractedInvoice(BaseModel):
         "vendor_gstin",
         "vendor_pan",
         "buyer_gstin",
+        "buyer_name",
         "place_of_supply",
         "po_number",
         "currency",
@@ -265,6 +267,10 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         issues.append("Currency is not a three-letter ISO code.")
         currency = None
 
+    round_off = payload.round_off
+    if round_off is None:
+        round_off = _implied_round_off(payload)
+
     # Structural checks shared with manual entry. Tax law is deliberately not
     # part of these: no GST rates, no TDS.
     shared = validate_invoice_fields(
@@ -281,7 +287,7 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         cess_amount=payload.cess_amount,
         discount_amount=payload.discount_amount,
         freight_amount=payload.freight_amount,
-        round_off=payload.round_off,
+        round_off=round_off,
         total_amount=payload.total_amount,
     )
     issues.extend(shared.issues)
@@ -305,6 +311,7 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         "vendor_gstin": vendor_gstin,
         "vendor_pan": vendor_pan,
         "buyer_gstin": buyer_gstin,
+        "buyer_name": payload.buyer_name,
         "place_of_supply": payload.place_of_supply,
         "po_number": payload.po_number,
         "currency": currency,
@@ -315,20 +322,79 @@ def validate_extraction(payload: ExtractedInvoice) -> ValidatedExtraction:
         "cess_amount": payload.cess_amount,
         "discount_amount": payload.discount_amount,
         "freight_amount": payload.freight_amount,
-        "round_off": payload.round_off,
+        "round_off": round_off,
         "total_amount": payload.total_amount,
-        "line_items": _collect_line_items(payload.line_items or []),
+        "line_items": _collect_line_items(payload.line_items or [], issues),
     }
 
     return ValidatedExtraction(values=values, issues=tuple(issues))
 
 
-def _collect_line_items(items: list[ExtractedLineItem]) -> list[dict[str, object]]:
+#: Indian invoices round the payable to the rupee and often print no round-off
+#: line. A gap this small is that rounding, not a misread.
+_MAX_IMPLIED_ROUND_OFF = Decimal("1.00")
+
+
+def _implied_round_off(payload: ExtractedInvoice) -> Decimal | None:
+    """The unprinted round-off, when the total is within ₹1 of the parts.
+
+    Only fills a missing value; anything bigger stays a reported mismatch.
+    """
+    if payload.taxable_amount is None or payload.total_amount is None:
+        return None
+    parts = (
+        Decimal(payload.taxable_amount)
+        + sum(
+            Decimal(v or 0)
+            for v in (
+                payload.cgst_amount,
+                payload.sgst_amount,
+                payload.igst_amount,
+                payload.cess_amount,
+                payload.freight_amount,
+            )
+        )
+        - Decimal(payload.discount_amount or 0)
+    )
+    gap = (Decimal(payload.total_amount) - parts).quantize(Decimal("0.01"))
+    if gap and abs(gap) <= _MAX_IMPLIED_ROUND_OFF:
+        return gap
+    return None
+
+
+def _qty_rate_contradicts_amount(item: ExtractedLineItem) -> bool:
+    """Quantity × rate disagrees with every printed amount on the row.
+
+    Travel and service bills print fare columns the model reads as quantity
+    (4406 × 8812 on an ₹8,812 ticket). The amount is what the invoice charges,
+    so a pair that cannot produce it is a misread. The 2× band leaves room for
+    line discounts and tax, which legitimately separate the two.
+    """
+    if item.quantity is None or item.unit_rate is None:
+        return False
+    amounts = [Decimal(a) for a in (item.taxable_amount, item.total_amount) if a]
+    if not amounts:
+        return False
+    product = abs(Decimal(item.quantity) * Decimal(item.unit_rate))
+    return all(product > 2 * abs(a) or 2 * product < abs(a) for a in amounts)
+
+
+def _collect_line_items(
+    items: list[ExtractedLineItem], issues: list[str]
+) -> list[dict[str, object]]:
     """Convert extracted line items to plain dicts, skipping any without a description."""
     result: list[dict[str, object]] = []
     for i, item in enumerate(items, 1):
         if not item.description:
             continue
+        if _qty_rate_contradicts_amount(item):
+            # Keep the amount; drop the pair rather than store figures that
+            # contradict it. The reviewer can enter the real quantity.
+            issues.append(
+                f"Line {item.line_number or i}: quantity × rate does not match "
+                "the line amount, so quantity and rate were not stored."
+            )
+            item = item.model_copy(update={"quantity": None, "unit_rate": None})
         result.append(
             {
                 "line_number": item.line_number or i,

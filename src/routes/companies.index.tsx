@@ -22,7 +22,7 @@ import {
   useDeactivateCompany,
   useUpdateCompany,
 } from "@/lib/queries/companies";
-import { useTallyCompanySync } from "@/lib/queries/tally";
+import { useTallyCompanySync, useTallyLoadedCompanies } from "@/lib/queries/tally";
 import type { Company } from "@/lib/types";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
@@ -183,6 +183,7 @@ function CompaniesPage() {
   const { data, isPending, isError, error, refetch } = useCompanies(true);
   const deactivate = useDeactivateCompany();
   const tallyCompanySync = useTallyCompanySync();
+  const { data: inTally } = useTallyLoadedCompanies();
   // "All" means every live company. Archived (INACTIVE) companies are only
   // shown when the user explicitly selects the Inactive filter, so deleting a
   // company removes it from the default list instead of leaving a dead row.
@@ -292,7 +293,22 @@ function CompaniesPage() {
             { key: "gstin", header: "GSTIN", cell: (r) => <span className="num">{r.gstin}</span> },
             { key: "pan", header: "PAN", cell: (r) => <span className="num">{r.pan}</span> },
             { key: "financialYear", header: "Financial Year" },
-            { key: "status", header: "Status", cell: (r) => <StatusBadge status={r.status} /> },
+            {
+              key: "status",
+              header: "Status",
+              // An active company is only "Connected" while it is loaded in TallyPrime.
+              cell: (r) => (
+                <StatusBadge
+                  status={
+                    r.status !== "Active"
+                      ? r.status
+                      : inTally?.has(r.displayName.trim().toLowerCase())
+                        ? "Connected"
+                        : "Not connected"
+                  }
+                />
+              ),
+            },
             {
               key: "actions",
               header: "Actions",

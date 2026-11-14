@@ -60,6 +60,7 @@ from app.services.bank import (
     update_transaction,
     update_transaction_mapping,
 )
+from app.services.voucher_cleanup import VoucherInTallyError
 from app.services.bank_validation import (
     BankTransitionError,
     BankValidationError,
@@ -310,6 +311,9 @@ def remove_bank_statement(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Bank statement not found"
         ) from None
+    except VoucherInTallyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -355,17 +359,28 @@ def process_bank_statement(
 def ingest_bank_document(
     document_id: UUID = Path(description="Inbox document id to ingest."),
     company_id: UUID = Path(description="Owning company id."),
+    bank_account_id: UUID | None = Query(
+        default=None,
+        description="Account chosen by the user after an unmatched read; skips matching.",
+    ),
     db: Session = Depends(get_db),
 ) -> IngestStatementResponse:
     """Direct upload: read the document, match it to a bank account, and create
-    its statement — the caller selects no account. When the read fails or no
-    account can be matched, no statement is created and the reason is returned.
+    its statement â€” the caller normally selects no account. When the read fails
+    or no account can be matched, no statement is created and the reason is
+    returned; the caller may retry with `bank_account_id`.
     """
     try:
-        statement, result = ingest_bank_statement(db, company_id, document_id)
+        statement, result = ingest_bank_statement(
+            db, company_id, document_id, bank_account_id
+        )
     except DocumentNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Document not found"
+        ) from None
+    except BankAccountNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Bank account not found"
         ) from None
     return IngestStatementResponse(
         document_id=document_id,

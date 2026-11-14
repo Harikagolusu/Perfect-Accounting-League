@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from xml.sax.saxutils import escape
 
+from app.integrations.tally.exceptions import TallyConfigurationError
+
 _COMPANY_COLLECTION_REQUEST = """<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
@@ -54,7 +56,7 @@ _LEDGER_COLLECTION_REQUEST = """<ENVELOPE>
         <TDLMESSAGE>
           <COLLECTION NAME="Ledgers" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
             <TYPE>Ledger</TYPE>
-            <FETCH>Name, Parent, ClosingBalance</FETCH>
+            <FETCH>Name, Parent, ClosingBalance, PARTYGSTIN, LEDGSTREGDETAILS.LIST</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -80,7 +82,7 @@ _VOUCHER_COLLECTION_REQUEST = """<ENVELOPE>
         <TDLMESSAGE>
           <COLLECTION NAME="Vouchers" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
             <TYPE>Voucher</TYPE>
-            <FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,NARRATION,GUID,MASTERID,PARTYLEDGERNAME,AMOUNT,ALLLEDGERENTRIES.LEDGERNAME,ALLLEDGERENTRIES.AMOUNT,ALLLEDGERENTRIES.ISDEEMEDPOSITIVE</FETCH>
+            <FETCH>DATE,VOUCHERTYPENAME,VOUCHERNUMBER,NARRATION,GUID,MASTERID,PARTYLEDGERNAME,AMOUNT,ALLLEDGERENTRIES.LEDGERNAME,ALLLEDGERENTRIES.AMOUNT,ALLLEDGERENTRIES.ISDEEMEDPOSITIVE{inventory_fetch}</FETCH>
           </COLLECTION>
         </TDLMESSAGE>
       </TDL>
@@ -203,6 +205,65 @@ def build_voucher_import_request(
     )
 
 
+_MASTER_IMPORT_REQUEST = """<ENVELOPE>
+  <HEADER>
+    <TALLYREQUEST>Import Data</TALLYREQUEST>
+  </HEADER>
+  <BODY>
+    <IMPORTDATA>
+      <REQUESTDESC>
+        <REPORTNAME>All Masters</REPORTNAME>
+        <STATICVARIABLES>{current_company}</STATICVARIABLES>
+      </REQUESTDESC>
+      <REQUESTDATA>
+        <TALLYMESSAGE xmlns:UDF="TallyUDF">
+{master}
+        </TALLYMESSAGE>
+      </REQUESTDATA>
+    </IMPORTDATA>
+  </BODY>
+</ENVELOPE>"""
+
+
+def build_ledger_import_request(
+    *,
+    company: str | None,
+    name: str,
+    parent: str,
+    gstin: str | None = None,
+) -> str:
+    """Return the XML that creates one ledger master in TallyPrime.
+
+    `parent` is the Tally group the ledger sits under (e.g. "Sundry Creditors").
+    When `gstin` is given the party is marked a regular GST registration so the
+    GSTIN is stored on the master. Used to mirror a PAL ledger/vendor into Tally.
+    """
+    if not name or not name.strip():
+        raise TallyConfigurationError("Ledger name must not be blank.")
+    if not parent or not parent.strip():
+        raise TallyConfigurationError("Ledger parent group must not be blank.")
+    name = name.strip()
+    gst_xml = ""
+    if gstin and gstin.strip():
+        gst_xml = (
+            "          <GSTREGISTRATIONTYPE>Regular</GSTREGISTRATIONTYPE>\n"
+            f"          <PARTYGSTIN>{escape(gstin.strip())}</PARTYGSTIN>\n"
+        )
+    master = (
+        f'        <LEDGER NAME="{escape(name)}" ACTION="Create">\n'
+        f"          <NAME.LIST><NAME>{escape(name)}</NAME></NAME.LIST>\n"
+        f"          <PARENT>{escape(parent.strip())}</PARENT>\n"
+        f"{gst_xml}"
+        "        </LEDGER>"
+    )
+    current_company = ""
+    if company:
+        current_company = f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>"
+    return _MASTER_IMPORT_REQUEST.format(
+        current_company=current_company, master=master
+    )
+
+
 def build_company_collection_request() -> str:
     """Return the XML request that lists companies loaded in TallyPrime."""
     return _COMPANY_COLLECTION_REQUEST
@@ -223,12 +284,61 @@ def build_ledger_collection_request(company: str | None = None) -> str:
     return _LEDGER_COLLECTION_REQUEST.format(current_company=current_company)
 
 
-def build_voucher_collection_request(company: str | None = None) -> str:
+_VOUCHER_REGISTER_REQUEST = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Voucher Register</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <EXPLODEFLAG>No</EXPLODEFLAG>
+        {current_company}
+        {from_date}
+        {to_date}
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+
+
+def build_voucher_register_request(
+    company: str | None = None,
+    *,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> str:
+    """Return the Voucher Register request for a date range.
+
+    Unlike the plain voucher collection, this report exposes each voucher's
+    REFERENCE (the Supplier Invoice No.), and unlike the Day Book it honours
+    SVFROMDATE/SVTODATE. Dates are Tally's YYYYMMDD form. Read-only.
+    """
+    current_company = (
+        f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>" if company else ""
+    )
+    from_xml = f"<SVFROMDATE>{escape(from_date)}</SVFROMDATE>" if from_date else ""
+    to_xml = f"<SVTODATE>{escape(to_date)}</SVTODATE>" if to_date else ""
+    return _VOUCHER_REGISTER_REQUEST.format(
+        current_company=current_company, from_date=from_xml, to_date=to_xml
+    )
+
+
+def build_voucher_collection_request(
+    company: str | None = None, *, with_inventory: bool = False
+) -> str:
     """Return the XML request that reads accounting vouchers for one company.
 
     The request is read-only: it exports vouchers with their ledger entries so
     the bank sync can find bank-ledger movements. It never posts, alters or
     deletes anything in TallyPrime.
+
+    With ``with_inventory`` each voucher also carries its stock item names, used
+    to join a sale to its HSN code. This pulls the full inventory block, so it is
+    requested only for the GST export, not the lighter syncs.
 
     TallyPrime ignores ``SVFROMDATE``/``SVTODATE`` for a plain collection
     export, so PAL filters the returned vouchers by date itself.
@@ -238,53 +348,45 @@ def build_voucher_collection_request(company: str | None = None) -> str:
         current_company = (
             f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>"
         )
-    return _VOUCHER_COLLECTION_REQUEST.format(current_company=current_company)
+    return _VOUCHER_COLLECTION_REQUEST.format(
+        current_company=current_company,
+        inventory_fetch=",ALLINVENTORYENTRIES.STOCKITEMNAME" if with_inventory else "",
+    )
 
 
-#: The GST working reads vouchers through the built-in Day Book report instead
-#: of a custom Voucher collection: the collection export crashes some TallyPrime
-#: builds with a c0000005 memory access violation, while the Day Book report
-#: honours SVFROMDATE/SVTODATE and returns the same VOUCHER elements.
-_GST_DAYBOOK_REQUEST = """<ENVELOPE>
+_STOCK_ITEM_COLLECTION_REQUEST = """<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
     <TALLYREQUEST>Export</TALLYREQUEST>
-    <TYPE>Data</TYPE>
-    <ID>Day Book</ID>
+    <TYPE>Collection</TYPE>
+    <ID>StockItems</ID>
   </HEADER>
   <BODY>
     <DESC>
       <STATICVARIABLES>
         <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
-        {date_vars}
         {current_company}
       </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="StockItems" ISMODIFY="No" ISFIXED="No" ISINITIALIZE="No" ISOPTION="No" ISINTERNAL="No">
+            <TYPE>StockItem</TYPE>
+            <FETCH>Name,HSNDETAILS.LIST</FETCH>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
     </DESC>
   </BODY>
 </ENVELOPE>"""
 
 
-def build_gst_voucher_collection_request(
-    company: str | None = None,
-    *,
-    from_date: str | None = None,
-    to_date: str | None = None,
-) -> str:
-    """Date-scoped Day Book export for the GST working.
+def build_stock_item_collection_request(company: str | None = None) -> str:
+    """Return the read-only XML request that lists stock items with their HSN."""
+    current_company = ""
+    if company:
+        current_company = (
+            f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>"
+        )
+    return _STOCK_ITEM_COLLECTION_REQUEST.format(current_company=current_company)
 
-    ``from_date``/``to_date`` are Tally's ``YYYYMMDD`` form. Uses the built-in
-    Day Book report, which avoids the c0000005 crash the custom voucher
-    collection triggers on some TallyPrime builds. Read-only.
-    """
-    current_company = (
-        f"<SVCURRENTCOMPANY>{escape(company)}</SVCURRENTCOMPANY>" if company else ""
-    )
-    date_vars = ""
-    if from_date:
-        date_vars += f"<SVFROMDATE>{escape(from_date)}</SVFROMDATE>"
-    if to_date:
-        date_vars += f"<SVTODATE>{escape(to_date)}</SVTODATE>"
-    return _GST_DAYBOOK_REQUEST.format(
-        date_vars=date_vars,
-        current_company=current_company,
-    )
+

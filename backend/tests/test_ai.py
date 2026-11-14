@@ -483,3 +483,60 @@ class TestEndpointErrorMapping:
             "model": "deepseek-flash",
             "text": "PAL AI connection successful.",
         }
+
+class _FakeVerifier:
+    """Stands in for DeepSeekProvider when Settings verifies a pasted key."""
+
+    accept = True
+
+    def __init__(self, api_key=None, **_):
+        self.api_key = api_key
+
+    def generate_text(self, *_, **__):
+        if not self.accept:
+            raise AIProviderError("rejected", code=AIProviderError.PROVIDER_ERROR)
+
+
+class TestKeyFromSettings:
+    """Client ask: paste the DeepSeek key in Settings instead of editing .env."""
+
+    def test_saved_key_is_encrypted_masked_and_used(self, client, monkeypatch):
+        from app.models.app_secret import AppSecret
+        from tests.conftest import TestingSessionLocal
+
+        monkeypatch.setattr(sys.modules["app.api.v1.ai.router"], "DeepSeekProvider", _FakeVerifier)
+        key = "sk-live-abcdef123456"
+
+        response = client.put("/api/v1/ai/key", json={"api_key": key})
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "configured": True,
+            "source": "settings",
+            "masked": "sk-…3456",
+        }
+        assert key not in client.get("/api/v1/ai/key").text
+        with TestingSessionLocal() as db:
+            assert key not in db.get(AppSecret, "deepseek_api_key").ciphertext
+        # Every AI call now uses the saved key, with no restart.
+        assert get_ai_provider().is_configured() is True
+
+    def test_rejected_key_is_not_saved(self, client, monkeypatch):
+        monkeypatch.setattr(_FakeVerifier, "accept", False)
+        monkeypatch.setattr(sys.modules["app.api.v1.ai.router"], "DeepSeekProvider", _FakeVerifier)
+
+        response = client.put("/api/v1/ai/key", json={"api_key": "sk-wrong-key-0000"})
+
+        assert response.status_code == 400
+        assert client.get("/api/v1/ai/key").json()["configured"] is False
+
+    def test_removing_the_saved_key_falls_back_to_the_env_key(self, client, monkeypatch):
+        monkeypatch.setattr(sys.modules["app.api.v1.ai.router"], "DeepSeekProvider", _FakeVerifier)
+        client.put("/api/v1/ai/key", json={"api_key": "sk-live-abcdef123456"})
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-key-987654")
+        get_settings.cache_clear()
+
+        body = client.delete("/api/v1/ai/key").json()
+
+        assert body["source"] == "environment"
+        assert body["masked"] == "sk-…7654"

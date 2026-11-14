@@ -56,9 +56,11 @@ def _company(client: TestClient, name: str = "Test Co") -> dict[str, Any]:
 
 
 def _document(client: TestClient, company_id: str) -> dict[str, Any]:
+    # Unique bytes per call: an identical file is (rightly) treated as a re-upload.
+    content = PDF_BYTES + f"\n%{uuid.uuid4()}\n".encode()
     response = client.post(
         f"{_base(company_id)}/documents",
-        files={"file": ("statement.pdf", PDF_BYTES, "application/pdf")},
+        files={"file": ("statement.pdf", content, "application/pdf")},
     )
     assert response.status_code == 201, response.text
     return response.json()
@@ -606,6 +608,30 @@ def test_list_transactions_filtered_by_date(client: TestClient) -> None:
     assert len(filtered.json()) == 1
 
 
+def test_statement_reports_its_real_transaction_span(client: TestClient) -> None:
+    """Client report: the statement dropdown showed every month because
+    Tally-synced statements declare the whole FY. The real span comes from the
+    transactions."""
+    company = _company(client)
+    account = _account(client, company["id"])
+    statement = _statement(
+        client,
+        company["id"],
+        account["id"],
+        statement_start_date="2026-04-01",
+        statement_end_date="2027-03-31",
+    ).json()
+    empty = _statement(client, company["id"], account["id"]).json()
+    _transaction(client, company["id"], statement["id"], transaction_date="2026-05-14")
+    _transaction(client, company["id"], statement["id"], transaction_date="2026-08-31")
+
+    listed = {s["id"]: s for s in client.get(_statements(company["id"])).json()}
+
+    assert listed[statement["id"]]["first_transaction_date"] == "2026-05-14"
+    assert listed[statement["id"]]["last_transaction_date"] == "2026-08-31"
+    assert listed[empty["id"]]["first_transaction_date"] is None
+
+
 def test_transaction_decimal_precision_is_exact(client: TestClient, db: Session) -> None:
     """Two decimal places survive the round trip with no float drift."""
     company = _company(client)
@@ -911,6 +937,143 @@ def test_ingest_matches_account_by_detected_number(
     assert statement["bank_account_id"] == target["id"]
 
 
+def test_ingest_matches_account_by_bank_name_despite_suffix(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Statement says "HDFC BANK LIMITED", Tally says "HDFC Bank Ltd": still a match."""
+    _use_extractor(
+        monkeypatch,
+        _FakeIngestExtractor(bank_name="HDFC BANK LIMITED", account_number="99902022022001"),
+    )
+    company = _company(client)
+    target = _account(client, company["id"], bank_name="HDFC Bank Ltd", number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="HSBC Bank Ltd", number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="ICICI Bank Capital Account", number="TALLY-IMPORT")
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is not None, body
+    statement = client.get(
+        f"{_statements(company['id'])}/{body['statement_id']}"
+    ).json()
+    assert statement["bank_account_id"] == target["id"]
+
+
+@pytest.mark.parametrize(
+    ("printed", "ledger"),
+    [
+        ("STATE BANK OF INDIA", "SBI Current A/c"),
+        ("The Hongkong and Shanghai Banking Corporation Limited", "HSBC Bank Ltd"),
+        ("Bank of Baroda", "BOB AC 29040200013038"),
+        ("Kotak Mahindra Bank Ltd.", "Kotak Bank"),
+        ("ICICI BANK LIMITED", "ICICI Bank Capital Account"),
+    ],
+)
+def test_ingest_matches_full_bank_name_to_short_ledger(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, printed: str, ledger: str
+) -> None:
+    """Statements print the full legal name; Tally ledgers use the short one."""
+    _use_extractor(monkeypatch, _FakeIngestExtractor(bank_name=printed))
+    company = _company(client)
+    target = _account(client, company["id"], bank_name=ledger, number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="Axis Bank Ltd", number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="Enkash Card Main Card", number="TALLY-IMPORT")
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is not None, body
+    statement = client.get(f"{_statements(company['id'])}/{body['statement_id']}").json()
+    assert statement["bank_account_id"] == target["id"]
+
+
+def test_ingest_parks_when_name_fits_two_accounts(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HDFC bank account and HDFC credit card: never guess between them."""
+    _use_extractor(monkeypatch, _FakeIngestExtractor(bank_name="HDFC BANK LIMITED"))
+    company = _company(client)
+    _account(client, company["id"], bank_name="HDFC Bank Ltd", number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="HDFC Credit Card", number="TALLY-IMPORT")
+    document = _document(client, company["id"])
+
+    body = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}"
+    ).json()
+    assert body["statement_id"] is None
+    assert body["reason"] == "BANK_ACCOUNT_UNMATCHED"
+    assert "HDFC BANK LIMITED" in body["message"]
+
+
+def test_ingest_learns_account_number_for_next_month(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name match stores the statement's number on a Tally placeholder account,
+    so a later statement with an unhelpful name still lands on the right account."""
+    company = _company(client)
+    target = _account(client, company["id"], bank_name="HDFC Bank Ltd", number="TALLY-IMPORT")
+    _account(client, company["id"], bank_name="HSBC Bank Ltd", number="TALLY-IMPORT")
+
+    _use_extractor(
+        monkeypatch,
+        _FakeIngestExtractor(bank_name="HDFC BANK LIMITED", account_number="99902022022001"),
+    )
+    first = client.post(
+        f"{_statements(company['id'])}/ingest-document/{_document(client, company['id'])['id']}"
+    ).json()
+    assert first["statement_id"] is not None, first
+
+    _use_extractor(
+        monkeypatch, _FakeIngestExtractor(bank_name="Unknown", account_number="XXXX2001")
+    )
+    second = client.post(
+        f"{_statements(company['id'])}/ingest-document/{_document(client, company['id'])['id']}"
+    ).json()
+    assert second["statement_id"] is not None, second
+    statement = client.get(f"{_statements(company['id'])}/{second['statement_id']}").json()
+    assert statement["bank_account_id"] == target["id"]
+
+
+def test_ingest_retry_with_chosen_account(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After an unmatched read the user picks the account and the retry succeeds."""
+    _use_extractor(
+        monkeypatch, _FakeIngestExtractor(bank_name="Some Bank", account_number="55554444")
+    )
+    company = _company(client)
+    _account(client, company["id"], bank_name="HDFC Bank Ltd", number="TALLY-IMPORT")
+    chosen = _account(client, company["id"], bank_name="Mysa Main Account", number="TALLY-IMPORT")
+    document = _document(client, company["id"])
+    url = f"{_statements(company['id'])}/ingest-document/{document['id']}"
+
+    assert client.post(url).json()["reason"] == "BANK_ACCOUNT_UNMATCHED"
+    body = client.post(url, params={"bank_account_id": chosen["id"]}).json()
+    assert body["statement_id"] is not None, body
+    statement = client.get(f"{_statements(company['id'])}/{body['statement_id']}").json()
+    assert statement["bank_account_id"] == chosen["id"]
+
+
+def test_ingest_rejects_another_companys_account(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _use_extractor(monkeypatch, _FakeIngestExtractor(bank_name="HDFC"))
+    company = _company(client)
+    other = _company(client, name="Other Co")
+    foreign = _account(client, other["id"])
+    document = _document(client, company["id"])
+
+    response = client.post(
+        f"{_statements(company['id'])}/ingest-document/{document['id']}",
+        params={"bank_account_id": foreign["id"]},
+    )
+    assert response.status_code == 404
+    assert client.get(_statements(company["id"])).json() == []
+
+
 def test_ingest_parks_when_account_cannot_be_matched(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1126,3 +1289,24 @@ def test_legal_status_transitions_are_enforced() -> None:
         assert_transition_allowed("UPLOADED", "PROCESSED")
     with pytest.raises(BankTransitionError):
         assert_transition_allowed("PROCESSED", "UPLOADED")
+
+def test_ingest_refuses_identical_file_already_made_a_statement(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same statement uploaded twice must not double every transaction."""
+    _use_extractor(monkeypatch, _FakeIngestExtractor(bank_name="HDFC Bank"))
+    company = _company(client)
+    _account(client, company["id"])
+    same = PDF_BYTES + b"\n%same-statement\n"
+    url = f"{_base(company['id'])}/documents"
+    first = client.post(url, files={"file": ("hdfc.pdf", same, "application/pdf")}).json()
+    second = client.post(url, files={"file": ("hdfc (1).pdf", same, "application/pdf")}).json()
+
+    ok = client.post(f"{_statements(company['id'])}/ingest-document/{first['id']}").json()
+    assert ok["statement_id"] is not None
+    dup = client.post(f"{_statements(company['id'])}/ingest-document/{second['id']}").json()
+
+    assert dup["statement_id"] is None
+    assert dup["reason"] == "DUPLICATE_DOCUMENT"
+    assert "hdfc.pdf" in dup["message"]
+    assert len(client.get(_statements(company["id"])).json()) == 1

@@ -84,7 +84,8 @@ def test_create_vendor_only_requires_name(client: TestClient) -> None:
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["gstin"] is None
-    assert body["parent_group"] is None
+    # The vendor's creditor ledger is created in Tally under Sundry Creditors.
+    assert body["parent_group"] == "Sundry Creditors"
 
 
 # --- 3 & 4. company_id is mandatory and not spoofable ----------------------

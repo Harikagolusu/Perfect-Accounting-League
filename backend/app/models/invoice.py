@@ -27,7 +27,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, func
+from sqlalchemy import Date, DateTime, Enum as SAEnum, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -199,6 +199,9 @@ class Invoice(Base):
     vendor_gstin: Mapped[str | None] = mapped_column(String(15))
     vendor_pan: Mapped[str | None] = mapped_column(String(10))
     buyer_gstin: Mapped[str | None] = mapped_column(String(15))
+    # The bill-to name as printed, to warn when the invoice is not addressed
+    # to this company.
+    buyer_name: Mapped[str | None] = mapped_column(String(255))
     # The GST place of supply as printed on the invoice. It cannot be derived
     # from the buyer's GSTIN without guessing, which the export must not do.
     place_of_supply: Mapped[str | None] = mapped_column(String(128))
@@ -207,6 +210,9 @@ class Invoice(Base):
     currency: Mapped[str] = mapped_column(
         String(3), nullable=False, default="INR", server_default="INR"
     )
+    # INR per one unit of `currency`, for a foreign-currency invoice. Entered by
+    # a reviewer, or the ECB reference rate PAL fetched; null for INR.
+    exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
 
     taxable_amount: Mapped[Decimal | None] = mapped_column(MONEY)
     cgst_amount: Mapped[Decimal | None] = mapped_column(MONEY)
@@ -232,6 +238,9 @@ class Invoice(Base):
         default=InvoiceStatus.DRAFT,
         server_default=InvoiceStatus.DRAFT.value,
     )
+    #: Why the last extraction failed or needs a person, in plain words, so the
+    #: inbox can say it after a refresh. Null when processed cleanly.
+    extraction_message: Mapped[str | None] = mapped_column(Text)
     source: Mapped[InvoiceSource] = mapped_column(
         INVOICE_SOURCE_ENUM,
         nullable=False,

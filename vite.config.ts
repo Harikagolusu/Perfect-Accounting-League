@@ -12,4 +12,8 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  // Allow the dev server to be reached through a public tunnel (cloudflared) so
+  // a client can open it from their machine. Dev-server only; has no effect on
+  // the production build.
+  vite: { server: { allowedHosts: true } },
 });

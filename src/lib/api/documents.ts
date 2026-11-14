@@ -139,10 +139,11 @@ export const documentsApi = {
         batch_code: filters.batchCode,
       },
     ),
-  upload: (companyId: string, file: File, batchCode?: string) => {
+  upload: (companyId: string, file: File, batchCode?: string, documentType?: DocumentType) => {
     const body = new FormData();
     body.append("file", file);
     if (batchCode) body.append("batch_code", batchCode);
+    if (documentType) body.append("document_type", documentType);
     return apiFetch<DocumentDto>(base(companyId), { method: "POST", body });
   },
   /** Inline URL for an iframe/image preview of the stored file. */

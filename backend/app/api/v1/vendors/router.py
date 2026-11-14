@@ -16,7 +16,9 @@ from app.core.database import get_db
 from app.models.vendor import Vendor
 from app.schemas.vendor import VendorCreate, VendorResponse, VendorUpdate
 from app.services.company import CompanyNotFoundError
+from app.services.ledger import LedgerSyncError
 from app.services.vendor import (
+    VendorConflictError,
     VendorNotFoundError,
     create_vendor,
     deactivate_vendor,
@@ -59,6 +61,14 @@ def post_vendor(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Company not found"
         ) from None
+    except VendorConflictError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except LedgerSyncError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+        ) from exc
 
 
 @router.get("", response_model=list[VendorResponse], summary="List a company's vendors")

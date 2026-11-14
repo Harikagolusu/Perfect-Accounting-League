@@ -18,6 +18,8 @@ from app.models.bank import (
     TransactionType,
 )
 from app.models.company import Company, CompanyStatus
+from app.models.app_secret import AppSecret
+from app.models.company_settings import CompanySettings
 from app.models.document import Document, DocumentStatus, DocumentType
 from app.models.invoice import Invoice, InvoiceDirection, InvoiceSource, InvoiceStatus
 from app.models.invoice_line_item import InvoiceLineItem
@@ -46,6 +48,8 @@ __all__ = [
     "BankStatementStatus",
     "BankTransaction",
     "Company",
+    "AppSecret",
+    "CompanySettings",
     "CompanyStatus",
     "Document",
     "DocumentStatus",

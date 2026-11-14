@@ -40,9 +40,10 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    select,
 )
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, column_property, mapped_column
 
 from app.core.database import Base
 
@@ -183,6 +184,8 @@ class BankStatement(Base):
         default=BankStatementStatus.UPLOADED,
         server_default=BankStatementStatus.UPLOADED.value,
     )
+    #: Why the last extraction failed or needs a person, in plain words.
+    extraction_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -291,3 +294,19 @@ class BankTransaction(Base):
             f"type={self.transaction_type.value} debit={self.debit_amount} "
             f"credit={self.credit_amount}>"
         )
+
+# The real date span of a statement, from its transactions. The declared period
+# is unreliable for filtering: Tally-synced statements carry the whole financial
+# year and many uploads have no start date.
+BankStatement.first_transaction_date = column_property(
+    select(func.min(BankTransaction.transaction_date))
+    .where(BankTransaction.bank_statement_id == BankStatement.id)
+    .correlate_except(BankTransaction)
+    .scalar_subquery()
+)
+BankStatement.last_transaction_date = column_property(
+    select(func.max(BankTransaction.transaction_date))
+    .where(BankTransaction.bank_statement_id == BankStatement.id)
+    .correlate_except(BankTransaction)
+    .scalar_subquery()
+)

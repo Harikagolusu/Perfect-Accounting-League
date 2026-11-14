@@ -5,7 +5,7 @@ import {
 } from "@/components/ui/sidebar";
 import { NAV } from "./nav";
 import { useStore } from "@/lib/store";
-import { ShieldCheck } from "lucide-react";
+import { ShieldCheck, User } from "lucide-react";
 
 export function PalMonogram({ className = "h-8 w-8" }: { className?: string }) {
   return (
@@ -24,6 +24,15 @@ export function AppSidebar() {
   const { role } = useStore();
   const isActive = (url: string) => (url === "/" ? path === "/" : path === url || path.startsWith(url + "/"));
 
+  // Viewer sees only the read-only modules; Partner and Accountant see everything.
+  const VIEWER_URLS = new Set(["/", "/inbox", "/reports"]);
+  const groups =
+    role === "Viewer"
+      ? NAV.map((g) => ({ ...g, items: g.items.filter((i) => VIEWER_URLS.has(i.url)) })).filter(
+          (g) => g.items.length,
+        )
+      : NAV;
+
   return (
     <Sidebar collapsible="icon">
       <SidebarHeader className="border-b border-sidebar-border">
@@ -38,35 +47,49 @@ export function AppSidebar() {
         </Link>
       </SidebarHeader>
       <SidebarContent>
-        {NAV.map((g) => (
+        {groups.map((g) => (
           <SidebarGroup key={g.group} className="py-1">
             <SidebarGroupLabel className="text-[10px] uppercase tracking-wider text-sidebar-foreground/50">{g.group}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
-                {g.items.map((item) => {
-                  const restricted = role === "Viewer" && item.url === "/settings";
-                  return (
-                    <SidebarMenuItem key={item.url}>
-                      <SidebarMenuButton
-                        asChild
-                        isActive={isActive(item.url)}
-                        tooltip={item.title}
-                        className="data-[active=true]:bg-sidebar-primary data-[active=true]:text-sidebar-primary-foreground"
-                      >
-                        <Link to={item.url} aria-disabled={restricted}>
-                          <item.icon />
-                          <span>{item.title}</span>
-                        </Link>
-                      </SidebarMenuButton>
-                    </SidebarMenuItem>
-                  );
-                })}
+                {g.items.map((item) => (
+                  <SidebarMenuItem key={item.url}>
+                    <SidebarMenuButton
+                      asChild
+                      isActive={isActive(item.url)}
+                      tooltip={item.title}
+                      className="data-[active=true]:bg-sidebar-primary data-[active=true]:text-sidebar-primary-foreground"
+                    >
+                      <Link to={item.url}>
+                        <item.icon />
+                        <span>{item.title}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
               </SidebarMenu>
             </SidebarGroupContent>
           </SidebarGroup>
         ))}
       </SidebarContent>
       <SidebarFooter className="border-t border-sidebar-border">
+        {role === "Viewer" && (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                asChild
+                isActive={isActive("/profile")}
+                tooltip="Profile"
+                className="data-[active=true]:bg-sidebar-primary data-[active=true]:text-sidebar-primary-foreground"
+              >
+                <Link to="/profile">
+                  <User />
+                  <span>Profile</span>
+                </Link>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+        )}
         {!collapsed ? (
           <div className="flex items-center gap-2 px-1 py-1 text-[11px] text-sidebar-foreground/70">
             <ShieldCheck className="h-3.5 w-3.5" /> Accuracy. Integrity. Growth.

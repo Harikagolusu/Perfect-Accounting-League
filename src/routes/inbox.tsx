@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { Eye, Loader2, Trash2 } from "lucide-react";
 import {
@@ -28,6 +28,7 @@ import { FILE_TYPE_OPTIONS, nextBatchCode } from "@/lib/api/documents";
 import { useDeleteDocument, useDocuments, useUploadDocuments } from "@/lib/queries/documents";
 import { useInvoices, useProcessDocumentsBatch, type BatchProgress } from "@/lib/queries/invoices";
 import type { DocStatus, InboxDocument } from "@/lib/types";
+import type { UiInvoice } from "@/lib/api/invoices";
 import { seo } from "@/lib/seo";
 import { toast } from "sonner";
 
@@ -42,6 +43,28 @@ const ACCEPT = ".pdf,.jpg,.jpeg,.png,.xls,.xlsx,.docx";
 const selectCls = "h-9 rounded-md border border-input bg-background px-2 text-sm";
 /** One processing batch is capped so extraction stays responsive and reviewable. */
 const MAX_BATCH = 10;
+
+/** Plain-language list of what a person must do before a Needs Review invoice is done. */
+function reviewReasons(inv: UiInvoice): string[] {
+  const reasons: string[] = [];
+  const vendor = inv.vendorName ? ` "${inv.vendorName}"` : "";
+  switch (inv.vendorMappingStatus) {
+    case "SUGGESTED":
+      reasons.push(`Confirm the vendor PAL suggested for${vendor}.`);
+      break;
+    case "AMBIGUOUS":
+      reasons.push(`More than one vendor matches${vendor} — choose the right one.`);
+      break;
+    case "UNMAPPED":
+    case "REJECTED":
+      reasons.push(`Choose or create the vendor for${vendor}.`);
+      break;
+  }
+  if (inv.extractionMessage) reasons.push(inv.extractionMessage);
+  reasons.push(...inv.validationIssues.filter((i) => i !== inv.extractionMessage));
+  if (!reasons.length) reasons.push("Check the extracted details and approve.");
+  return reasons;
+}
 
 function InboxPage() {
   const s = useStore();
@@ -70,20 +93,21 @@ function InboxPage() {
     }[]
   >([]);
 
-  const docs = data ?? [];
+  // Bank statements are uploaded and handled on the Bank Statements page.
+  const docs = (data ?? []).filter((d) => d.documentType !== "Bank Statement");
 
   // Extraction only sets a document to "Extracted"; whether it is fully done or
   // still needs a human is the invoice's (and its voucher's) verdict, so the row
   // status is read from the linked invoice. This survives a refresh because the
   // invoice status is persisted in the backend.
-  const invStatusByDoc = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const i of invoices ?? []) m.set(i.documentId, i.status);
+  const invoiceByDoc = useMemo(() => {
+    const m = new Map<string, UiInvoice>();
+    for (const i of invoices ?? []) m.set(i.documentId, i);
     return m;
   }, [invoices]);
   const displayStatus = (d: InboxDocument): DocStatus => {
     if (d.status === "Extracted") {
-      const inv = invStatusByDoc.get(d.id);
+      const inv = invoiceByDoc.get(d.id)?.status;
       if (inv === "NEEDS_REVIEW") return "Needs Review";
       if (inv === "FAILED") return "Failed";
     }
@@ -168,6 +192,13 @@ function InboxPage() {
   };
 
   const onDelete = async (doc: InboxDocument) => {
+    const linked = invoiceByDoc.get(doc.id);
+    const ok = window.confirm(
+      linked
+        ? `Delete "${doc.name}"? Its extracted invoice and draft voucher in Invoice Processing will be deleted too. This cannot be undone.`
+        : `Delete "${doc.name}"? This cannot be undone.`,
+    );
+    if (!ok) return;
     try {
       await remove.mutateAsync(doc.id);
       toast.success(`${doc.name} deleted`);
@@ -430,7 +461,50 @@ function InboxPage() {
               {
                 key: "status",
                 header: "Status",
-                cell: (r) => <StatusBadge status={displayStatus(r)} />,
+                cell: (r) => {
+                  const ds = displayStatus(r);
+                  const inv = invoiceByDoc.get(r.id);
+                  if (ds === "Failed")
+                    return (
+                      <div className="space-y-1">
+                        <StatusBadge status={ds} />
+                        <p className="text-xs text-muted-foreground">
+                          {inv?.extractionMessage ??
+                            "PAL couldn't read this file (unclear scan, password-protected or not an invoice)."}{" "}
+                          Delete it and upload a clearer copy
+                          {inv ? ", or enter the details by hand." : "."}
+                        </p>
+                        {inv && (
+                          <Link
+                            to="/invoices"
+                            search={{ inv: inv.id }}
+                            className="text-xs font-medium text-primary hover:underline"
+                          >
+                            Enter in Invoice Processing →
+                          </Link>
+                        )}
+                      </div>
+                    );
+                  if (ds !== "Needs Review" || !inv) return <StatusBadge status={ds} />;
+                  const reasons = reviewReasons(inv);
+                  return (
+                    <div className="space-y-1">
+                      <StatusBadge status={ds} />
+                      <ul className="list-disc pl-4 text-xs text-muted-foreground">
+                        {reasons.map((reason) => (
+                          <li key={reason}>{reason}</li>
+                        ))}
+                      </ul>
+                      <Link
+                        to="/invoices"
+                        search={{ inv: inv.id }}
+                        className="text-xs font-medium text-primary hover:underline"
+                      >
+                        Fix in Invoice Processing →
+                      </Link>
+                    </div>
+                  );
+                },
               },
               {
                 key: "actions",

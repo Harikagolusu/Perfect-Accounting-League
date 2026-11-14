@@ -8,8 +8,9 @@ and `NEEDS_REVIEW`; it is never replaced with a guessed ledger or amount.
 
 from __future__ import annotations
 
+import re
 import uuid
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -29,7 +30,7 @@ from app.models.voucher import (
     VoucherStatus,
     VoucherType,
 )
-from app.schemas.voucher import VoucherLineInput
+from app.schemas.voucher import LedgerSuggestion, VoucherLineInput
 from app.services.accounting_audit import record_event
 from app.services.bank import (
     BankAccountNotFoundError,
@@ -43,6 +44,8 @@ from app.services.ledger_suggestion import (
     suggest_for_bank_transaction,
     suggest_for_invoice,
 )
+from app.services.fx_rate import fetch_inr_rate
+from app.services.tds_suggestion import suggest_tds
 from app.services.voucher import (
     make_line_from_input,
     next_voucher_number,
@@ -104,7 +107,11 @@ def _line_from_suggestion(
 
 
 def _invoice_line_plan(
-    invoice: Invoice, *, is_sales: bool, main_purpose: str
+    invoice: Invoice,
+    *,
+    is_sales: bool,
+    main_purpose: str,
+    tds_amount: Decimal | None = None,
 ) -> list[tuple[str, VoucherSide, Decimal, str]]:
     """The ordered (purpose, side, amount, line_type) a voucher gets.
 
@@ -112,6 +119,7 @@ def _invoice_line_plan(
     maps an existing line back to the purpose that created it instead of
     re-guessing from the amount — CGST and SGST are routinely equal.
     Zero and missing amounts produce no line, exactly as the builder does.
+    TDS (purchases only) is credited separately and the party gets the rest.
     """
     tax_side = VoucherSide.CR if is_sales else VoucherSide.DR
     plan: list[tuple[str, VoucherSide, Decimal | None, str]] = []
@@ -137,7 +145,11 @@ def _invoice_line_plan(
         plan.append(("ROUND_OFF", side, abs(invoice.round_off), "LEDGER"))
 
     if not is_sales:
-        plan.append(("PARTY", VoucherSide.CR, invoice.total_amount, "LEDGER"))
+        party_amount = invoice.total_amount
+        if tds_amount and party_amount is not None:
+            plan.append(("TDS", VoucherSide.CR, tds_amount, "TAX"))
+            party_amount = party_amount - tds_amount
+        plan.append(("PARTY", VoucherSide.CR, party_amount, "LEDGER"))
 
     return [
         (purpose, side, amount, line_type)
@@ -166,11 +178,28 @@ def refresh_invoice_voucher_ledgers(
     invoice = db.get(Invoice, voucher.source_id)
     if invoice is None or invoice.company_id != company_id:
         return 0
+    if (invoice.currency or "INR").upper() != "INR":
+        if invoice.exchange_rate is None:
+            return 0
+        # Match the plan against the INR amounts the draft was built from.
+        invoice = _in_inr(db, invoice, [])
 
     is_sales = invoice.direction is InvoiceDirection.SALES
     main_purpose = "SALES" if is_sales else "EXPENSE"
-    plan = _invoice_line_plan(invoice, is_sales=is_sales, main_purpose=main_purpose)
     lines = sorted(voucher.lines, key=lambda line: line.line_number)
+    # A purchase credits only TDS as a tax line; reuse the draft's own amount
+    # rather than asking for a fresh suggestion that might differ.
+    tds_amount = (
+        None
+        if is_sales
+        else sum(
+            (l.amount for l in lines if l.line_type == "TAX" and l.side is VoucherSide.CR),
+            ZERO,
+        )
+    )
+    plan = _invoice_line_plan(
+        invoice, is_sales=is_sales, main_purpose=main_purpose, tds_amount=tds_amount
+    )
     # A hand-edited voucher no longer matches the plan; leave it alone.
     if len(plan) != len(lines):
         return 0
@@ -217,6 +246,110 @@ def refresh_invoice_voucher_ledgers(
     db.commit()
     db.refresh(voucher)
     return filled
+
+
+class _InrView:
+    """An invoice with its money fields converted to INR; all else passes through."""
+
+    def __init__(self, invoice: Invoice, amounts: dict[str, Decimal | None]) -> None:
+        self._invoice = invoice
+        self.__dict__.update(amounts)
+
+    def __getattr__(self, name: str):
+        return getattr(self._invoice, name)
+
+
+_INR_FIELDS = ("taxable_amount", "cgst_amount", "sgst_amount", "igst_amount", "cess_amount", "round_off")
+
+
+#: Words that say nothing about which company a bill is addressed to.
+_GENERIC_NAME_WORDS = frozenset(
+    {
+        "private", "limited", "limted", "pvt", "ltd", "llp", "company", "the", "and",
+        "india", "from", "insurance", "services", "solutions", "technologies",
+    }
+)
+
+
+def _name_words(text: str | None) -> set[str]:
+    return {
+        word
+        for word in re.findall(r"[a-z]+", (text or "").lower())
+        if len(word) >= 3 and word not in _GENERIC_NAME_WORDS
+    }
+
+
+def _bill_to_issues(company: Company, invoice: Invoice) -> list[VoucherIssue]:
+    """Warn when a purchase invoice is billed to someone other than this company.
+
+    The GSTIN is decisive when both are known; the same PAN (another state's
+    GSTIN of this company) still counts as ours. Otherwise the printed bill-to
+    name must share a distinctive word with the company name.
+    """
+    mismatch = None
+    if invoice.buyer_gstin and company.gstin:
+        if invoice.buyer_gstin[2:12].upper() != company.gstin[2:12].upper():
+            mismatch = f"GSTIN {invoice.buyer_gstin}"
+    elif invoice.buyer_name:
+        ours = _name_words(company.name) | _name_words(company.legal_name)
+        if ours and not (ours & _name_words(invoice.buyer_name)):
+            mismatch = f"'{invoice.buyer_name}'"
+    if mismatch is None:
+        return []
+    return [
+        VoucherIssue(
+            "BILL_TO_MISMATCH",
+            f"This invoice is billed to {mismatch}, not to {company.legal_name or company.name}. "
+            "Check it belongs to this company before approving.",
+            "Bill To",
+            severity="WARNING",
+        )
+    ]
+
+
+def _in_inr(db: Session, invoice: Invoice, issues: list[VoucherIssue]) -> _InrView:
+    """Convert a foreign-currency invoice to INR at its rate.
+
+    Uses the reviewer's rate, else fetches the ECB reference rate for the
+    invoice date and stores it on the invoice. No rate means no voucher: PAL
+    will not book foreign amounts as rupees.
+    """
+    currency = invoice.currency.upper()
+    rate = invoice.exchange_rate
+    source = "rate entered on the invoice"
+    if rate is None:
+        rate = fetch_inr_rate(currency, invoice.invoice_date)
+        if rate is None:
+            raise VoucherValidationError(
+                "MISSING_EXCHANGE_RATE",
+                f"The invoice is in {currency}. Enter its INR exchange rate on the "
+                "invoice to build the voucher.",
+            )
+        invoice.exchange_rate = rate
+        source = f"ECB reference rate for {invoice.invoice_date.isoformat()}"
+
+    def inr(value: Decimal | None) -> Decimal | None:
+        return None if value is None else (value * rate).quantize(Decimal("0.01"), ROUND_HALF_UP)
+
+    amounts = {field: inr(getattr(invoice, field)) for field in _INR_FIELDS}
+    parts = sum((v for v in amounts.values() if v is not None), ZERO)
+    total = inr(invoice.total_amount)
+    # Converting each figure separately can drift a few paise from the total;
+    # keep the voucher balanced on the converted parts.
+    if total is not None and abs(total - parts) <= Decimal("0.05"):
+        total = parts
+    amounts["total_amount"] = total
+    issues.append(
+        VoucherIssue(
+            "FOREIGN_CURRENCY",
+            f"{currency} {invoice.total_amount} converted at ₹{rate.normalize():f} per "
+            f"{currency} ({source}) = ₹{total}. Confirm the rate before approval; an "
+            "import of services may also need reverse-charge GST.",
+            "Exchange Rate",
+            severity="WARNING",
+        )
+    )
+    return _InrView(invoice, amounts)
 
 
 def _existing_source_voucher(
@@ -325,16 +458,14 @@ def create_voucher_from_invoice(
         if invoice.vendor_id is not None
         else None
     )
+    fx_issues: list[VoucherIssue] = []
+    foreign = (invoice.currency or "INR").upper() != "INR"
+    if foreign:
+        # Books are kept in INR: every amount below is the converted one.
+        invoice = _in_inr(db, invoice, fx_issues)
     response = suggest_for_invoice(db, company_id, invoice.id)
     suggestions = _suggestion_map(response)
-    issues = _issues_from_response(response)
-
-    voucher_type = (
-        VoucherType.SALES
-        if invoice.direction is InvoiceDirection.SALES
-        else VoucherType.PURCHASE
-    )
-    is_sales = voucher_type is VoucherType.SALES
+    issues = _issues_from_response(response) + fx_issues
     invoice_items = list(
         db.scalars(
             select(InvoiceLineItem)
@@ -345,13 +476,45 @@ def create_voucher_from_invoice(
             .order_by(InvoiceLineItem.line_number)
         ).all()
     )
+
+    expense = suggestions.get("EXPENSE")
+    tds, tds_issues = suggest_tds(
+        db,
+        company_id,
+        invoice,
+        items=invoice_items,
+        vendor_name=vendor.name if vendor is not None else invoice.vendor_name,
+        expense_ledger=expense.ledger_name if expense is not None else None,
+    )
+    issues.extend(
+        VoucherIssue(code=i.code, message=i.message, field=i.field, severity=i.severity)
+        for i in tds_issues
+    )
+    if tds is not None:
+        suggestions["TDS"] = LedgerSuggestion(
+            purpose="TDS",
+            ledger_id=tds.ledger.id if tds.ledger else None,
+            ledger_name=tds.ledger.name if tds.ledger else None,
+            source="TDS_" + tds.source,
+            reason=tds.reason,
+        )
+
+    voucher_type = (
+        VoucherType.SALES
+        if invoice.direction is InvoiceDirection.SALES
+        else VoucherType.PURCHASE
+    )
+    is_sales = voucher_type is VoucherType.SALES
     # One expense/income ledger line per invoice item, but only when every item
     # has a taxable amount and they sum exactly to the invoice taxable amount —
     # then the split totals the same, so the voucher balances identically to the
     # invoice. Otherwise fall back to a single aggregate line.
+    # Item amounts stay in the invoice currency, so a converted invoice is
+    # never split per item and carries no item fields.
     expense_items = (
         invoice_items
-        if len(invoice_items) >= 2
+        if not foreign
+        and len(invoice_items) >= 2
         and invoice.taxable_amount is not None
         and all(item.taxable_amount is not None for item in invoice_items)
         and sum((item.taxable_amount for item in invoice_items), ZERO)
@@ -361,7 +524,7 @@ def create_voucher_from_invoice(
     # Single-item invoice: copy its fields onto the one aggregate line. A
     # multi-item invoice that is not split must not show one item's HSN/quantity
     # against the whole amount.
-    item_for_line = invoice_items[0] if len(invoice_items) == 1 else None
+    item_for_line = invoice_items[0] if len(invoice_items) == 1 and not foreign else None
 
     lines: list[VoucherLine] = []
     line_number = 1
@@ -385,6 +548,7 @@ def create_voucher_from_invoice(
                 side=side,
                 amount=amount,
                 line_type=line_type,
+                narration=tds.narration if purpose == "TDS" and tds else None,
                 item=item,
             )
         )
@@ -409,9 +573,14 @@ def create_voucher_from_invoice(
                 "Total Amount",
             )
         )
+    if not is_sales:
+        issues.extend(_bill_to_issues(company, invoice))
 
     for purpose, side, amount, line_type in _invoice_line_plan(
-        invoice, is_sales=is_sales, main_purpose=main_purpose
+        invoice,
+        is_sales=is_sales,
+        main_purpose=main_purpose,
+        tds_amount=tds.amount if tds else None,
     ):
         if purpose not in suggestions:
             if line_type == "TAX":

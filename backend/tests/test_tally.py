@@ -113,7 +113,10 @@ class TestXmlBuilders:
         payload = build_ledger_collection_request("PAL & Co")
         assert "<SVCURRENTCOMPANY>PAL &amp; Co</SVCURRENTCOMPANY>" in payload
         assert "<TYPE>Ledger</TYPE>" in payload
-        assert "<FETCH>Name, Parent</FETCH>" in payload
+        assert (
+            "<FETCH>Name, Parent, ClosingBalance, PARTYGSTIN, LEDGSTREGDETAILS.LIST</FETCH>"
+            in payload
+        )
 
     def test_ledger_request_can_omit_company(self):
         assert "SVCURRENTCOMPANY" not in build_ledger_collection_request()
@@ -641,6 +644,332 @@ class TestTallySyncService:
         assert result.vouchers_used == 0
         assert result.outward.taxable == Decimal("0")
 
+    def test_gst_working_nets_credit_and_debit_notes(self, db: Session):
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        # A sale, a sales return (Credit Note) and a purchase return (Debit Note).
+        # Tally posts a Credit Note's output GST on the debit side and a Debit
+        # Note's input GST on the credit side, i.e. opposite a plain invoice.
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260718</DATE><VOUCHERTYPENAME>Credit Note</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>236</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-200</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-18</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-18</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260720</DATE><VOUCHERTYPENAME>Purchase</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Creditor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>590</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Purchase</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-500</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Input IGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260722</DATE><VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Creditor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-118</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Purchase</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>100</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Input IGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>18</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        assert result.vouchers_used == 4
+        # Outward reduced by the sales return, not inflated into ITC.
+        assert result.outward.taxable == Decimal("800")
+        assert result.outward.cgst == Decimal("72")
+        assert result.outward.sgst == Decimal("72")
+        # ITC reduced by the purchase return.
+        assert result.inward_itc.taxable == Decimal("400")
+        assert result.inward_itc.igst == Decimal("72")
+
+    def test_gst_working_excludes_sales_order(self, db: Session):
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        # A memorandum Sales Order carries only estimated Output GST and does not
+        # balance (no booked party line), so it is excluded. The real Sales
+        # invoice alone feeds the working.
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>5000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>450</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>450</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260716</DATE><VOUCHERTYPENAME>Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        # Only the Sales invoice counts; the unbalanced Sales Order is dropped.
+        assert result.vouchers_used == 1
+        assert result.outward.taxable == Decimal("1000")
+
+    def test_gst_working_excludes_tcs_and_round_off_from_taxable(self, db: Session):
+        """TCS/round-off are collected on top of the supply, not its value, so
+        they must not inflate the taxable total (regression: a scrap sale's TCS
+        was counted as taxable, breaking HSN-vs-Sales reconciliation)."""
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>GST Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1296.4</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Scrap Sale</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>TCS on Scrap 6CE</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>20</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Rounded Off</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>6.4</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        # Taxable is the scrap value alone; TCS 20 and round-off 6.4 are dropped.
+        assert result.outward.taxable == Decimal("1000")
+        assert result.outward.cgst == Decimal("90") and result.outward.sgst == Decimal("90")
+
+    def test_transposed_sgts_ledger_counts_as_sgst(self, db: Session):
+        """A ledger typo'd "SGTS" is still SGST, not taxable value.
+
+        The client's chart of accounts has a purchase ledger literally named
+        "SGTS 9 %". Read as taxable it inflated the base and left CGST != SGST on
+        an intra-state ITC voucher (client: GST on purchases not matching)."""
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20261013</DATE><VOUCHERTYPENAME>Excise Purchase</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>M S Industrial Services</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>18258.62</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Job Work Charges</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-15473.40</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>CGST @ 9%</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1392.61</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>SGTS 9 %</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1392.61</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>TDS on Contractors @2%-194C</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>309.47</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Rounded Off</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>0.15</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        itc = result.inward_itc
+        assert itc.cgst == Decimal("1392.61") and itc.sgst == Decimal("1392.61")
+        assert itc.taxable == Decimal("15473.40")  # SGTS no longer in the base
+
+    def test_gst_working_excludes_sales_order_even_when_balanced(self, db: Session):
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_working
+
+        company = _make_company(db)
+        # Sales/Purchase Orders are not tax invoices and must never reach the GST
+        # working, even when their entries happen to net to zero (client: the
+        # October report wrongly included Sales Orders, and in this company every
+        # order balances, so a balance test let them all through).
+        gst_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>Sales Order</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-5900</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>5000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>450</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>450</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        svc = _make_service(lambda r: httpx.Response(200, text=gst_xml))
+
+        result = compute_tally_gst_working(db, company.id, "PAL Test Company", service=svc)
+
+        assert result.success
+        assert result.vouchers_used == 0
+        assert result.outward.taxable == Decimal("0")
+        assert result.outward.cgst == Decimal("0") and result.outward.sgst == Decimal("0")
+
+    def test_gst_detail_builds_hsn_summary(self, db: Session):
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_detail
+
+        company = _make_company(db)
+        # Widget A: latest HSN 84314100. Widget B: 73181500.
+        stock_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <STOCKITEM NAME="Widget A">
+   <HSNDETAILS.LIST><APPLICABLEFROM>20230401</APPLICABLEFROM><HSNCODE>84314990</HSNCODE></HSNDETAILS.LIST>
+   <HSNDETAILS.LIST><APPLICABLEFROM>20240401</APPLICABLEFROM><HSNCODE>84314100</HSNCODE></HSNDETAILS.LIST>
+  </STOCKITEM>
+  <STOCKITEM NAME="Widget B">
+   <HSNDETAILS.LIST><APPLICABLEFROM>20240401</APPLICABLEFROM><HSNCODE>73181500</HSNCODE></HSNDETAILS.LIST>
+  </STOCKITEM>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        # Intra-state GST Sales: CGST+SGST (no IGST). Rate per item comes from the
+        # inventory line's sales ledger name.
+        voucher_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>GST Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1770</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1500</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>120</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>120</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>Widget A</STOCKITEMNAME><AMOUNT>1000</AMOUNT><BILLEDQTY> 2.00 NOS</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>GST Sales @ 18%</LEDGERNAME><AMOUNT>1000</AMOUNT></ACCOUNTINGALLOCATIONS.LIST></ALLINVENTORYENTRIES.LIST>
+   <ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>Widget B</STOCKITEMNAME><AMOUNT>500</AMOUNT><BILLEDQTY> 5.00 NOS</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>GST Sales @ 12%</LEDGERNAME><AMOUNT>500</AMOUNT></ACCOUNTINGALLOCATIONS.LIST></ALLINVENTORYENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.content.decode("utf-8")
+            return httpx.Response(
+                200, text=stock_xml if "StockItems" in body else voucher_xml
+            )
+
+        svc = _make_service(handler)
+        result = compute_tally_gst_detail(
+            db, company.id, "PAL Test Company", service=svc, with_hsn=True
+        )
+
+        assert result.success
+        rows = {row.hsn: row for row in result.hsn_rows}
+        assert set(rows) == {"84314100", "73181500"}
+        a = rows["84314100"]
+        assert a.rate == Decimal("18") and a.unit == "NOS"
+        assert a.quantity == Decimal("2") and a.taxable == Decimal("1000")
+        assert a.igst == Decimal("0")
+        assert a.cgst == Decimal("90") and a.sgst == Decimal("90")  # 1000 * 18% / 2
+        assert a.description == "Widget A"
+        b = rows["73181500"]
+        assert b.taxable == Decimal("500") and b.cgst == Decimal("30")  # 500 * 12% / 2
+
+    def test_hsn_summary_nets_credit_note(self, db: Session):
+        """A sales return (Credit Note) subtracts from its HSN group, not adds.
+
+        Tally signs the credit note's inventory amount negative and posts its GST
+        on the debit side; the HSN summary must net it once (regression: abs()*sign
+        in _accumulate_hsn, else the return is double-negated and added)."""
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_detail
+
+        company = _make_company(db)
+        stock_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <STOCKITEM NAME="Widget A">
+   <HSNDETAILS.LIST><APPLICABLEFROM>20240401</APPLICABLEFROM><HSNCODE>84314100</HSNCODE></HSNDETAILS.LIST>
+  </STOCKITEM>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+        # Sale of 2 NOS (1000) then a return of 1 NOS (-500); Credit Note GST sits
+        # on the debit side, opposite a plain invoice.
+        voucher_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>GST Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>Widget A</STOCKITEMNAME><AMOUNT>1000</AMOUNT><BILLEDQTY> 2.00 NOS</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>GST Sales @ 18%</LEDGERNAME><AMOUNT>1000</AMOUNT></ACCOUNTINGALLOCATIONS.LIST></ALLINVENTORYENTRIES.LIST>
+  </VOUCHER>
+  <VOUCHER><DATE>20260716</DATE><VOUCHERTYPENAME>Credit Note</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>590</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-500</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-45</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-45</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLINVENTORYENTRIES.LIST><STOCKITEMNAME>Widget A</STOCKITEMNAME><AMOUNT>-500</AMOUNT><BILLEDQTY> -1.00 NOS</BILLEDQTY>
+    <ACCOUNTINGALLOCATIONS.LIST><LEDGERNAME>GST Sales @ 18%</LEDGERNAME><AMOUNT>-500</AMOUNT></ACCOUNTINGALLOCATIONS.LIST></ALLINVENTORYENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.content.decode("utf-8")
+            return httpx.Response(
+                200, text=stock_xml if "StockItems" in body else voucher_xml
+            )
+
+        svc = _make_service(handler)
+        result = compute_tally_gst_detail(
+            db, company.id, "PAL Test Company", service=svc, with_hsn=True
+        )
+
+        assert result.success
+        rows = {row.hsn: row for row in result.hsn_rows}
+        a = rows["84314100"]
+        assert a.taxable == Decimal("500")   # 1000 sale - 500 return
+        assert a.quantity == Decimal("1")    # 2 - 1
+        assert a.cgst == Decimal("45") and a.sgst == Decimal("45")  # 500 * 18% / 2
+
+    def test_hsn_total_reconciles_to_sales_total(self, db: Session):
+        """HSN taxable + tax totals must equal the outward (Sales listing) totals.
+
+        A service invoice has GST but no inventory line, so it reaches the Sales
+        listing but not the stock-item HSN groups. The reconciling no-HSN row
+        closes that gap (client: HSN total and Sales listing total must match)."""
+        from decimal import Decimal
+
+        from app.services.tally_sync import compute_tally_gst_detail
+
+        company = _make_company(db)
+        stock_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"""
+        # Consultancy invoice: taxable 1000, intra-state CGST+SGST 90 each. No
+        # ALLINVENTORYENTRIES, so nothing lands in a stock-item HSN group.
+        voucher_xml = """<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>
+ <BODY><DATA><COLLECTION>
+  <VOUCHER><DATE>20260715</DATE><VOUCHERTYPENAME>GST Sales</VOUCHERTYPENAME>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Debtor</LEDGERNAME><ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-1180</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Consultancy Income</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>1000</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output CGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+   <ALLLEDGERENTRIES.LIST><LEDGERNAME>Output SGST</LEDGERNAME><ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>90</AMOUNT></ALLLEDGERENTRIES.LIST>
+  </VOUCHER>
+ </COLLECTION></DATA></BODY></ENVELOPE>"""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = request.content.decode("utf-8")
+            return httpx.Response(
+                200, text=stock_xml if "StockItems" in body else voucher_xml
+            )
+
+        svc = _make_service(handler)
+        result = compute_tally_gst_detail(
+            db, company.id, "PAL Test Company", service=svc, with_hsn=True
+        )
+
+        assert result.success
+        assert sum(r.taxable for r in result.hsn_rows) == result.outward.taxable
+        assert sum(r.cgst for r in result.hsn_rows) == result.outward.cgst
+        assert sum(r.sgst for r in result.hsn_rows) == result.outward.sgst
+        assert sum(r.igst for r in result.hsn_rows) == result.outward.igst
+        gap = {row.hsn: row for row in result.hsn_rows}[""]
+        assert gap.taxable == Decimal("1000")
+        assert gap.cgst == Decimal("90") and gap.sgst == Decimal("90")
+
     def test_repeated_sync_creates_no_duplicates(self, db: Session):
         from app.services.tally_sync import sync_tally_ledgers
 
@@ -1050,3 +1379,92 @@ def test_parse_ledgers_reads_closing_balance_magnitude() -> None:
     result = parse_ledgers(xml)
     ledger = next(item for item in result.ledgers if item.name == "HDFC Bank")
     assert ledger.closing_balance == Decimal("1854268.05")
+
+
+def test_tally_tds_working_reads_deduction(db: Session):
+    """A voucher with a TDS ledger yields a Non Salary row with base/tds/rate."""
+    from decimal import Decimal
+    from app.services.tally_sync import compute_tally_tds_working
+
+    company = _make_company(db)
+    ledger_xml = (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>"
+        "<BODY><DATA><COLLECTION>"
+        '<LEDGER NAME="Consultant LLP"><NAME>Consultant LLP</NAME>'
+        "<PARENT>Sundry Creditors</PARENT>"
+        "<INCOMETAXNUMBER>AAAPL1234C</INCOMETAXNUMBER></LEDGER>"
+        "</COLLECTION></DATA></BODY></ENVELOPE>"
+    )
+    voucher_xml = (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>"
+        "<BODY><DATA><COLLECTION>"
+        "<VOUCHER><DATE>20260915</DATE><VOUCHERTYPENAME>Journal</VOUCHERTYPENAME>"
+        "<VOUCHERNUMBER>JV-1</VOUCHERNUMBER><PARTYLEDGERNAME>Consultant LLP</PARTYLEDGERNAME>"
+        "<ALLLEDGERENTRIES.LIST><LEDGERNAME>Professional Fees</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-50000</AMOUNT></ALLLEDGERENTRIES.LIST>"
+        "<ALLLEDGERENTRIES.LIST><LEDGERNAME>Consultant LLP</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>45000</AMOUNT></ALLLEDGERENTRIES.LIST>"
+        "<ALLLEDGERENTRIES.LIST><LEDGERNAME>TDS on Professional Fees</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>5000</AMOUNT></ALLLEDGERENTRIES.LIST>"
+        "</VOUCHER>"
+        "</COLLECTION></DATA></BODY></ENVELOPE>"
+    )
+    seq = [ledger_xml, voucher_xml]
+    calls = {"i": 0}
+
+    def handler(_req):
+        i = min(calls["i"], len(seq) - 1)
+        calls["i"] += 1
+        return httpx.Response(200, text=seq[i])
+
+    svc = _make_service(handler)
+    result = compute_tally_tds_working(db, company.id, "Test Co Ltd", service=svc)
+
+    assert result.success
+    assert result.vouchers_used == 1
+    row = result.lines[0]
+    assert row.party_name == "Consultant LLP"
+    assert row.pan == "AAAPL1234C"
+    assert row.section == "194J"
+    assert row.base == Decimal("50000")
+    assert row.tds == Decimal("5000")
+    assert row.rate == Decimal("0.1")
+    assert row.status == "Pending"
+    assert result.total_tds == Decimal("5000")
+
+
+def test_tally_tds_working_skips_payment_voucher(db: Session):
+    """A TDS payment (TDS Dr, Bank Cr) has no expense base and is skipped."""
+    from decimal import Decimal
+    from app.services.tally_sync import compute_tally_tds_working
+
+    company = _make_company(db)
+    empty_ledgers = (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>"
+        "<BODY><DATA><COLLECTION></COLLECTION></DATA></BODY></ENVELOPE>"
+    )
+    voucher_xml = (
+        "<ENVELOPE><HEADER><VERSION>1</VERSION><STATUS>1</STATUS></HEADER>"
+        "<BODY><DATA><COLLECTION>"
+        "<VOUCHER><DATE>20260920</DATE><VOUCHERTYPENAME>Payment</VOUCHERTYPENAME>"
+        "<ALLLEDGERENTRIES.LIST><LEDGERNAME>TDS Payable</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>Yes</ISDEEMEDPOSITIVE><AMOUNT>-5000</AMOUNT></ALLLEDGERENTRIES.LIST>"
+        "<ALLLEDGERENTRIES.LIST><LEDGERNAME>HDFC Bank</LEDGERNAME>"
+        "<ISDEEMEDPOSITIVE>No</ISDEEMEDPOSITIVE><AMOUNT>5000</AMOUNT></ALLLEDGERENTRIES.LIST>"
+        "</VOUCHER>"
+        "</COLLECTION></DATA></BODY></ENVELOPE>"
+    )
+    seq = [empty_ledgers, voucher_xml]
+    calls = {"i": 0}
+
+    def handler(_req):
+        i = min(calls["i"], len(seq) - 1)
+        calls["i"] += 1
+        return httpx.Response(200, text=seq[i])
+
+    svc = _make_service(handler)
+    result = compute_tally_tds_working(db, company.id, "Test Co Ltd", service=svc)
+
+    assert result.success
+    assert result.vouchers_used == 0
+    assert result.total_tds == Decimal("0")

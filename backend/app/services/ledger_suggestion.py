@@ -57,10 +57,11 @@ from app.services.bank import (
 )
 from app.services.company import get_company
 from app.services.invoice import InvoiceNotFoundError, get_invoice
-from app.services.ledger import find_ledger_by_name, list_ledgers
+from app.services.ledger import find_ledger_by_name, list_ledgers, match_ledger_by_name
 from app.services.ledger_ai_suggestion import (
     suggest_bank_ledger_with_ai,
     suggest_ledger_with_ai,
+    suggest_party_ledger_with_ai,
 )
 
 ZERO = Decimal("0")
@@ -163,8 +164,14 @@ def _mapping_evidence(
     vendor_id: uuid.UUID | None,
     counterparty_name: str | None,
     narration: str | None,
+    party_ledger_name: str | None = None,
 ) -> tuple[list[AccountingMapping], bool]:
-    """Return active mappings matching the context and whether there is ambiguity."""
+    """Return active mappings matching the context and whether there is ambiguity.
+
+    `party_ledger_name` is the party's resolved Ledger Master name. Tally-history
+    mappings are keyed on it, and the printed vendor name often differs from it
+    ("Kalash Travels" against "KALASH TRAVELS PVT LTD").
+    """
     query = select(AccountingMapping).where(
         AccountingMapping.company_id == company_id,
         AccountingMapping.source_type == source_type,
@@ -187,6 +194,15 @@ def _mapping_evidence(
             (
                 AccountingMappingMatchType.COUNTERPARTY,
                 AccountingMapping.counterparty_name.ilike(counterparty_name.strip()),
+            )
+        )
+    if party_ledger_name and party_ledger_name.strip().lower() != (
+        (counterparty_name or "").strip().lower()
+    ):
+        evidence.append(
+            (
+                AccountingMappingMatchType.COUNTERPARTY,
+                AccountingMapping.counterparty_name.ilike(party_ledger_name.strip()),
             )
         )
     if narration:
@@ -271,6 +287,7 @@ def _main_invoice_suggestion(
     purpose: str,
     exceptions: list[VoucherIssueResponse],
     invoice_items: list[InvoiceLineItem],
+    party_ledger_name: str | None = None,
 ) -> LedgerSuggestion | None:
     source_type = AccountingMappingSourceType.INVOICE
     mappings, ambiguous = _mapping_evidence(
@@ -281,6 +298,7 @@ def _main_invoice_suggestion(
         vendor_id=invoice.vendor_id,
         counterparty_name=invoice.vendor_name,
         narration=invoice.invoice_number,
+        party_ledger_name=party_ledger_name,
     )
     if ambiguous:
         exceptions.append(
@@ -441,6 +459,57 @@ def suggest_for_invoice(
         ).all()
     )
 
+    party_name = vendor.creditor_ledger if vendor is not None else None
+    party = None
+    if find_ledger_by_name(db, company_id, party_name) is None:
+        # A blank or unresolved creditor ledger left the credit line empty on
+        # every new vendor. Match the party's own name inside the party group,
+        # as Tally ledger sync does, so the line starts from the real ledger.
+        party_group = "Sundry Debtors" if voucher_type is VoucherType.SALES else "Sundry Creditors"
+        for name in (party_name, vendor.name if vendor is not None else None, invoice.vendor_name):
+            ledger = match_ledger_by_name(db, company_id, name, parent_group=party_group)
+            if ledger is not None:
+                party = LedgerSuggestion(
+                    purpose="PARTY",
+                    ledger_id=ledger.id,
+                    ledger_name=ledger.name,
+                    source="MATCHED_PARTY_LEDGER",
+                    reason=f"Ledger Master {party_group} ledger matching the party name.",
+                )
+                break
+        if party is None:
+            # Abbreviations and misspellings beat name matching; let the AI
+            # pick among the closest party ledgers. A reviewer confirms it.
+            party = suggest_party_ledger_with_ai(
+                party_name=(vendor.name if vendor is not None else None)
+                or invoice.vendor_name
+                or party_name,
+                party_group=party_group,
+                ledgers=list_ledgers(db, company_id),
+            )
+            if party is not None:
+                exceptions.append(
+                    VoucherIssueResponse(
+                        code="AI_SUGGESTED_LEDGER",
+                        message=(
+                            f"Party ledger '{party.ledger_name}' was matched by AI. "
+                            "Confirm or change it before approval."
+                        ),
+                        severity="WARNING",
+                        field="PARTY",
+                    )
+                )
+    if party is None:
+        party = _configured_suggestion(
+            db,
+            company_id,
+            purpose="PARTY",
+            name=party_name,
+            source="CONFIGURED_VENDOR_LEDGER",
+            reason="Vendor Master party/creditor ledger.",
+            exceptions=exceptions,
+            field="Vendor Creditor Ledger",
+        )
     main = _main_invoice_suggestion(
         db,
         company_id,
@@ -451,21 +520,15 @@ def suggest_for_invoice(
         purpose=main_purpose,
         exceptions=exceptions,
         invoice_items=invoice_items,
+        # The resolved party ledger finds Tally-history mappings that the
+        # printed vendor name misses.
+        party_ledger_name=(
+            party.ledger_name if party is not None and party.ledger_id else None
+        ),
     )
     if main is not None:
         suggestions.append(main)
 
-    party_name = vendor.creditor_ledger if vendor is not None else None
-    party = _configured_suggestion(
-        db,
-        company_id,
-        purpose="PARTY",
-        name=party_name,
-        source="CONFIGURED_VENDOR_LEDGER",
-        reason="Vendor Master party/creditor ledger.",
-        exceptions=exceptions,
-        field="Vendor Creditor Ledger",
-    )
     if party is not None:
         suggestions.append(party)
 
@@ -713,6 +776,41 @@ def _narration_historical_bank_ledger(
     )
 
 
+def _ledger_master_bank_ledger(
+    db: Session,
+    company_id: uuid.UUID,
+    *,
+    transaction: BankTransaction,
+    exclude_tokens: frozenset[str] = frozenset(),
+    exclude_ledger: str | None = None,
+) -> LedgerSuggestion | None:
+    """Match the narration's party words to a ledger name in the ledger master.
+
+    For a company with no bank history yet. A ledger qualifies only when every
+    distinctive word of its name is in the narration ("TATA AIG General
+    Insurance Co Ltd" for "NEFT FROM TATA AIG GENERAL"), so branch ledgers
+    ("... - Assam") drop out. The most specific name wins, then the plainest.
+    """
+    narration_tokens = _identity_tokens(transaction.description) - exclude_tokens
+    if not narration_tokens:
+        return None
+    candidates = []
+    for ledger in list_ledgers(db, company_id):
+        tokens = _identity_tokens(ledger.name) - exclude_tokens
+        if tokens and tokens <= narration_tokens and ledger.name != exclude_ledger:
+            candidates.append((-len(tokens), len(ledger.name), ledger.name, ledger))
+    if not candidates:
+        return None
+    ledger = min(candidates)[3]
+    return LedgerSuggestion(
+        purpose="COUNTERPARTY",
+        ledger_id=ledger.id,
+        ledger_name=ledger.name,
+        source="LEDGER_NAME_MATCH",
+        reason=f"The narration names '{ledger.name}' from the ledger master.",
+    )
+
+
 def suggest_for_bank_transaction(
     db: Session,
     company_id: uuid.UUID,
@@ -854,7 +952,27 @@ def suggest_for_bank_transaction(
                 company_id,
                 transaction=transaction,
                 exclude_tokens=company_tokens,
+            ) or _ledger_master_bank_ledger(
+                db,
+                company_id,
+                transaction=transaction,
+                exclude_tokens=company_tokens,
+                exclude_ledger=account.ledger_name,
             )
+
+            if counterparty is not None and counterparty.source == "LEDGER_NAME_MATCH":
+                exceptions.append(
+                    VoucherIssueResponse(
+                        code="LEDGER_NAME_MATCH",
+                        message=(
+                            f"'{counterparty.ledger_name}' was matched from the bank "
+                            "narration, not from approved history. Confirm or change "
+                            "it before approval."
+                        ),
+                        severity="WARNING",
+                        field="COUNTERPARTY",
+                    )
+                )
 
         if use_ai and counterparty is None:
             ai = suggest_bank_ledger_with_ai(

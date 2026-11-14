@@ -24,7 +24,10 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from decimal import Decimal
+from difflib import SequenceMatcher
+from typing import TypeVar
 
 from sqlalchemy.orm import Session
 
@@ -34,9 +37,11 @@ from app.models.invoice_line_item import InvoiceLineItem
 from app.models.ledger import Ledger
 from app.schemas.voucher import LedgerSuggestion
 from app.services.ai import AIProviderError, get_ai_provider, get_reasoning_provider
-from app.services.ledger import is_posting_head_candidate
+from app.services.ledger import _comparison_key, is_posting_head_candidate
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 #: Upper bound on ledger names sent to the provider. A company with more active
 #: ledgers than this gets no AI suggestion rather than a silently truncated
@@ -48,11 +53,30 @@ _MAX_CANDIDATES = 300
 #: Upper bound on invoice line descriptions quoted into the prompt.
 _MAX_ITEMS = 20
 
+#: Group-name fragments that mark a plausible head, used to narrow a chart of
+#: accounts too large for one prompt.
+_HEAD_GROUP_HINTS = {
+    "EXPENSE": ("expens", "purchase", "asset", "cost"),
+    "SALES": ("sales", "income", "revenue"),
+}
+
+#: Party candidates sent to the provider: the names closest to the vendor's.
+_MAX_PARTY_CANDIDATES = 25
+
 _SYSTEM_PROMPT = (
     "You are an Indian accounting assistant. You map a purchase or sales "
     "invoice to exactly one ledger from a company's Tally ledger master. "
     "You never invent a ledger name: you may only return a name that appears "
-    "verbatim in the supplied list, or null when none of them fits."
+    "verbatim in the supplied list. Every invoice must be booked, so always "
+    "return the closest ledger; a reviewer confirms it before posting."
+)
+
+_PARTY_SYSTEM_PROMPT = (
+    "You are an Indian accounting assistant. You find the Tally party ledger "
+    "for a vendor or customer whose printed name may be abbreviated, "
+    "misspelt or missing its legal suffix. You may only return a name that "
+    "appears verbatim in the supplied list, or null when no ledger is clearly "
+    "the same business. Never pick a different business with a similar name."
 )
 
 
@@ -136,6 +160,152 @@ def _parse_choice(text: str) -> tuple[str | None, str]:
     )
 
 
+def _ask_for_ledger(
+    prompt: str, system_prompt: str, candidates: list[Ledger]
+) -> tuple[Ledger | None, str]:
+    # The provider is told to copy a name verbatim; anything that does not
+    # land on a supplied candidate is discarded, never created.
+    return _ask(prompt, system_prompt, lambda name: _resolve_choice(name, candidates))
+
+
+def _ask(
+    prompt: str,
+    system_prompt: str,
+    resolve: Callable[[str], T | None],
+    *,
+    null_is_final: bool = False,
+) -> tuple[T | None, str]:
+    """Ask the chat model, then the reasoning model when the first gives no
+    usable answer. Outages and unconfigured providers resolve to None.
+
+    `null_is_final` accepts an explicit null as the answer ("no TDS") instead
+    of asking the slower reasoning model again.
+    """
+    for provider in (get_ai_provider(), get_reasoning_provider()):
+        if not provider.is_configured():
+            continue
+        try:
+            response = provider.generate_from_text(
+                prompt,
+                system_prompt=system_prompt,
+                temperature=0.0,
+                json_mode=True,
+            )
+        except AIProviderError as exc:
+            logger.info("AI ledger suggestion unavailable: %s", exc.code)
+            continue
+        name, reason = _parse_choice(response.text)
+        if not name:
+            if null_is_final and response.text.strip():
+                return None, reason
+            continue
+        choice = resolve(name)
+        if choice is not None:
+            return choice, reason
+        logger.info("AI suggestion rejected, not a candidate: %r", name)
+    return None, ""
+
+
+_TDS_SYSTEM_PROMPT = (
+    "You are an Indian TDS assistant. Given a purchase invoice, you name the "
+    "income-tax TDS section the buyer must deduct under, or null when the "
+    "invoice is for goods or otherwise attracts no TDS. Sections: 194C "
+    "(contract work, transport, advertising, labour, printing, catering), 194J "
+    "(professional or technical services, consultancy, audit, legal, software "
+    "services), 194I (rent of land, building, machinery or equipment), 194H "
+    "(commission or brokerage)."
+)
+
+_TDS_AI_SECTIONS = ("194C", "194J", "194I", "194H")
+
+
+def suggest_tds_section_with_ai(
+    *,
+    invoice: Invoice,
+    items: list[InvoiceLineItem],
+    vendor_name: str | None,
+    expense_ledger: str | None,
+) -> tuple[str | None, str]:
+    """(section, reason) for a purchase invoice, or (None, "").
+
+    194Q is never offered: it turns on the buyer's turnover and yearly
+    purchases from the seller, which one invoice cannot show.
+    """
+    prompt = (
+        f"{_invoice_context(invoice, items, vendor_name)}\n"
+        f"Expense ledger: {expense_ledger or 'not chosen yet'}\n\n"
+        'Reply with JSON only: {"ledger_name": "<194C, 194J, 194I, 194H or '
+        'null>", "reason": "<one short sentence>"}'
+    )
+    return _ask(
+        prompt,
+        _TDS_SYSTEM_PROMPT,
+        lambda name: name.strip().upper() if name.strip().upper() in _TDS_AI_SECTIONS else None,
+        null_is_final=True,
+    )
+
+
+def _narrow_heads(candidates: list[Ledger], purpose: str) -> list[Ledger]:
+    """Fit a large chart of accounts into one prompt by keeping head groups."""
+    if len(candidates) <= _MAX_CANDIDATES:
+        return candidates
+    hints = _HEAD_GROUP_HINTS.get(purpose, ())
+    return [
+        ledger
+        for ledger in candidates
+        if any(hint in (ledger.parent_group or "").lower() for hint in hints)
+    ]
+
+
+def suggest_party_ledger_with_ai(
+    *,
+    party_name: str | None,
+    party_group: str,
+    ledgers: list[Ledger],
+) -> LedgerSuggestion | None:
+    """Match a printed party name to its Tally ledger, or return None.
+
+    Used after exact and suffix-free matching fail. Only ledgers in the party
+    group are offered, closest names first, so the answer is always a real
+    party ledger.
+    """
+    if not party_name or not party_name.strip():
+        return None
+    target = _comparison_key(party_name)
+    group = party_group.lower()
+    candidates = sorted(
+        (
+            ledger
+            for ledger in ledgers
+            if (ledger.parent_group or "").strip().lower() == group
+        ),
+        key=lambda ledger: SequenceMatcher(
+            None, target, _comparison_key(ledger.name)
+        ).ratio(),
+        reverse=True,
+    )[:_MAX_PARTY_CANDIDATES]
+    if not candidates:
+        return None
+    prompt = (
+        f"Printed party name on the invoice: {party_name.strip()}\n\n"
+        f"Candidate {party_group} ledgers:\n"
+        + "\n".join(f"- {ledger.name}" for ledger in candidates)
+        + '\n\nReply with JSON only: {"ledger_name": "<one NAME copied exactly, '
+        'or null>", "reason": "<one short sentence>"}'
+    )
+    ledger, reason = _ask_for_ledger(prompt, _PARTY_SYSTEM_PROMPT, candidates)
+    if ledger is None:
+        return None
+    return LedgerSuggestion(
+        purpose="PARTY",
+        ledger_id=ledger.id,
+        ledger_name=ledger.name,
+        source="AI_SUGGESTION",
+        reason=reason or "Matched by AI to the party's Tally ledger.",
+        code="AI_SUGGESTED_LEDGER",
+    )
+
+
 def suggest_ledger_with_ai(
     db: Session,
     company_id: uuid.UUID,
@@ -155,47 +325,29 @@ def suggest_ledger_with_ai(
     # on a live company, ~440 are creditors/debtors that can never be the head.
     # Narrowing to plausible heads keeps the choice inside the prompt budget
     # and stops a creditor being offered as an expense head.
-    candidates = [ledger for ledger in ledgers if is_posting_head_candidate(ledger)]
+    candidates = _narrow_heads(
+        [ledger for ledger in ledgers if is_posting_head_candidate(ledger)], purpose
+    )
+    # shortcut: a chart with >300 heads even after group narrowing gets no AI
+    # pick; add a retrieval pre-filter on line descriptions if one appears.
     if not candidates or len(candidates) > _MAX_CANDIDATES:
-        return None
-
-    provider = get_ai_provider()
-    if not provider.is_configured():
         return None
 
     prompt = (
         f"Pick the single best ledger for the {purpose.lower()} side of this "
-        "invoice.\n\n"
+        "invoice. Always pick one: choose the closest head even when none is "
+        "an exact fit.\n\n"
         f"{_invoice_context(invoice, items, vendor_name)}\n\n"
         "Available ledgers. Each line is '- NAME (group)'; the group is context "
         "only, never part of the name:\n"
         f"{_candidate_lines(candidates)}\n\n"
         'Reply with JSON only: {"ledger_name": "<one NAME copied exactly, '
-        'without its (group), or null>", "reason": "<one short sentence>"}'
+        'without its (group)>", "reason": "<one short sentence>"}'
     )
-
-    try:
-        response = provider.generate_from_text(
-            prompt,
-            system_prompt=_SYSTEM_PROMPT,
-            temperature=0.0,
-            json_mode=True,
-        )
-    except AIProviderError as exc:
-        # The deterministic chain already recorded why no ledger was found; an
-        # AI outage must not turn into a failed voucher creation.
-        logger.info("AI ledger suggestion unavailable: %s", exc.code)
-        return None
-
-    name, reason = _parse_choice(response.text)
-    if not name:
-        return None
-
-    # The provider is told to copy a name verbatim; anything that does not land
-    # on a supplied candidate is discarded, never created as a new ledger.
-    ledger = _resolve_choice(name, candidates)
+    # An AI outage leaves the line for the reviewer; the deterministic chain
+    # already recorded why no ledger was found.
+    ledger, reason = _ask_for_ledger(prompt, _SYSTEM_PROMPT, candidates)
     if ledger is None:
-        logger.info("AI ledger suggestion rejected, not a candidate: %r", name)
         return None
 
     return LedgerSuggestion(
@@ -297,4 +449,9 @@ def suggest_bank_ledger_with_ai(
     )
 
 
-__all__ = ["suggest_bank_ledger_with_ai", "suggest_ledger_with_ai"]
+__all__ = [
+    "suggest_bank_ledger_with_ai",
+    "suggest_ledger_with_ai",
+    "suggest_party_ledger_with_ai",
+    "suggest_tds_section_with_ai",
+]

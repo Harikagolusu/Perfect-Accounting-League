@@ -18,8 +18,11 @@ from app.api.v1.ai.router import router as ai_router
 from app.api.v1.bank.router import router as bank_router
 from app.api.v1.companies.router import router as companies_router
 from app.api.v1.documents.router import router as documents_router
+from app.api.v1.gst.router import router as gst_router
 from app.api.v1.invoices.router import router as invoices_router
 from app.api.v1.ledgers.router import router as ledgers_router
+from app.api.v1.settings.router import router as settings_router
+from app.api.v1.table_export.router import router as table_export_router
 from app.api.v1.tally.router import router as tally_router
 from app.api.v1.vendors.router import router as vendors_router
 from app.api.v1.vouchers.router import router as vouchers_router
@@ -79,6 +82,17 @@ api_router.include_router(
 api_router.include_router(
     bank_router, prefix="/companies/{company_id}", tags=["bank"]
 )
+api_router.include_router(
+    gst_router, prefix="/companies/{company_id}/gst", tags=["gst"]
+)
+api_router.include_router(
+    settings_router, prefix="/companies/{company_id}/settings", tags=["settings"]
+)
+# TDS is read live from TallyPrime (see tally router /sync/{id}/tds-working),
+# never from PAL's database.
+
+# Generic on-screen table -> .xlsx; stateless, holds no company data.
+api_router.include_router(table_export_router, prefix="/exports", tags=["exports"])
 
 # AI Provider - top-level, not company-scoped (configuration is global)
 api_router.include_router(ai_router, prefix="/ai", tags=["ai"])

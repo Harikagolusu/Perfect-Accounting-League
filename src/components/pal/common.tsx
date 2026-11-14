@@ -89,6 +89,7 @@ const STATUS_TONE: Record<string, "success" | "warning" | "danger" | "info" | "n
   Approved: "success",
   Posted: "success",
   "Posted to Tally": "success",
+  Accounted: "success",
   Matched: "success",
   Exported: "success",
   Generated: "success",
